@@ -1514,14 +1514,58 @@ fn pasteClipboard(hwnd: win32.HWND, state: *State) void {
     }));
     defer globalUnlock(hmem);
     var buf: [4096]u8 = undefined;
-    var pty_writer = pty.write.writer(&buf);
+    var pty_writer = pty.write.writerStreaming(&buf);
     pasteUtf16(state, mem, &pty_writer.interface) catch |err| switch (err) {
         error.WriteFailed => state.reportError("paste: write to pty failed with {t}", .{pty_writer.err.?}),
         error.Reported => {},
     };
 }
 
+const paste_end = "\x1b[201~";
+
+const PasteEndStripper = struct {
+    matched: usize = 0,
+
+    pub fn finish(stripper: *PasteEndStripper, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (stripper.matched != 0) {
+            try writer.writeAll(paste_end[0..stripper.matched]);
+            stripper.matched = 0;
+        }
+    }
+
+    pub fn onCodepoint(
+        stripper: *PasteEndStripper,
+        writer: *std.Io.Writer,
+        codepoint: u21,
+    ) error{WriteFailed}!enum { consumed, ignored } {
+        if (codepoint == paste_end[stripper.matched]) {
+            stripper.matched += 1;
+            // Full marker matched: drop it entirely and start over.
+            if (stripper.matched == paste_end.len) {
+                std.log.warn("stripped paste-end marker from clipboard data", .{});
+                stripper.matched = 0;
+            }
+            return .consumed;
+        }
+
+        if (stripper.matched != 0) {
+            try writer.writeAll(paste_end[0..stripper.matched]);
+            stripper.matched = 0;
+        }
+
+        if (codepoint == paste_end[0]) {
+            stripper.matched = 1;
+            return .consumed;
+        }
+        return .ignored;
+    }
+};
+
 fn pasteUtf16(state: *State, utf16: [*:0]const u16, writer: *std.Io.Writer) error{ WriteFailed, Reported }!void {
+    const bracketed = state.term.modes.get(.bracketed_paste);
+    if (bracketed) try writer.writeAll("\x1b[200~");
+    var end_stripper: PasteEndStripper = .{};
+
     var i: usize = 0;
     while (utf16[i] != 0) {
         const cp: u21 = blk: {
@@ -1547,13 +1591,21 @@ fn pasteUtf16(state: *State, utf16: [*:0]const u16, writer: *std.Io.Writer) erro
             i += 1;
             break :blk c;
         };
-        var utf8_buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &utf8_buf) catch {
-            state.reportError("paste: invalid codepoint U+{x} at index {}", .{ cp, i });
-            return error.Reported;
-        };
-        try writer.writeAll(utf8_buf[0..len]);
+
+        switch (if (bracketed) try end_stripper.onCodepoint(writer, cp) else .ignored) {
+            .consumed => {},
+            .ignored => {
+                var utf8_buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cp, &utf8_buf) catch {
+                    state.reportError("paste: invalid codepoint U+{x} at index {}", .{ cp, i });
+                    return error.Reported;
+                };
+                try writer.writeAll(utf8_buf[0..len]);
+            },
+        }
     }
+    try end_stripper.finish(writer);
+    if (bracketed) try writer.writeAll(paste_end);
     try writer.flush();
 }
 
