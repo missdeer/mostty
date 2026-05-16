@@ -563,6 +563,68 @@ fn setWindowPosRect(hwnd: win32.HWND, rect: win32.RECT) void {
     )) win32.panicWin32("SetWindowPos", win32.GetLastError());
 }
 
+const SpecialKey = union(enum) {
+    /// "\x1b[<final>" plain, "\x1b[1;<mod><final>" modified.
+    cursor: u8,
+    /// "\x1b[<num>~" plain, "\x1b[<num>;<mod>~" modified.
+    tilde: u8,
+    /// "\x1bO<final>" plain, "\x1b[1;<mod><final>" modified, note the format swap.
+    fkey14: u8,
+};
+
+fn vkToSpecial(wparam: win32.WPARAM) ?SpecialKey {
+    return switch (wparam) {
+        @intFromEnum(win32.VK_UP) => .{ .cursor = 'A' },
+        @intFromEnum(win32.VK_DOWN) => .{ .cursor = 'B' },
+        @intFromEnum(win32.VK_RIGHT) => .{ .cursor = 'C' },
+        @intFromEnum(win32.VK_LEFT) => .{ .cursor = 'D' },
+        @intFromEnum(win32.VK_HOME) => .{ .cursor = 'H' },
+        @intFromEnum(win32.VK_END) => .{ .cursor = 'F' },
+        @intFromEnum(win32.VK_INSERT) => .{ .tilde = 2 },
+        @intFromEnum(win32.VK_DELETE) => .{ .tilde = 3 },
+        @intFromEnum(win32.VK_PRIOR) => .{ .tilde = 5 },
+        @intFromEnum(win32.VK_NEXT) => .{ .tilde = 6 },
+        @intFromEnum(win32.VK_F1) => .{ .fkey14 = 'P' },
+        @intFromEnum(win32.VK_F2) => .{ .fkey14 = 'Q' },
+        @intFromEnum(win32.VK_F3) => .{ .fkey14 = 'R' },
+        @intFromEnum(win32.VK_F4) => .{ .fkey14 = 'S' },
+        @intFromEnum(win32.VK_F5) => .{ .tilde = 15 },
+        @intFromEnum(win32.VK_F6) => .{ .tilde = 17 },
+        @intFromEnum(win32.VK_F7) => .{ .tilde = 18 },
+        @intFromEnum(win32.VK_F8) => .{ .tilde = 19 },
+        @intFromEnum(win32.VK_F9) => .{ .tilde = 20 },
+        @intFromEnum(win32.VK_F10) => .{ .tilde = 21 },
+        @intFromEnum(win32.VK_F11) => .{ .tilde = 23 },
+        @intFromEnum(win32.VK_F12) => .{ .tilde = 24 },
+        else => null,
+    };
+}
+
+/// xterm modifier code per spec: 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0).
+fn xtermModifier() u8 {
+    const shift = win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0;
+    const alt = win32.GetKeyState(@intFromEnum(win32.VK_MENU)) < 0;
+    const ctrl = win32.GetKeyState(@intFromEnum(win32.VK_CONTROL)) < 0;
+    return 1 + @as(u8, if (shift) 1 else 0) + @as(u8, if (alt) 2 else 0) + @as(u8, if (ctrl) 4 else 0);
+}
+
+fn formatSpecialKey(buf: *[16]u8, key: SpecialKey, mod: u8) []const u8 {
+    return switch (key) {
+        .cursor => |final| if (mod == 1)
+            std.fmt.bufPrint(buf, "\x1b[{c}", .{final}) catch unreachable
+        else
+            std.fmt.bufPrint(buf, "\x1b[1;{d}{c}", .{ mod, final }) catch unreachable,
+        .tilde => |num| if (mod == 1)
+            std.fmt.bufPrint(buf, "\x1b[{d}~", .{num}) catch unreachable
+        else
+            std.fmt.bufPrint(buf, "\x1b[{d};{d}~", .{ num, mod }) catch unreachable,
+        .fkey14 => |final| if (mod == 1)
+            std.fmt.bufPrint(buf, "\x1bO{c}", .{final}) catch unreachable
+        else
+            std.fmt.bufPrint(buf, "\x1b[1;{d}{c}", .{ mod, final }) catch unreachable,
+    };
+}
+
 fn WndProc(
     hwnd: win32.HWND,
     msg: u32,
@@ -929,31 +991,16 @@ fn WndProc(
                 win32.invalidateHwnd(hwnd);
             }
 
-            const seq: ?[]const u8 = switch (wparam) {
-                @intFromEnum(win32.VK_BACK) => "\x7f",
-                @intFromEnum(win32.VK_UP) => "\x1b[A",
-                @intFromEnum(win32.VK_DOWN) => "\x1b[B",
-                @intFromEnum(win32.VK_RIGHT) => "\x1b[C",
-                @intFromEnum(win32.VK_LEFT) => "\x1b[D",
-                @intFromEnum(win32.VK_HOME) => "\x1b[H",
-                @intFromEnum(win32.VK_END) => "\x1b[F",
-                @intFromEnum(win32.VK_INSERT) => "\x1b[2~",
-                @intFromEnum(win32.VK_DELETE) => "\x1b[3~",
-                @intFromEnum(win32.VK_PRIOR) => "\x1b[5~", // Page Up
-                @intFromEnum(win32.VK_NEXT) => "\x1b[6~", // Page Down
-                @intFromEnum(win32.VK_F1) => "\x1bOP",
-                @intFromEnum(win32.VK_F2) => "\x1bOQ",
-                @intFromEnum(win32.VK_F3) => "\x1bOR",
-                @intFromEnum(win32.VK_F4) => "\x1bOS",
-                @intFromEnum(win32.VK_F5) => "\x1b[15~",
-                @intFromEnum(win32.VK_F6) => "\x1b[17~",
-                @intFromEnum(win32.VK_F7) => "\x1b[18~",
-                @intFromEnum(win32.VK_F8) => "\x1b[19~",
-                @intFromEnum(win32.VK_F9) => "\x1b[20~",
-                @intFromEnum(win32.VK_F10) => "\x1b[21~",
-                @intFromEnum(win32.VK_F11) => "\x1b[23~",
-                @intFromEnum(win32.VK_F12) => "\x1b[24~",
-                else => null,
+            var key_buf: [16]u8 = undefined;
+            const seq: ?[]const u8 = seq_blk: {
+                if (wparam == @intFromEnum(win32.VK_BACK)) break :seq_blk "\x7f";
+                if (wparam == @intFromEnum(win32.VK_TAB)) {
+                    break :seq_blk if (win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0) "\x1b[Z" else null;
+                }
+                if (vkToSpecial(wparam)) |key| {
+                    break :seq_blk formatSpecialKey(&key_buf, key, xtermModifier());
+                }
+                break :seq_blk null;
             };
             if (seq) |s| {
                 pty.writeFlushAll(s) catch |e| state.reportError(
@@ -980,6 +1027,8 @@ fn WndProc(
             };
             // Backspace is handled in WM_KEYDOWN (sends \x7f)
             if (char == 0x08) return 0;
+            // Shift+Tab is handled in WM_KEYDOWN (sends \x1b[Z); plain Tab falls through as \t
+            if (char == 0x09 and win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0) return 0;
             // Suppress Ctrl+Shift+V control character (paste is handled in WM_KEYDOWN)
             if (char == 0x16 and win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0) return 0;
             if (std.unicode.utf16IsHighSurrogate(char)) {
