@@ -68,6 +68,7 @@ dwrite_factory: *win32.IDWriteFactory2,
 d2d_factory: *win32.ID2D1Factory,
 text_format: *win32.IDWriteTextFormat,
 font_fallback: *win32.IDWriteFontFallback,
+rendering_params: *win32.IDWriteRenderingParams,
 dpi: u32,
 
 // DirectComposition
@@ -250,6 +251,27 @@ fn createTextFormat(
     return text_format;
 }
 
+// Custom rendering parameters so the atlas is reproducible across machines
+// and aligns with the shader's gamma 2.2 decode of the ClearType mask.
+// `enhanced_contrast=0` removes D2D's non-invertible contrast curve so the
+// stored mask is a predictable function of coverage; `RGB` stripe and
+// `NATURAL_SYMMETRIC` rendering mode pick the standard subpixel layout and
+// the best horizontal subpixel positioning (experimental — can fall back
+// to `NATURAL` if vertical edges look soft on a given monitor).
+fn buildRenderingParams(factory: *win32.IDWriteFactory) *win32.IDWriteRenderingParams {
+    var params: *win32.IDWriteRenderingParams = undefined;
+    const hr = factory.CreateCustomRenderingParams(
+        2.2,
+        0.0,
+        1.0,
+        win32.DWRITE_PIXEL_GEOMETRY_RGB,
+        win32.DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        &params,
+    );
+    if (hr < 0) fatalHr("CreateCustomRenderingParams", hr);
+    return params;
+}
+
 fn buildFontFallback(factory: *win32.IDWriteFactory2) *win32.IDWriteFontFallback {
     var builder: *win32.IDWriteFontFallbackBuilder = undefined;
     {
@@ -390,6 +412,7 @@ pub fn init(dpi: u32) D3d11Renderer {
     }
 
     const font_fallback = buildFontFallback(dwrite_factory);
+    const rendering_params = buildRenderingParams(&dwrite_factory.IDWriteFactory);
     const text_format = createTextFormat(&dwrite_factory.IDWriteFactory, dpi, font_fallback);
 
     const cell_size = measureCellSize(&dwrite_factory.IDWriteFactory, dpi);
@@ -420,6 +443,7 @@ pub fn init(dpi: u32) D3d11Renderer {
         .d2d_factory = d2d_factory,
         .text_format = text_format,
         .font_fallback = font_fallback,
+        .rendering_params = rendering_params,
         .cell_size = .{
             .cx = cell_size_xy.x,
             .cy = cell_size_xy.y,
@@ -469,6 +493,8 @@ pub fn deinit(self: *D3d11Renderer) void {
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
     _ = self.text_format.IUnknown.Release();
+    _ = self.rendering_params.IUnknown.Release();
+    _ = self.font_fallback.IUnknown.Release();
     _ = self.dwrite_factory.IUnknown.Release();
     _ = self.const_buf.IUnknown.Release();
     _ = self.pixel_shader.IUnknown.Release();
@@ -869,47 +895,24 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
             var utf16_buf: [2]u16 = undefined;
             const utf16_len = std.unicode.utf8ToUtf16Le(&utf16_buf, utf8_buf[0..utf8_len]) catch 0;
 
-            // Measure actual glyph width to scale it to the target cell width.
-            // This handles both narrow chars rendered too wide (scale down) and
-            // wide chars rendered too narrow (scale up).
+            // Render at natural advance. Fallback glyphs that don't match the
+            // cell width clip (or underfill) rather than being scaled, which
+            // would destroy hinting.
             const target_width: f32 = @floatFromInt(
                 if (key.half != .single) cs.x * @as(u16, 2) else cs.x,
             );
-            var scale_x: f32 = 1.0;
-            {
-                var text_layout: *win32.IDWriteTextLayout = undefined;
-                {
-                    const lhr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
-                        @ptrCast(utf16_buf[0..utf16_len].ptr),
-                        @intCast(utf16_len),
-                        self.text_format,
-                        std.math.floatMax(f32),
-                        std.math.floatMax(f32),
-                        &text_layout,
-                    );
-                    if (lhr < 0) fatalHr("CreateTextLayout", lhr);
-                }
-                defer _ = text_layout.IUnknown.Release();
 
-                var metrics: win32.DWRITE_TEXT_METRICS = undefined;
-                {
-                    const mhr = text_layout.GetMetrics(&metrics);
-                    if (mhr < 0) fatalHr("GetMetrics", mhr);
-                }
-                if (metrics.width > 0) {
-                    scale_x = target_width / metrics.width;
-                }
-            }
-
+            staging.render_target.SetTextRenderingParams(self.rendering_params);
+            staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
             staging.render_target.BeginDraw();
             {
-                const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+                // Opaque black background; rendering white-on-black through
+                // ClearType yields per-subpixel coverage as the stored RGB
+                // (white·cov + black·(1-cov) = cov). The shader decodes via
+                // pow(2.2) to undo D2D's gamma encode.
+                const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
                 staging.render_target.Clear(&color);
             }
-            // Scale the glyph to fit the target width
-            staging.render_target.SetTransform(&.{
-                .Anonymous = .{ .Anonymous1 = .{ .m11 = scale_x, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0 } },
-            });
             staging.render_target.DrawText(
                 @ptrCast(utf16_buf[0..utf16_len].ptr),
                 @intCast(utf16_len),
@@ -917,17 +920,13 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
                 &.{
                     .left = 0,
                     .top = 0,
-                    .right = target_width / scale_x,
+                    .right = target_width,
                     .bottom = @floatFromInt(cs.y),
                 },
                 &staging.white_brush.ID2D1Brush,
                 .{},
                 .NATURAL,
             );
-            // Reset transform to identity
-            staging.render_target.SetTransform(&.{
-                .Anonymous = .{ .Anonymous1 = .{ .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0 } },
-            });
             var tag1: u64 = undefined;
             var tag2: u64 = undefined;
             _ = staging.render_target.EndDraw(&tag1, &tag2);
@@ -1052,7 +1051,15 @@ fn createRenderTargetView(
 
     var target_view: *win32.ID3D11RenderTargetView = undefined;
     {
-        const hr = self.device.CreateRenderTargetView(&back_buffer.ID3D11Resource, null, &target_view);
+        // Swap chain is B8G8R8A8_UNORM (flip-model + DComp require it), but
+        // the RTV uses the _SRGB view so the GPU does linear→sRGB encoding
+        // on store. Shader blends in linear space.
+        const rtv_desc: win32.D3D11_RENDER_TARGET_VIEW_DESC = .{
+            .Format = .B8G8R8A8_UNORM_SRGB,
+            .ViewDimension = .TEXTURE2D,
+            .Anonymous = .{ .Texture2D = .{ .MipSlice = 0 } },
+        };
+        const hr = self.device.CreateRenderTargetView(&back_buffer.ID3D11Resource, &rtv_desc, &target_view);
         if (hr < 0) fatalHr("CreateRenderTargetView", hr);
     }
 
@@ -1137,7 +1144,7 @@ const GlyphTexture = struct {
             .Height = size.y,
             .MipLevels = 1,
             .ArraySize = 1,
-            .Format = .A8_UNORM,
+            .Format = .B8G8R8A8_UNORM,
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .Usage = .DEFAULT,
             .BindFlags = .{ .SHADER_RESOURCE = 1 },
@@ -1194,7 +1201,7 @@ const StagingTexture = struct {
                 .Height = size.y,
                 .MipLevels = 1,
                 .ArraySize = 1,
-                .Format = .A8_UNORM,
+                .Format = .B8G8R8A8_UNORM,
                 .SampleDesc = .{ .Count = 1, .Quality = 0 },
                 .Usage = .DEFAULT,
                 .BindFlags = .{ .RENDER_TARGET = 1 },
@@ -1210,9 +1217,13 @@ const StagingTexture = struct {
 
         var render_target: *win32.ID2D1RenderTarget = undefined;
         {
+            // IGNORE alpha mode: D2D treats the surface as opaque so it will
+            // emit ClearType (it falls back to grayscale on alpha-aware
+            // targets). The opaque-black clear below provides the contrast
+            // needed to extract per-channel coverage from the RGB values.
             const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
                 .type = .DEFAULT,
-                .pixelFormat = .{ .format = .A8_UNORM, .alphaMode = .PREMULTIPLIED },
+                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
                 .dpiX = 0,
                 .dpiY = 0,
                 .usage = .{},
@@ -1291,10 +1302,14 @@ fn compileShaderBlob(
 }
 
 fn getTextureMaxCellCount(cell_size: CellXY) CellXY {
-    return .{
-        .x = @intCast(@divTrunc(win32.D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION, cell_size.x)),
-        .y = @intCast(@divTrunc(win32.D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION, cell_size.y)),
-    };
+    // Cap the atlas to 4096² (≈64 MiB at BGRA8). At typical cell sizes this
+    // holds ~75k glyphs, far above any realistic terminal session. Each
+    // dimension is clamped to ≥2 because GlyphIndexCache requires at least
+    // two nodes (head + tail) for its circular-list bookkeeping.
+    const max_dim: u32 = 4096;
+    const cx: u32 = @max(2, @divTrunc(max_dim, @as(u32, cell_size.x)));
+    const cy: u32 = @max(2, @divTrunc(max_dim, @as(u32, cell_size.y)));
+    return .{ .x = @intCast(cx), .y = @intCast(cy) };
 }
 
 fn cellPosFromIndex(index: u32, column_count: u16) CellXY {
