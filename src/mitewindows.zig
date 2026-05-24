@@ -1200,6 +1200,139 @@ const ChildProcess = struct {
         }
     }
 
+    // Environment variable overrides applied when launching the child shell.
+    // A null value means "remove if present" (e.g. NO_COLOR must not be set
+    // when we advertise COLORTERM=truecolor).
+    const ChildEnvOverride = struct { name: [:0]const u16, value: ?[:0]const u16 };
+    const child_env_overrides = blk: {
+        @setEvalBranchQuota(6000);
+        break :blk [_]ChildEnvOverride{
+            // Ensure child process sees a proper terminal environment regardless
+            // of how mite itself was launched (e.g. from Emacs with TERM=dumb).
+            .{ .name = win32.L("TERM"), .value = win32.L("xterm-256color") },
+            .{ .name = win32.L("NO_COLOR"), .value = null },
+            .{ .name = win32.L("COLORTERM"), .value = win32.L("truecolor") },
+            // Force a UTF-8 locale so child shells (Git Bash, etc.) display CJK
+            // filenames correctly under ls / dir / git status.
+            .{ .name = win32.L("LANG"), .value = win32.L("zh_CN.UTF-8") },
+            .{ .name = win32.L("LC_ALL"), .value = win32.L("zh_CN.UTF-8") },
+        };
+    };
+
+    fn utf16AsciiUpper(c: u16) u16 {
+        return if (c >= 'a' and c <= 'z') c - 32 else c;
+    }
+    fn utf16AsciiIEql(a: []const u16, b: []const u16) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |ac, bc| if (utf16AsciiUpper(ac) != utf16AsciiUpper(bc)) return false;
+        return true;
+    }
+
+    // Returns the slice of `entry` up to (but not including) the first '='.
+    // For drive-letter pseudo-vars like "=C:=C:\\foo", this is empty.
+    fn envEntryKey(entry: []const u16) []const u16 {
+        const eq_idx = std.mem.indexOfScalar(u16, entry, '=') orelse return entry;
+        return entry[0..eq_idx];
+    }
+
+    // Case-insensitive lexicographic ordering of env entries by key. Win32
+    // documents the environment block as alphabetically sorted by name with a
+    // case-insensitive comparison.
+    fn envEntryLessThan(_: void, a: []const u16, b: []const u16) bool {
+        const a_key = envEntryKey(a);
+        const b_key = envEntryKey(b);
+        const min_len = @min(a_key.len, b_key.len);
+        for (a_key[0..min_len], b_key[0..min_len]) |ac, bc| {
+            const au = utf16AsciiUpper(ac);
+            const bu = utf16AsciiUpper(bc);
+            if (au != bu) return au < bu;
+        }
+        return a_key.len < b_key.len;
+    }
+
+    // Build a heap-allocated Unicode environment block for CreateProcessW. The
+    // block is the parent process's environment with `child_env_overrides`
+    // applied (entries whose name matches an override are dropped; non-null
+    // overrides replace them). Entries are sorted case-insensitively by name
+    // as Win32 documents, and the block always ends in a double-NUL. Caller
+    // frees with `allocator.free`.
+    //
+    // Building a per-child block (vs. SetEnvironmentVariableW on the parent)
+    // keeps mite's own environment clean and avoids races between concurrent
+    // child launches.
+    fn buildChildEnvBlock(allocator: std.mem.Allocator) error{ OutOfMemory, GetEnvFailed }![]u16 {
+        // Collect entry slices (pointing into parent_env or into the override
+        // bufs below). All source storage outlives the final memcpy because
+        // `out` is fully populated before we return and the defers fire.
+        var entries: std.ArrayListUnmanaged([]const u16) = .empty;
+        defer entries.deinit(allocator);
+
+        // Owned KEY=VALUE buffers for the override entries (their keys/values
+        // come from separate static strings, so we have to concatenate).
+        var override_bufs: std.ArrayListUnmanaged([]u16) = .empty;
+        defer {
+            for (override_bufs.items) |b| allocator.free(b);
+            override_bufs.deinit(allocator);
+        }
+
+        const parent_env = win32.GetEnvironmentStringsW() orelse return error.GetEnvFailed;
+        defer _ = win32.FreeEnvironmentStringsW(parent_env);
+
+        var p: [*]u16 = @ptrCast(parent_env);
+        while (p[0] != 0) {
+            var end: usize = 0;
+            while (p[end] != 0) : (end += 1) {}
+            const entry = p[0..end];
+            p += end + 1;
+
+            // Drive-letter pseudo-vars (e.g. "=C:=C:\\path") have '=' at index
+            // 0 and must be preserved verbatim; never treat them as drop
+            // candidates.
+            const key = envEntryKey(entry);
+            const drop = if (key.len == 0) false else drop: {
+                for (child_env_overrides) |ov| {
+                    if (utf16AsciiIEql(key, ov.name)) break :drop true;
+                }
+                break :drop false;
+            };
+            if (!drop) try entries.append(allocator, entry);
+        }
+
+        for (child_env_overrides) |ov| {
+            const value = ov.value orelse continue;
+            const buf = try allocator.alloc(u16, ov.name.len + 1 + value.len);
+            // Until `buf` is tracked by `override_bufs`, an OOM from
+            // append would leak it. After tracking, the outer defer owns it
+            // and the next append's errdefer would double-free, so the
+            // errdefer is scoped to just the tracking append.
+            {
+                errdefer allocator.free(buf);
+                @memcpy(buf[0..ov.name.len], ov.name);
+                buf[ov.name.len] = '=';
+                @memcpy(buf[ov.name.len + 1 ..], value);
+                try override_bufs.append(allocator, buf);
+            }
+            try entries.append(allocator, buf);
+        }
+
+        std.mem.sort([]const u16, entries.items, {}, envEntryLessThan);
+
+        // Per-entry NUL after each + a trailing NUL terminator for the block.
+        // An empty block must still be the two-wchar sequence "\0\0".
+        var total: usize = 1;
+        for (entries.items) |e| total += e.len + 1;
+        if (total < 2) total = 2;
+
+        const out = try allocator.alloc(u16, total);
+        @memset(out, 0); // leaves all per-entry and trailing NULs in place
+        var pos: usize = 0;
+        for (entries.items) |e| {
+            @memcpy(out[pos .. pos + e.len], e);
+            pos += e.len + 1; // skip the zeroed slot we just left as the NUL
+        }
+        return out;
+    }
+
     // Start a child process attached to a win32 pseudo-console (ConPty).
     //
     // allocator is only used for temporary storage of attributes to start
@@ -1338,11 +1471,15 @@ const ChildProcess = struct {
             },
             .lpAttributeList = attr_list.ptr,
         };
-        // Ensure child process sees a proper terminal environment regardless
-        // of how mite itself was launched (e.g. from Emacs with TERM=dumb).
-        _ = std.os.windows.kernel32.SetEnvironmentVariableW(win32.L("TERM"), win32.L("xterm-256color"));
-        _ = std.os.windows.kernel32.SetEnvironmentVariableW(win32.L("NO_COLOR"), null);
-        _ = std.os.windows.kernel32.SetEnvironmentVariableW(win32.L("COLORTERM"), win32.L("truecolor"));
+        // Build a per-child Unicode environment block rather than mutating the
+        // parent's globals with SetEnvironmentVariableW. Without this, every
+        // CreateProcessW would race with concurrent launches and leave LC_ALL
+        // / TERM / etc. polluted in our own process for the rest of its life.
+        const child_env = buildChildEnvBlock(allocator) catch |e| switch (e) {
+            error.OutOfMemory => oom(error.OutOfMemory),
+            error.GetEnvFailed => return out_err.setWin32("GetEnvironmentStringsW", win32.GetLastError()),
+        };
+        defer allocator.free(child_env);
 
         var process_info: win32.PROCESS_INFORMATION = undefined;
         if (0 == win32.CreateProcessW(
@@ -1356,8 +1493,9 @@ const ChildProcess = struct {
                 // Adding this causes output not to work?
                 //.CREATE_NO_WINDOW = 1,
                 .EXTENDED_STARTUPINFO_PRESENT = 1,
+                .CREATE_UNICODE_ENVIRONMENT = 1,
             },
-            null,
+            @ptrCast(child_env.ptr),
             null,
             &startup_info.StartupInfo,
             &process_info,
