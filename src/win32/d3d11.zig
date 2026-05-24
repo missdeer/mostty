@@ -40,6 +40,17 @@ const Rgba8 = packed struct(u32) {
     }
 };
 
+/// One cell's worth of tab-bar content, laid out by the caller and
+/// rendered into the reserved top row by `render`.
+pub const TabBarCell = struct {
+    codepoint: u21,
+    bg: Rgba8,
+    fg: Rgba8,
+    pub fn rgba(c: u24) Rgba8 {
+        return Rgba8.fromU24(c);
+    }
+};
+
 const default_fg: u24 = 0xc8c4d0;
 const default_bg: u24 = 0x2a2a2a;
 
@@ -471,6 +482,7 @@ pub fn render(
     self: *D3d11Renderer,
     hwnd: win32.HWND,
     term: *vt.Terminal,
+    tab_bar: []const TabBarCell,
     resizing: bool,
     mouse_in_scrollbar: bool,
     selection_fade: f32,
@@ -515,6 +527,9 @@ pub fn render(
     const grid_w: u32 = client_w -| sb_px;
     const shader_col: u32 = @divTrunc(grid_w + cs.x - 1, cs.x);
     const shader_row: u32 = @divTrunc(client_h + cs.y - 1, cs.y);
+    // Row 0 is reserved for the tab bar; terminal cells render in rows 1..shader_row.
+    const term_row_offset: u32 = 1;
+    const term_shader_row: u32 = if (shader_row > term_row_offset) shader_row - term_row_offset else 0;
 
     // Update constant buffer
     {
@@ -535,17 +550,19 @@ pub fn render(
         config.row_count = shader_row;
 
         // Compute scrollbar geometry in pixels (within the reserved scrollbar area)
-        // Only show the thumb when scrolled up or mouse is hovering over the scrollbar
+        // Only show the thumb when scrolled up or mouse is hovering over the scrollbar.
+        // The grid sits below the tab bar, so the scrollbar's y origin shifts down by one cell.
         const sb = term.screens.active.pages.scrollbar();
         const show_scrollbar = sb.total > sb.len and (!term.screens.active.viewportIsBottom() or mouse_in_scrollbar);
         if (show_scrollbar) {
             const sb_x: f32 = @floatFromInt(grid_w);
             const sb_w: f32 = @floatFromInt(sb_px);
-            const win_h: f32 = @floatFromInt(client_h);
+            const sb_origin_y: f32 = @floatFromInt(cs.y * term_row_offset);
+            const win_h: f32 = @floatFromInt(client_h -| (cs.y * term_row_offset));
             const min_track_height: f32 = 20.0;
             const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
             const max_offset = sb.total - sb.len;
-            const track_y = @as(f32, @floatFromInt(sb.offset)) / @as(f32, @floatFromInt(max_offset)) * (win_h - track_height);
+            const track_y = sb_origin_y + @as(f32, @floatFromInt(sb.offset)) / @as(f32, @floatFromInt(max_offset)) * (win_h - track_height);
 
             config.scrollbar_x = sb_x;
             config.scrollbar_width = sb_w;
@@ -584,17 +601,38 @@ pub fn render(
 
         const cells_out: [*]shader.Cell = @ptrCast(@alignCast(mapped.pData));
 
+        // Tab bar in shader row 0.
+        {
+            var col: u32 = 0;
+            while (col < shader_col) : (col += 1) {
+                if (col < tab_bar.len) {
+                    const tb = tab_bar[col];
+                    cells_out[col] = .{
+                        .glyph_index = self.generateGlyph(.{ .codepoint = tb.codepoint, .half = .single }),
+                        .background = tb.bg,
+                        .foreground = tb.fg,
+                    };
+                } else {
+                    cells_out[col] = .{
+                        .glyph_index = blank_glyph,
+                        .background = bg_rgba,
+                        .foreground = bg_rgba,
+                    };
+                }
+            }
+        }
+
         const screen = term.screens.active;
         const palette = &term.colors.palette.current;
         var row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
         var screen_row: u32 = 0;
         while (row_it.next()) |row_pin| {
             defer screen_row += 1;
-            if (screen_row >= shader_row) break;
+            if (screen_row >= term_shader_row) break;
 
             const page = &row_pin.node.data;
             const page_cells = page.getCells(row_pin.rowAndCell().row);
-            const dst_row_offset = screen_row * shader_col;
+            const dst_row_offset = (screen_row + term_row_offset) * shader_col;
 
             var col: u32 = 0;
             for (page_cells) |cell| {
@@ -683,9 +721,9 @@ pub fn render(
                 };
             }
         }
-        // Fill remaining rows with blanks
-        while (screen_row < shader_row) : (screen_row += 1) {
-            const dst_row_offset = screen_row * shader_col;
+        // Fill remaining terminal rows with blanks (offset by tab bar row)
+        while (screen_row < term_shader_row) : (screen_row += 1) {
+            const dst_row_offset = (screen_row + term_row_offset) * shader_col;
             @memset(cells_out[dst_row_offset..][0..shader_col], shader.Cell{
                 .glyph_index = blank_glyph,
                 .background = bg_rgba,
@@ -697,14 +735,14 @@ pub fn render(
         if (screen.viewportIsBottom() and term.modes.get(.cursor_visible)) {
             const cx: u32 = screen.cursor.x;
             const cy: u32 = screen.cursor.y;
-            if (cy < shader_row and cx < shader_col) {
-                const idx = cy * shader_col + cx;
+            if (cy < term_shader_row and cx < shader_col) {
+                const idx = (cy + term_row_offset) * shader_col + cx;
                 cells_out[idx].background = Rgba8.fromU24(default_fg);
                 cells_out[idx].foreground = Rgba8.fromU24(default_bg);
             }
         }
 
-        // Draw resize overlay (e.g. "80x25")
+        // Draw resize overlay (e.g. "80x25") in the terminal region (skip tab bar row).
         if (resizing) {
             const overlay_bg = Rgba8.fromU24(0x333333);
             const overlay_fg = Rgba8.fromU24(0xffffff);
@@ -717,7 +755,8 @@ pub fn render(
             const box_w = text_len + pad;
             const box_h: u32 = 3;
             const box_x = (shader_col -| box_w) / 2;
-            const box_y = (shader_row -| box_h) / 2;
+            const box_y_inner = (term_shader_row -| box_h) / 2;
+            const box_y = box_y_inner + term_row_offset;
 
             // Draw background box
             var by: u32 = box_y;
