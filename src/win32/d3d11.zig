@@ -89,13 +89,32 @@ staging_texture: StagingTexture = .{},
 cell_size: win32.SIZE,
 cell_size_xy: CellXY,
 
+// Effective font configuration (defaults if user didn't override). Lifetimes
+// of the [*:0]u16 strings are owned by the caller of `init`.
+font_size_pt: f32,
+effective_primary: [*:0]const u16,
+effective_user_fallbacks: []const [*:0]const u16,
+
+pub const FontConfig = struct {
+    /// First entry becomes the primary family; the rest are inserted at the
+    /// front of the fallback chain. Empty -> use built-in defaults.
+    families: []const [*:0]const u16 = &.{},
+    /// Font size in points. Null -> use built-in default.
+    font_size_pt: ?f32 = null,
+};
+
 const scrollbar_logical_width: u16 = 14;
 
 pub fn scrollbarWidth(dpi: u32) u16 {
     return @intFromFloat(@round(@as(f32, @floatFromInt(scrollbar_logical_width)) * @as(f32, @floatFromInt(dpi)) / 96.0));
 }
 
-fn measureCellSize(dwrite_factory: *win32.IDWriteFactory, dpi: u32) win32.SIZE {
+fn measureCellSize(
+    dwrite_factory: *win32.IDWriteFactory,
+    dpi: u32,
+    primary: [*:0]const u16,
+    font_size_pt_val: f32,
+) win32.SIZE {
     // Query the primary font face's canonical design metrics rather than
     // measuring a specific glyph via text layout. Some monospace fonts (e.g.
     // Rec Mono Casual) have a U+2588 advance that's wider than their ASCII
@@ -112,7 +131,7 @@ fn measureCellSize(dwrite_factory: *win32.IDWriteFactory, dpi: u32) win32.SIZE {
     var family_index: u32 = 0;
     var family_exists: win32.BOOL = 0;
     {
-        const hr = system_collection.FindFamilyName(primary_font_family, &family_index, &family_exists);
+        const hr = system_collection.FindFamilyName(primary, &family_index, &family_exists);
         if (hr < 0) fatalHr("FindFamilyName", hr);
     }
     if (family_exists == 0) {
@@ -161,7 +180,7 @@ fn measureCellSize(dwrite_factory: *win32.IDWriteFactory, dpi: u32) win32.SIZE {
         if (hr < 0) fatalHr("GetDesignGlyphMetrics", hr);
     }
 
-    const font_size_dips = fontSizeDips(dpi);
+    const font_size_dips = fontSizeDips(dpi, font_size_pt_val);
     const units_per_em: f32 = @floatFromInt(font_metrics.designUnitsPerEm);
     const design_to_dips = font_size_dips / units_per_em;
 
@@ -180,8 +199,8 @@ fn measureCellSize(dwrite_factory: *win32.IDWriteFactory, dpi: u32) win32.SIZE {
 // Font configuration (mirrors WezTerm config). Primary family, then ordered
 // fallbacks: CJK -> Nerd Font icons -> Emoji. Missing families on the system
 // are silently skipped by DirectWrite when resolving glyphs.
-const primary_font_family = win32.L("Rec Mono Casual");
-const font_size_pt: f32 = 13.0;
+pub const default_primary_font_family: [*:0]const u16 = win32.L("Consolas");
+pub const default_font_size_pt: f32 = 13.0;
 
 // Computes the font size to pass to CreateTextFormat. CreateTextFormat
 // nominally takes DIPs (1/96 inch), and our config is in points (1/72 inch),
@@ -189,8 +208,8 @@ const font_size_pt: f32 = 13.0;
 // Note: the staging render target runs in D2D1_UNIT_MODE_PIXELS, which makes
 // the value we return coincide with physical pixels for our specific draw
 // path. The name "Dips" reflects the API contract, not the eventual unit.
-fn fontSizeDips(dpi: u32) f32 {
-    return win32.scaleDpi(f32, font_size_pt * 96.0 / 72.0, dpi);
+fn fontSizeDips(dpi: u32, font_size_pt_val: f32) f32 {
+    return win32.scaleDpi(f32, font_size_pt_val * 96.0 / 72.0, dpi);
 }
 
 // Fallback families used by measureCellSize when the primary isn't installed.
@@ -205,38 +224,25 @@ const measurement_fallbacks = blk: {
     };
 };
 
-const font_fallback_families = blk: {
-    // Each win32.L() runs utf8ToUtf16LeStringLiteralImpl at comptime; the
-    // cumulative branch count for the whole list exceeds the default 2000.
-    @setEvalBranchQuota(10000);
-    break :blk [_][*:0]const u16{
-        // CJK
-        win32.L("LXGW WenKai Mono GB"),
-        win32.L("Sarasa Mono SC"),
-        win32.L("Microsoft YaHei"),
-        win32.L("Noto Sans CJK SC"),
-        // Nerd Font / Powerline / icons
-        win32.L("Symbols Nerd Font Mono"),
-        win32.L("Symbols Nerd Font"),
-        // Emoji
-        win32.L("Segoe UI Emoji"),
-        win32.L("Noto Color Emoji"),
-    };
+const font_fallback_families = [_][*:0]const u16{
+    win32.L("Segoe UI Emoji"),
 };
 
 fn createTextFormat(
     dwrite_factory: *win32.IDWriteFactory,
     dpi: u32,
     font_fallback: *win32.IDWriteFontFallback,
+    primary: [*:0]const u16,
+    font_size_pt_val: f32,
 ) *win32.IDWriteTextFormat {
     var text_format: *win32.IDWriteTextFormat = undefined;
     const hr = dwrite_factory.CreateTextFormat(
-        primary_font_family,
+        primary,
         null,
         .NORMAL,
         .NORMAL,
         .NORMAL,
-        fontSizeDips(dpi),
+        fontSizeDips(dpi, font_size_pt_val),
         win32.L(""),
         &text_format,
     );
@@ -272,7 +278,15 @@ fn buildRenderingParams(factory: *win32.IDWriteFactory) *win32.IDWriteRenderingP
     return params;
 }
 
-fn buildFontFallback(factory: *win32.IDWriteFactory2) *win32.IDWriteFontFallback {
+// Hard cap on user-supplied fallback families. Anything beyond is ignored;
+// the chain is already long once you include the hardcoded CJK/icon/emoji
+// fonts, and DirectWrite walks it linearly.
+const max_user_fallbacks: usize = 32;
+
+fn buildFontFallback(
+    factory: *win32.IDWriteFactory2,
+    user_fallbacks: []const [*:0]const u16,
+) *win32.IDWriteFontFallback {
     var builder: *win32.IDWriteFontFallbackBuilder = undefined;
     {
         const hr = factory.CreateFontFallbackBuilder(&builder);
@@ -284,17 +298,28 @@ fn buildFontFallback(factory: *win32.IDWriteFactory2) *win32.IDWriteFontFallback
     // range, in order. Calling it once per family with the full range would
     // make only the first family ever match (DirectWrite picks the first
     // mapping whose range contains the codepoint, then walks its family list).
-    var family_ptrs: [font_fallback_families.len]?*const u16 = undefined;
-    for (font_fallback_families, 0..) |family, i| {
+    var family_ptrs: [max_user_fallbacks + font_fallback_families.len]?*const u16 = undefined;
+    const user_n = @min(user_fallbacks.len, max_user_fallbacks);
+    if (user_fallbacks.len > max_user_fallbacks) {
+        std.log.warn("config: dropping {d} extra font-family fallback(s) past cap {d}", .{
+            user_fallbacks.len - max_user_fallbacks,
+            max_user_fallbacks,
+        });
+    }
+    for (user_fallbacks[0..user_n], 0..) |family, i| {
         family_ptrs[i] = @ptrCast(family);
     }
+    for (font_fallback_families, 0..) |family, i| {
+        family_ptrs[user_n + i] = @ptrCast(family);
+    }
+    const total = user_n + font_fallback_families.len;
     const full_range = win32.DWRITE_UNICODE_RANGE{ .first = 0, .last = 0x10FFFF };
     {
         const hr = builder.AddMapping(
             @ptrCast(&full_range),
             1,
             &family_ptrs,
-            family_ptrs.len,
+            @intCast(total),
             null,
             null,
             null,
@@ -323,7 +348,7 @@ fn buildFontFallback(factory: *win32.IDWriteFactory2) *win32.IDWriteFontFallback
 
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.cell_size;
-    return measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi);
+    return measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
 }
 
 const CellXY = struct {
@@ -334,7 +359,16 @@ const CellXY = struct {
     }
 };
 
-pub fn init(dpi: u32) D3d11Renderer {
+pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
+    const effective_primary: [*:0]const u16 = if (font_config.families.len > 0)
+        font_config.families[0]
+    else
+        default_primary_font_family;
+    const effective_user_fallbacks: []const [*:0]const u16 = if (font_config.families.len > 1)
+        font_config.families[1..]
+    else
+        &.{};
+    const effective_font_size_pt: f32 = font_config.font_size_pt orelse default_font_size_pt;
     // Create D3D11 device
     const levels = [_]win32.D3D_FEATURE_LEVEL{.@"11_0"};
     var device: *win32.ID3D11Device = undefined;
@@ -411,11 +445,11 @@ pub fn init(dpi: u32) D3d11Renderer {
         if (hr < 0) fatalHr("DWriteCreateFactory", hr);
     }
 
-    const font_fallback = buildFontFallback(dwrite_factory);
+    const font_fallback = buildFontFallback(dwrite_factory, effective_user_fallbacks);
     const rendering_params = buildRenderingParams(&dwrite_factory.IDWriteFactory);
-    const text_format = createTextFormat(&dwrite_factory.IDWriteFactory, dpi, font_fallback);
+    const text_format = createTextFormat(&dwrite_factory.IDWriteFactory, dpi, font_fallback, effective_primary, effective_font_size_pt);
 
-    const cell_size = measureCellSize(&dwrite_factory.IDWriteFactory, dpi);
+    const cell_size = measureCellSize(&dwrite_factory.IDWriteFactory, dpi, effective_primary, effective_font_size_pt);
     const cell_size_xy: CellXY = .{
         .x = @intCast(cell_size.cx),
         .y = @intCast(cell_size.cy),
@@ -450,16 +484,19 @@ pub fn init(dpi: u32) D3d11Renderer {
         },
         .cell_size_xy = cell_size_xy,
         .dpi = dpi,
+        .font_size_pt = effective_font_size_pt,
+        .effective_primary = effective_primary,
+        .effective_user_fallbacks = effective_user_fallbacks,
     };
 }
 
 pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     if (dpi == self.dpi) return;
     _ = self.text_format.IUnknown.Release();
-    self.text_format = createTextFormat(&self.dwrite_factory.IDWriteFactory, dpi, self.font_fallback);
+    self.text_format = createTextFormat(&self.dwrite_factory.IDWriteFactory, dpi, self.font_fallback, self.effective_primary, self.font_size_pt);
     self.dpi = dpi;
 
-    const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi);
+    const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
     self.cell_size = new_cs;
     self.cell_size_xy = .{
         .x = @intCast(new_cs.cx),

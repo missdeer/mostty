@@ -31,7 +31,20 @@ This fork adds three Windows-side changes on top of upstream:
 
 Tab teardown sets an atomic `reader_stop` and calls `CancelIoEx` so the reader thread exits cleanly whether it was blocked in `ReadFile` or mid-`SendMessage`, and the main loop waits on all child process handles via `MsgWaitForMultipleObjectsEx` so an exiting shell posts a close instead of killing the process.
 
-**Font configuration.** WezTerm-style setup: primary family **Rec Mono Casual @ 13pt** with a prioritized fallback chain (CJK → Nerd Font → Emoji) attached via a custom `IDWriteFontFallback`. Cell size is now measured from `IDWriteFontFace` design metrics rather than a text layout of U+2588 — some monospace fonts (Rec Mono Casual included) report a wider full-block glyph than their ASCII advance, which used to stretch every letter horizontally. Sizes are configured in points and converted pt → DIPs → physical pixels (the previous DIP-direct path rendered "13pt" at ~75% of intended size). If the configured family isn't installed, falls back through Cascadia Mono → Consolas → Courier New before erroring out.
+**Font configuration.** Defaults: primary family **Consolas @ 13pt** with a minimal hardcoded fallback chain (`Segoe UI Emoji`) attached via a custom `IDWriteFontFallback`. Cell size is measured from `IDWriteFontFace` design metrics rather than a text layout of U+2588 — some monospace fonts (Rec Mono Casual included) report a wider full-block glyph than their ASCII advance, which used to stretch every letter horizontally. Sizes are configured in points and converted pt → DIPs → physical pixels (the previous DIP-direct path rendered "13pt" at ~75% of intended size). If the configured primary isn't installed, mite falls back through Cascadia Mono → Consolas → Courier New for cell-size measurement before erroring out.
+
+The user can override the defaults via `%LOCALAPPDATA%\mite\config` (one `key=value` per line, missing file → defaults). Two keys are supported:
+
+- `font-family` — accepts a comma-separated list and/or repeated keys; values are accumulated in order. The first entry becomes the DirectWrite primary; the rest are prepended to the hardcoded fallback chain.
+- `font-size` — single positive float, in points.
+
+Example:
+
+```
+font-family=Cascadia Mono, JetBrains Mono
+font-family=Microsoft YaHei
+font-size=14
+```
 
 The child shell is spawned with an isolated per-process Unicode environment block (`TERM`/`COLORTERM`/`LANG`/`LC_ALL` applied, `NO_COLOR` stripped, sorted case-insensitively as Win32 requires) instead of mutating mite's own process env, which removes a race across concurrent `CreateProcessW` calls.
 

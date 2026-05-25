@@ -104,3 +104,7 @@ Mite is a terminal emulator that wraps `libghostty-vt` (the VT parser/state mach
 - `Cmdline.zig` is used by both entry points.
 - `vt` (libghostty-vt) drives terminal state. Mite wires its own `Stream` handler (`TitleHandler` on Linux, `VtHandler` on Windows) on top of `vt.ReadonlyHandler` to intercept `window_title` actions; everything else falls through to the readonly handler.
 - `TERM` is forced to `xterm-256color` (see `mite.setTermEnv` on Linux; Windows sets the child env directly when spawning the ConPTY).
+
+## Temp Dir
+
+Always use **${project_root_dir}/tmp** as the temporary directory, never use **/tmp**.

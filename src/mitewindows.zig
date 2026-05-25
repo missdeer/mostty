@@ -288,7 +288,18 @@ pub fn main() !void {
     };
 
     global.icons = getIcons(dpi);
-    global.renderer = d3d11.init(@max(dpi.x, dpi.y));
+
+    // Load user config and convert font-family list to UTF-16 sentinel-terminated
+    // strings. The UTF-16 storage is leaked: it lives for the lifetime of the
+    // global renderer (i.e. the whole process).
+    var config = Config.loadDefault(global.gpa.allocator());
+    defer config.deinit();
+    const font_families_u16 = utf16FontFamilies(global.gpa.allocator(), config.font_families);
+    const font_config: d3d11.FontConfig = .{
+        .families = font_families_u16,
+        .font_size_pt = config.font_size_pt,
+    };
+    global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
     const cell_size = global.renderer.cell_size;
     const placement = calcWindowPlacement(
         maybe_monitor,
@@ -2155,6 +2166,26 @@ fn oom(e: error{OutOfMemory}) noreturn {
     @panic(@errorName(e));
 }
 
+// Converts UTF-8 family names to heap-allocated, null-terminated UTF-16
+// strings. The returned outer slice and each inner string are leaked
+// intentionally; they live for the lifetime of the renderer.
+fn utf16FontFamilies(allocator: std.mem.Allocator, families: []const []const u8) []const [*:0]const u16 {
+    var out: std.ArrayListUnmanaged([*:0]const u16) = .empty;
+    for (families) |name| {
+        const required = std.unicode.calcUtf16LeLen(name) catch {
+            std.log.warn("config: invalid utf-8 in font-family '{s}'; skipping", .{name});
+            continue;
+        };
+        const buf = allocator.allocSentinel(u16, required, 0) catch |e| oom(e);
+        const written = std.unicode.utf8ToUtf16Le(buf[0..required], name) catch unreachable;
+        std.debug.assert(written == required);
+        out.append(allocator, buf.ptr) catch |e| oom(e);
+    }
+    if (out.items.len == 0) return &.{};
+    return out.toOwnedSlice(allocator) catch |e| oom(e);
+}
+
+const Config = @import("Config.zig");
 const d3d11 = @import("win32/d3d11.zig");
 const vt = @import("vt");
 const std = @import("std");
