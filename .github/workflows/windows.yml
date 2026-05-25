@@ -29,12 +29,6 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Show Zig environment
-        shell: pwsh
-        run: |
-          zig version
-          zig env
-
       - name: Build
         run: zig build -Doptimize=${{ matrix.optimize }}
 
@@ -42,16 +36,6 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          if (!(Test-Path zig-out/bin/mite.exe)) {
-            Write-Host "Expected executable not found at zig-out/bin/mite.exe"
-            if (Test-Path zig-out/bin) {
-              Write-Host "Contents of zig-out/bin:"
-              Get-ChildItem zig-out/bin | Format-List Name,Length,Mode
-            } else {
-              Write-Host "zig-out/bin does not exist"
-            }
-            throw "Build output missing"
-          }
           Copy-Item zig-out/bin/mite.exe dist/
           if (Test-Path zig-out/bin/mite.pdb) { Copy-Item zig-out/bin/mite.pdb dist/ }
 
