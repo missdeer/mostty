@@ -76,6 +76,10 @@ const Window = struct {
     scrollbar_drag_offset: f32 = 0,
     resizing: bool = false,
     tab_bar_hover: ?TabHit = null,
+    // True while a close-confirmation MessageBox is up. The modal pumps
+    // messages, so a second WM_CLOSE (e.g. Alt+F4 hammering) or another
+    // tab-bar 'x' click could otherwise stack a nested dialog.
+    confirming_close: bool = false,
 
     fn active(self: *Window) *Tab {
         return self.tabs.items[self.active_index];
@@ -841,8 +845,30 @@ fn closeTabByIndex(window: *Window, idx: usize) void {
     _ = win32.PostMessageW(window.hwnd, WM_APP_CLOSE_TAB, tab.id, 0);
 }
 
-fn closeActiveTab(window: *Window) void {
-    closeTabByIndex(window, window.active_index);
+fn confirmYesNo(hwnd: win32.HWND, text: [*:0]const u16, caption: [*:0]const u16) bool {
+    const result = win32.MessageBoxW(hwnd, text, caption, .{
+        .YESNO = 1,
+        .ICONQUESTION = 1,
+        // Default to "No" so an accidental Enter doesn't close.
+        .DEFBUTTON2 = 1,
+    });
+    return result == win32.IDYES;
+}
+
+fn confirmAndCloseTab(window: *Window, tab_id: TabId) void {
+    if (window.confirming_close) return;
+    window.confirming_close = true;
+    defer window.confirming_close = false;
+    if (!confirmYesNo(
+        window.hwnd,
+        win32.L("Close this tab?"),
+        win32.L("Mite"),
+    )) return;
+    // Re-look the index: the modal's nested message pump may have
+    // shifted indices (or destroyed the target tab entirely).
+    if (window.findIndexById(tab_id)) |idx| {
+        closeTabByIndex(window, idx);
+    }
 }
 
 fn destroyTab(window: *Window, tab: *Tab) void {
@@ -1136,7 +1162,11 @@ fn handleShortcut(window: *Window, wparam: win32.WPARAM) bool {
                 return true;
             },
             @intFromEnum(win32.VK_W) => {
-                closeActiveTab(window);
+                // tabs can be empty when WM_KEYDOWN is dispatched from a
+                // nested pump during teardown; bounds-check before active().
+                if (window.tabs.items.len > 0) {
+                    confirmAndCloseTab(window, window.active().id);
+                }
                 return true;
             },
             @intFromEnum(win32.VK_TAB) => {
@@ -1190,7 +1220,26 @@ fn WndProc(
             newTab(window);
             return 0;
         },
-        win32.WM_CLOSE, win32.WM_DESTROY => {
+        win32.WM_CLOSE => {
+            if (global.window) |*window| {
+                if (window.confirming_close) return 0;
+                window.confirming_close = true;
+                defer window.confirming_close = false;
+                if (!confirmYesNo(
+                    window.hwnd,
+                    win32.L("Close window and all tabs?"),
+                    win32.L("Mite"),
+                )) return 0;
+                while (window.tabs.items.len > 0) {
+                    const tab = window.tabs.items[0];
+                    destroyTab(window, tab);
+                }
+            } else {
+                win32.PostQuitMessage(0);
+            }
+            return 0;
+        },
+        win32.WM_DESTROY => {
             if (global.window) |*window| {
                 while (window.tabs.items.len > 0) {
                     const tab = window.tabs.items[0];
@@ -1224,7 +1273,10 @@ fn WndProc(
                 switch (hit) {
                     .none => {},
                     .activate => |idx| switchToTab(window, idx),
-                    .close => |idx| closeTabByIndex(window, idx),
+                    .close => |idx| {
+                        if (idx >= window.tabs.items.len) return 0;
+                        confirmAndCloseTab(window, window.tabs.items[idx].id);
+                    },
                     .new_tab => newTab(window),
                 }
                 return 0;
