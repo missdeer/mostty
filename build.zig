@@ -3,6 +3,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const vt = b.dependency("ghostty", .{}).module("ghostty-vt");
+    const z2d = b.dependency("z2d", .{}).module("z2d");
 
     const appicon_dep = b.dependency("appicon", .{});
     const x11_mod = if (b.lazyDependency("x11", .{})) |dep| dep.module("x11") else null;
@@ -26,7 +27,7 @@ pub fn build(b: *std.Build) void {
         }),
         .win32_manifest = b.path("src/win32/mite.manifest"),
     });
-    addImports(b, target.result, exe.root_module, miteicon, vt);
+    addImports(b, target.result, exe.root_module, miteicon, vt, z2d);
 
     exe.addWin32ResourceFile(.{
         .file = b.path("src/win32/mite.rc"),
@@ -52,7 +53,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    addImports(b, target.result, tests.root_module, miteicon, vt);
+    addImports(b, target.result, tests.root_module, miteicon, vt, z2d);
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
 }
@@ -63,9 +64,11 @@ fn addImports(
     mod: *std.Build.Module,
     miteicon: *std.Build.Module,
     vt: *std.Build.Module,
+    z2d: *std.Build.Module,
 ) void {
     mod.addImport("miteicon", miteicon);
     mod.addImport("vt", vt);
+    mod.addImport("z2d", z2d);
     switch (target.os.tag) {
         .windows => if (b.lazyDependency("win32", .{})) |win32_dep| {
             mod.addImport("win32", win32_dep.module("win32"));

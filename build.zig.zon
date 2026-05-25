@@ -32,6 +32,13 @@
             .url = "git+https://github.com/ghostty-org/ghostty#aac491657be1c17f214a32c6ee0b1a221bf99bd1",
             .hash = "ghostty-1.3.2-dev-5UdBC9Kx_gRCw-CiFO0xlNsAsqu8lTkIx6J-jjLbBbqr",
         },
+        // Pure-Zig 2D vector graphics; backs ghostty's sprite Canvas. We vendor
+        // the sprite-drawing source under src/vendor/ghostty-sprite and need
+        // z2d as a direct module import for that code.
+        .z2d = .{
+            .url = "https://deps.files.ghostty.org/z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ.tar.gz",
+            .hash = "z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ",
+        },
         .zipcmdline = .{
             .url = "git+https://github.com/marler8997/zipcmdline#a8807944231b46565450504cb7f3146e29e51335",
             .hash = "zipcmdline-0.0.0-DFii09hmAwAK1TuCE9eIMZANDZRJnodAHOUOCM8pAPO3",

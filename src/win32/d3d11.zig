@@ -4,6 +4,7 @@ const std = @import("std");
 const vt = @import("vt");
 const win32 = @import("win32").everything;
 const GlyphIndexCache = @import("GlyphIndexCache.zig");
+const sprite = @import("sprite.zig");
 
 const log = std.log.scoped(.d3d);
 
@@ -253,6 +254,10 @@ fn createTextFormat(
     defer _ = text_format1.IUnknown.Release();
     const sfhr = text_format1.SetFontFallback(font_fallback);
     if (sfhr < 0) fatalHr("SetFontFallback", sfhr);
+
+    // Single-glyph layouts must never wrap; we measure & scale to fit instead.
+    const wwhr = text_format.SetWordWrapping(win32.DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (wwhr < 0) fatalHr("SetWordWrapping", wwhr);
 
     return text_format;
 }
@@ -921,6 +926,29 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
             const pos = cellPosFromIndex(reserved.index, tex_cell_count.x);
             const coord: CellXY = .{ .x = cs.x * pos.x, .y = cs.y * pos.y };
 
+            // Sprite fast path: tile-design codepoints (Block Elements, Box
+            // Drawing, Braille, Powerline, Geometric Shapes, Legacy Computing)
+            // are rendered procedurally by ghostty's sprite drawing code so
+            // they tile seamlessly regardless of the font's natural advance.
+            // Block elements out of a font would get squashed by the narrow-
+            // Latin cell width and break Claude Code's block-art logo.
+            //
+            // Render failures must NOT silently return — the reserved atlas
+            // slot would otherwise display stale pixels from the evicted
+            // glyph. OOM is fatal; any other error falls through to the
+            // DirectWrite path so we render *something* into the slot.
+            sprite_path: {
+                if (!sprite.hasCodepoint(key.codepoint)) break :sprite_path;
+                self.uploadSpriteToAtlas(key, coord) catch |err| switch (err) {
+                    error.OutOfMemory => oom(error.OutOfMemory),
+                    else => {
+                        std.log.warn("sprite render U+{X} failed ({s}); falling back to DirectWrite", .{ key.codepoint, @errorName(err) });
+                        break :sprite_path;
+                    },
+                };
+                return reserved.index;
+            }
+
             // Render glyph to staging texture (2 cells wide to accommodate wide chars).
             const staging_size: CellXY = .{ .x = cs.x * 2, .y = cs.y };
             const staging = self.staging_texture.getOrCreate(self.device, self.d2d_factory, staging_size);
@@ -932,13 +960,66 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
             var utf16_buf: [2]u16 = undefined;
             const utf16_len = std.unicode.utf8ToUtf16Le(&utf16_buf, utf8_buf[0..utf8_len]) catch 0;
 
-            // Render at natural advance. Fallback glyphs that don't match the
-            // cell width clip (or underfill) rather than being scaled, which
-            // would destroy hinting.
             const target_width: f32 = @floatFromInt(
                 if (key.half != .single) cs.x * @as(u16, 2) else cs.x,
             );
+            const cs_y_f: f32 = @floatFromInt(cs.y);
 
+            // IDWriteTextLayout lets us measure the rendered ink before drawing
+            // so we can scale fallback CJK / emoji / overhanging glyphs to fit
+            // exactly target_width — otherwise the staging texture would clip
+            // the right side off (cells are narrower than the fallback font's
+            // natural advance once the primary is a narrow Latin face).
+            var layout: *win32.IDWriteTextLayout = undefined;
+            {
+                const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
+                    @ptrCast(utf16_buf[0..utf16_len].ptr),
+                    @intCast(utf16_len),
+                    self.text_format,
+                    target_width,
+                    cs_y_f,
+                    &layout,
+                );
+                if (hr < 0) fatalHr("CreateTextLayout", hr);
+            }
+            defer _ = layout.IUnknown.Release();
+
+            var m: win32.DWRITE_TEXT_METRICS = undefined;
+            {
+                const hr = layout.GetMetrics(&m);
+                if (hr < 0) fatalHr("GetMetrics", hr);
+            }
+            var oh: win32.DWRITE_OVERHANG_METRICS = undefined;
+            {
+                const hr = layout.GetOverhangMetrics(&oh);
+                if (hr < 0) fatalHr("GetOverhangMetrics", hr);
+            }
+
+            // fit_width is the unscaled span that must be drawable without CLIP
+            // chopping the glyph. Captures both 'advance wider than the cell'
+            // (content_right) and 'ink overhang past the layout box right edge'
+            // (m.layoutWidth + oh.right). Left ink overhang (oh.left > 0) is
+            // rare for monospace fallback fonts and is intentionally clipped.
+            const content_right = m.left + @max(m.width, m.widthIncludingTrailingWhitespace);
+            const overhang_right = m.layoutWidth + @max(0.0, oh.right);
+            const fit_width = @max(content_right, overhang_right);
+            const need_scale = fit_width > target_width and fit_width > 0;
+            const scale: f32 = if (need_scale) target_width / fit_width else 1.0;
+
+            if (need_scale) {
+                // Expand the layout box so CLIP boundary == fit_width pre-scale,
+                // which becomes target_width post-scale.
+                const hr = layout.SetMaxWidth(fit_width);
+                if (hr < 0) fatalHr("SetMaxWidth", hr);
+            }
+
+            // Invariant: every render starts from identity transform & CLEARTYPE.
+            // The staging RT is reused across cache misses, so leaking state
+            // between calls would corrupt subsequent glyphs.
+            const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
+                .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0,
+            } } };
+            staging.render_target.SetTransform(&identity);
             staging.render_target.SetTextRenderingParams(self.rendering_params);
             staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
             staging.render_target.BeginDraw();
@@ -946,27 +1027,71 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
                 // Opaque black background; rendering white-on-black through
                 // ClearType yields per-subpixel coverage as the stored RGB
                 // (white·cov + black·(1-cov) = cov). The shader decodes via
-                // pow(2.2) to undo D2D's gamma encode.
+                // pow(2.2) to undo D2D's gamma encode. Grayscale fills R=G=B
+                // equally, so the same decode still produces uniform coverage.
                 const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
                 staging.render_target.Clear(&color);
             }
-            staging.render_target.DrawText(
-                @ptrCast(utf16_buf[0..utf16_len].ptr),
-                @intCast(utf16_len),
-                self.text_format,
-                &.{
-                    .left = 0,
-                    .top = 0,
-                    .right = target_width,
-                    .bottom = @floatFromInt(cs.y),
-                },
+
+            if (need_scale) {
+                // ClearType subpixel hinting assumes 1:1 horizontal mapping;
+                // any fractional scale would produce colored fringes. Grayscale
+                // antialiasing has no subpixel directionality.
+                staging.render_target.SetTextAntialiasMode(.GRAYSCALE);
+
+                // Scale policy branches on the cell's structural width:
+                //   .single — block / box-drawing / geometric glyphs that
+                //     tile with neighbors must FILL their cell width, so use
+                //     horizontal-only scale. Aspect can compress slightly; the
+                //     alternative (uniform shrink) leaves visible gaps between
+                //     adjacent tiles (e.g. the Claude Code startup logo).
+                //   .wide   — CJK / emoji are visually square; horizontal-only
+                //     scale would look squashed thin. Uniform scale preserves
+                //     design aspect, anchored at the layout baseline so scaled
+                //     wide glyphs share a baseline with un-scaled Latin in
+                //     adjacent cells on the same row.
+                const scale_mat: win32.D2D_MATRIX_3X2_F = if (key.half == .single) .{
+                    .Anonymous = .{ .Anonymous1 = .{
+                        .m11 = scale,
+                        .m12 = 0,
+                        .m21 = 0,
+                        .m22 = 1,
+                        .dx = 0,
+                        .dy = 0,
+                    } },
+                } else blk: {
+                    var lm: [1]win32.DWRITE_LINE_METRICS = undefined;
+                    var line_count: u32 = 0;
+                    const lhr = layout.GetLineMetrics(&lm, 1, &line_count);
+                    if (lhr < 0) fatalHr("GetLineMetrics", lhr);
+                    const baseline: f32 = if (line_count >= 1) lm[0].baseline else 0;
+                    break :blk .{ .Anonymous = .{ .Anonymous1 = .{
+                        .m11 = scale,
+                        .m12 = 0,
+                        .m21 = 0,
+                        .m22 = scale,
+                        .dx = 0,
+                        .dy = baseline * (1.0 - scale),
+                    } } };
+                };
+                staging.render_target.SetTransform(&scale_mat);
+            }
+
+            staging.render_target.DrawTextLayout(
+                .{ .x = 0, .y = 0 },
+                layout,
                 &staging.white_brush.ID2D1Brush,
-                .{},
-                .NATURAL,
+                win32.D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
+
+            // Reset before EndDraw so the next cache-miss starts clean.
+            staging.render_target.SetTransform(&identity);
+            if (need_scale) staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
+
             var tag1: u64 = undefined;
             var tag2: u64 = undefined;
-            _ = staging.render_target.EndDraw(&tag1, &tag2);
+            const ehr = staging.render_target.EndDraw(&tag1, &tag2);
+            if (ehr < 0) fatalHr("EndDraw", ehr);
 
             // Copy the appropriate portion from staging to atlas
             const src_left: u32 = if (key.half == .wide_right) cs.x else 0;
@@ -993,6 +1118,56 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
         },
         .already_reserved => |index| return index,
     }
+}
+
+// Render a sprite (Block Elements / Box Drawing / Braille / Powerline /
+// Geometric Shapes / Legacy Computing) into a CPU BGRA buffer, then copy
+// the half indicated by `key.half` directly into the atlas slot at `coord`.
+//
+// Wide sprites are rasterized full-width (2*cs.x) once and the appropriate
+// half is uploaded; matches the same .wide_left / .wide_right split used by
+// the DirectWrite path.
+fn uploadSpriteToAtlas(self: *D3d11Renderer, key: GlyphIndexCache.Key, coord: CellXY) !void {
+    const cs = self.cell_size_xy;
+    const sprite_cell_w: u32 = if (key.half != .single) @as(u32, cs.x) * 2 else cs.x;
+    const sprite_cell_h: u32 = cs.y;
+
+    var scratch_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer scratch_arena.deinit();
+    const arena_alloc = scratch_arena.allocator();
+
+    const scratch = try arena_alloc.alloc(u8, sprite_cell_w * sprite_cell_h * 4);
+    const metrics = sprite.buildMetrics(sprite_cell_w, sprite_cell_h);
+    // Errors propagate so the dispatch site can fall back to DirectWrite for
+    // any non-OOM failure. hasCodepoint already gated entry, so a false
+    // return from render would mean ranges/dispatch disagree — unreachable.
+    const rendered = try sprite.render(arena_alloc, key.codepoint, sprite_cell_w, sprite_cell_h, metrics, scratch);
+    std.debug.assert(rendered);
+
+    // Pick the half-cell slice of the scratch buffer that corresponds to
+    // this atlas slot. The source row pitch stays sprite_cell_w*4 so
+    // UpdateSubresource walks the full row and only copies cs.x*4 bytes per
+    // row starting at the offset we pass via src pointer arithmetic.
+    const src_offset_x: u32 = if (key.half == .wide_right) cs.x else 0;
+    const src_row_pitch: u32 = sprite_cell_w * 4;
+    const src_ptr: [*]const u8 = scratch.ptr + (src_offset_x * 4);
+
+    const dst_box: win32.D3D11_BOX = .{
+        .left = coord.x,
+        .top = coord.y,
+        .front = 0,
+        .right = coord.x + cs.x,
+        .bottom = coord.y + cs.y,
+        .back = 1,
+    };
+    self.context.UpdateSubresource(
+        &self.glyph_texture.obj.?.ID3D11Resource,
+        0,
+        &dst_box,
+        @ptrCast(src_ptr),
+        src_row_pitch,
+        0,
+    );
 }
 
 // --- Swap chain ---
@@ -1258,11 +1433,13 @@ const StagingTexture = struct {
             // emit ClearType (it falls back to grayscale on alpha-aware
             // targets). The opaque-black clear below provides the contrast
             // needed to extract per-channel coverage from the RGB values.
+            // Pin DPI to 96 so IDWriteTextLayout's DIP-based maxWidth/maxHeight
+            // map 1:1 to staging-texture pixels (cell metrics are in pixels).
             const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
                 .type = .DEFAULT,
                 .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
-                .dpiX = 0,
-                .dpiY = 0,
+                .dpiX = 96.0,
+                .dpiY = 96.0,
                 .usage = .{},
                 .minLevel = .DEFAULT,
             };
