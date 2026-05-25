@@ -30,7 +30,7 @@ jobs:
           version: 0.15.2
 
       - name: Build
-        run: zig build -Doptimize=${{ matrix.optimize }} -Dtarget=x86_64-windows
+        run: zig build -Doptimize=${{ matrix.optimize }}
 
       - name: Stage artifact
         shell: pwsh
