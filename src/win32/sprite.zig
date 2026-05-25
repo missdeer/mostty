@@ -137,6 +137,28 @@ pub fn hasCodepoint(cp: u21) bool {
     return getDrawFn(cp) != null;
 }
 
+/// True if `cp` is an EAW=Ambiguous symbol (Geometric Shapes / Misc
+/// Symbols / Dingbats: ●✶★◆❄❤ etc.) that the DirectWrite glyph path should
+/// render with center alignment + ink-bounds best-fit so it appears as a
+/// round, properly-sized glyph inside its single cell — instead of getting
+/// horizontally squashed to a thin ellipse by the default `.single`
+/// scale-down. Sprite-face codepoints are excluded since they already
+/// render pixel-perfect via the procedural path.
+///
+/// On Windows fallback fonts (LXGW Mono etc.) these codepoints have ~1 em
+/// natural advance, which doesn't fit the narrow cs.x without help; the
+/// uniform-scale + centered layout matches what WezTerm and other
+/// per-cell terminals produce.
+pub fn isAmbiguousOverflow(cp: u21) bool {
+    const in_range = (cp >= 0x25A0 and cp <= 0x25FF) // Geometric Shapes
+        or (cp >= 0x2600 and cp <= 0x26FF) // Miscellaneous Symbols
+        or (cp >= 0x2700 and cp <= 0x27BF); // Dingbats
+    if (!in_range) return false;
+    // Sprite face takes priority — those codepoints render pixel-perfect
+    // at cs.x and don't need the DirectWrite center-fit treatment.
+    return !hasCodepoint(cp);
+}
+
 fn getDrawFn(cp: u21) ?*const DrawFn {
     inline for (ranges) |range| {
         if (cp >= range.min and cp <= range.max) return range.draw;

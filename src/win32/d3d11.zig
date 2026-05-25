@@ -702,6 +702,14 @@ pub fn render(
             const page_cells = page.getCells(row_pin.rowAndCell().row);
             const dst_row_offset = (screen_row + term_row_offset) * shader_col;
 
+            // Cursor inversion is applied inline (not in a separate post-pass)
+            // so that wide CJK glyphs get BOTH halves flipped, not just the
+            // left one.
+            const cursor_visible = screen.viewportIsBottom() and term.modes.get(.cursor_visible);
+            const cursor_on_row = cursor_visible and screen.cursor.y == screen_row;
+            const cursor_bg_rgba = Rgba8.fromU24(default_fg);
+            const cursor_fg_rgba = Rgba8.fromU24(default_bg);
+
             var col: u32 = 0;
             for (page_cells) |cell| {
                 if (col >= shader_col) break;
@@ -757,6 +765,14 @@ pub fn render(
                     }
                 }
 
+                // Cursor inversion applies to the LOGICAL cell at column `col`.
+                // For wide cells both visual halves inherit this so the cursor
+                // highlight covers the whole glyph.
+                if (cursor_on_row and screen.cursor.x == col) {
+                    bg = cursor_bg_rgba;
+                    fg = cursor_fg_rgba;
+                }
+
                 if (cell.wide == .wide) {
                     cells_out[dst_row_offset + col] = .{
                         .glyph_index = self.generateGlyph(.{ .codepoint = codepoint, .half = .wide_left }),
@@ -771,13 +787,15 @@ pub fn render(
                             .foreground = fg,
                         };
                     }
-                } else {
-                    cells_out[dst_row_offset + col] = .{
-                        .glyph_index = self.generateGlyph(.{ .codepoint = codepoint, .half = .single }),
-                        .background = bg,
-                        .foreground = fg,
-                    };
+                    col += 1;
+                    continue;
                 }
+
+                cells_out[dst_row_offset + col] = .{
+                    .glyph_index = self.generateGlyph(.{ .codepoint = codepoint, .half = .single }),
+                    .background = bg,
+                    .foreground = fg,
+                };
                 col += 1;
             }
             // Fill remaining columns with blanks
@@ -799,16 +817,8 @@ pub fn render(
             });
         }
 
-        // Draw cursor
-        if (screen.viewportIsBottom() and term.modes.get(.cursor_visible)) {
-            const cx: u32 = screen.cursor.x;
-            const cy: u32 = screen.cursor.y;
-            if (cy < term_shader_row and cx < shader_col) {
-                const idx = (cy + term_row_offset) * shader_col + cx;
-                cells_out[idx].background = Rgba8.fromU24(default_fg);
-                cells_out[idx].foreground = Rgba8.fromU24(default_bg);
-            }
-        }
+        // Cursor inversion is applied inline in the per-row cell loop so
+        // wide CJK gets both halves flipped, not just the left one.
 
         // Draw resize overlay (e.g. "80x25") in the terminal region (skip tab bar row).
         if (resizing) {
@@ -965,11 +975,17 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
             );
             const cs_y_f: f32 = @floatFromInt(cs.y);
 
-            // IDWriteTextLayout lets us measure the rendered ink before drawing
-            // so we can scale fallback CJK / emoji / overhanging glyphs to fit
-            // exactly target_width — otherwise the staging texture would clip
-            // the right side off (cells are narrower than the fallback font's
-            // natural advance once the primary is a narrow Latin face).
+            // Ambiguous EAW symbols (● ✶ ★ etc. outside the sprite range)
+            // render in a single cell with ink-bounds best-fit + center
+            // alignment + center-anchored uniform scale. This produces round
+            // (not squashed) symbols of consistent size within a row,
+            // matching WezTerm's per-cell layout where every ● looks the
+            // same regardless of what surrounds it. Each symbol stays inside
+            // its own cell so adjacent letters / underscores / other symbols
+            // remain fully visible.
+            const is_ambiguous_symbol = sprite.isAmbiguousOverflow(key.codepoint);
+
+            // IDWriteTextLayout lets us measure the rendered ink before drawing.
             var layout: *win32.IDWriteTextLayout = undefined;
             {
                 const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
@@ -984,6 +1000,17 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
             }
             defer _ = layout.IUnknown.Release();
 
+            // For ambiguous symbols, center the glyph in its single cell so
+            // the center-anchored scale transform expands uniformly around
+            // the cell centre. Alignment must be set BEFORE measuring so the
+            // overhang values reflect the centered layout.
+            if (is_ambiguous_symbol) {
+                const ahr = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
+                if (ahr < 0) fatalHr("SetTextAlignment", ahr);
+                const pahr = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                if (pahr < 0) fatalHr("SetParagraphAlignment", pahr);
+            }
+
             var m: win32.DWRITE_TEXT_METRICS = undefined;
             {
                 const hr = layout.GetMetrics(&m);
@@ -995,20 +1022,50 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
                 if (hr < 0) fatalHr("GetOverhangMetrics", hr);
             }
 
-            // fit_width is the unscaled span that must be drawable without CLIP
-            // chopping the glyph. Captures both 'advance wider than the cell'
-            // (content_right) and 'ink overhang past the layout box right edge'
-            // (m.layoutWidth + oh.right). Left ink overhang (oh.left > 0) is
-            // rare for monospace fallback fonts and is intentionally clipped.
+            // Two scale policies share the rendering setup below:
+            //
+            //   * Non-ambiguous (CJK real wide, Latin, fallback narrow glyphs
+            //     in a single cell): only scale DOWN when natural advance
+            //     exceeds the target cell width. fit_width captures advance +
+            //     right ink overhang so CLIP doesn't chop overhanging strokes.
+            //
+            //   * Ambiguous symbols (●✶★ etc.): ink-box best-fit within the
+            //     single cell, allow scale > 1 to enlarge narrow naturals so
+            //     the glyph fills the cell instead of sitting tiny and
+            //     left-aligned. Cap at SCALE_CAP = 2.0 so a 1-pixel glyph
+            //     can't blow up into a giant blur.
+            const SCALE_CAP: f32 = 2.0;
             const content_right = m.left + @max(m.width, m.widthIncludingTrailingWhitespace);
             const overhang_right = m.layoutWidth + @max(0.0, oh.right);
             const fit_width = @max(content_right, overhang_right);
-            const need_scale = fit_width > target_width and fit_width > 0;
-            const scale: f32 = if (need_scale) target_width / fit_width else 1.0;
 
-            if (need_scale) {
-                // Expand the layout box so CLIP boundary == fit_width pre-scale,
-                // which becomes target_width post-scale.
+            // Ink bounds via raw (signed) overhangs against the layout box;
+            // negative overhang = ink inset from box edge. Same formula works
+            // for LEFT and CENTER alignment because overhangs adjust to the
+            // text's position within the box.
+            const ink_w = m.layoutWidth + oh.left + oh.right;
+            const ink_h = m.layoutHeight + oh.top + oh.bottom;
+            const ink_ok = ink_w > 0 and ink_h > 0 and std.math.isFinite(ink_w) and std.math.isFinite(ink_h);
+
+            const raw_scale: f32 = if (is_ambiguous_symbol) blk: {
+                if (!ink_ok) break :blk 1.0;
+                const sw = target_width / ink_w;
+                const sh = cs_y_f / ink_h;
+                break :blk @min(@min(sw, sh), SCALE_CAP);
+            } else if (fit_width > target_width and fit_width > 0)
+                target_width / fit_width
+            else
+                1.0;
+            // Snap near-unity to 1.0 to skip a no-op transform.
+            const need_scale = @abs(raw_scale - 1.0) > 0.001;
+            const scale: f32 = if (need_scale) raw_scale else 1.0;
+
+            if (need_scale and !is_ambiguous_symbol) {
+                // Non-ambiguous scale-down path: expand the layout box so the
+                // CLIP boundary == fit_width pre-scale, becoming target_width
+                // post-scale. Ambiguous-symbol path leaves the layout box at
+                // the original target_width because center alignment + center
+                // anchor handle positioning without box expansion.
                 const hr = layout.SetMaxWidth(fit_width);
                 if (hr < 0) fatalHr("SetMaxWidth", hr);
             }
@@ -1039,18 +1096,28 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
                 // antialiasing has no subpixel directionality.
                 staging.render_target.SetTextAntialiasMode(.GRAYSCALE);
 
-                // Scale policy branches on the cell's structural width:
-                //   .single — block / box-drawing / geometric glyphs that
-                //     tile with neighbors must FILL their cell width, so use
-                //     horizontal-only scale. Aspect can compress slightly; the
-                //     alternative (uniform shrink) leaves visible gaps between
-                //     adjacent tiles (e.g. the Claude Code startup logo).
-                //   .wide   — CJK / emoji are visually square; horizontal-only
-                //     scale would look squashed thin. Uniform scale preserves
-                //     design aspect, anchored at the layout baseline so scaled
-                //     wide glyphs share a baseline with un-scaled Latin in
-                //     adjacent cells on the same row.
-                const scale_mat: win32.D2D_MATRIX_3X2_F = if (key.half == .single) .{
+                // Three anchor strategies, chosen by glyph context:
+                //   ambiguous symbol  → center anchor (cell centre stays fixed
+                //     so round shapes like ● stay visually centered)
+                //   single, non-ambiguous → horizontal-only (m22 = 1, dy = 0)
+                //     preserves vertical fill so non-sprite tile-design glyphs
+                //     (rare math / line-drawing chars outside the sprite face)
+                //     still touch the top and bottom of the cell.
+                //   wide, non-ambiguous → uniform + baseline anchor (CJK /
+                //     emoji) so the scaled glyph shares a baseline with
+                //     un-scaled Latin in adjacent cells.
+                const scale_mat: win32.D2D_MATRIX_3X2_F = if (is_ambiguous_symbol) blk: {
+                    const cx = target_width / 2.0;
+                    const cy = cs_y_f / 2.0;
+                    break :blk .{ .Anonymous = .{ .Anonymous1 = .{
+                        .m11 = scale,
+                        .m12 = 0,
+                        .m21 = 0,
+                        .m22 = scale,
+                        .dx = cx * (1.0 - scale),
+                        .dy = cy * (1.0 - scale),
+                    } } };
+                } else if (key.half == .single) .{
                     .Anonymous = .{ .Anonymous1 = .{
                         .m11 = scale,
                         .m12 = 0,
@@ -1077,11 +1144,22 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
                 staging.render_target.SetTransform(&scale_mat);
             }
 
+            // CLIP boundary semantics:
+            //   non-ambiguous → CLIP at the (expanded) layout box, which the
+            //                   scale-down transform shrinks back to target_w.
+            //   ambiguous     → no CLIP. With scale > 1 + center alignment
+            //                   the scaled ink may briefly extend past the
+            //                   layout box; the staging texture acts as the
+            //                   natural drawing bound.
+            const draw_options: win32.D2D1_DRAW_TEXT_OPTIONS = if (is_ambiguous_symbol)
+                .{} // no options
+            else
+                win32.D2D1_DRAW_TEXT_OPTIONS_CLIP;
             staging.render_target.DrawTextLayout(
                 .{ .x = 0, .y = 0 },
                 layout,
                 &staging.white_brush.ID2D1Brush,
-                win32.D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                draw_options,
             );
 
             // Reset before EndDraw so the next cache-miss starts clean.
@@ -1545,6 +1623,7 @@ fn queryInterface(obj: anytype, comptime Interface: type) *Interface {
     if (hr < 0) fatalHr("QueryInterface", hr);
     return iface;
 }
+
 
 fn resolveColor(c: vt.Style.Color, palette: *const vt.color.Palette, default: u24) u24 {
     return switch (c) {
