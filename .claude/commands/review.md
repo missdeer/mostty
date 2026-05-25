@@ -1,6 +1,8 @@
 ## Review
 
-Ask codex & gemini to review the change, you should always wait for both codex's & gemini's response then move to the next step. Reviewers should not modify files directly, give review result only.
+Ask both Codex and Gemini to review the proposed changes.
+Always wait for feedback from both reviewers before proceeding to the next step.
+Reviewers should only provide review results, comments, or suggestions. They must not directly modify files or make changes themselves.
 
 ### Fix
 
