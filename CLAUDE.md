@@ -72,6 +72,12 @@ Requires Zig `0.15.2`. Dependencies are declared in `build.zig.zon` and most are
 
 There is no separate lint step. Cross-compile with `-Dtarget=...` as usual; the build script picks the platform entry point and resource files automatically.
 
+## Build Command for Developer
+
+- Use `cmd.exe /c "D:\zig-x86_64-windows-0.15.2\zig.exe build --global-cache-dir D:\zig-cache"` to build the project.
+- MUST wrap the build command by `cmd.exe /c`
+- Use `D:\zig-cache` as the build cache
+
 # Architecture
 
 Mite is a terminal emulator that wraps `libghostty-vt` (the VT parser/state machine from Ghostty, imported as the `vt` module) and provides its own windowing + rendering layer per platform. There is **no shared backend abstraction across OSes** — the entry point is chosen at build time:

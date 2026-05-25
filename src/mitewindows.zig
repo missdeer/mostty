@@ -245,6 +245,7 @@ const global = struct {
     var renderer: d3d11 = undefined;
     var window: ?Window = null;
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var config: *const Config = undefined;
 };
 
 fn windowFromHwnd(hwnd: win32.HWND) *Window {
@@ -294,6 +295,7 @@ pub fn main() !void {
     // global renderer (i.e. the whole process).
     var config = Config.loadDefault(global.gpa.allocator());
     defer config.deinit();
+    global.config = &config;
     const font_families_u16 = utf16FontFamilies(global.gpa.allocator(), config.font_families);
     const font_config: d3d11.FontConfig = .{
         .families = font_families_u16,
@@ -697,6 +699,14 @@ fn computeGridCellCount(hwnd: win32.HWND, cs: win32.SIZE) GridPos {
 }
 
 fn newTab(window: *Window) void {
+    const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0)
+        &global.config.launchers[0]
+    else
+        null;
+    newTabWithLauncher(window, launcher);
+}
+
+fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) void {
     if (window.tabs.items.len >= MAX_TABS) {
         std.log.warn("tab limit reached ({}); not opening new tab", .{MAX_TABS});
         return;
@@ -716,19 +726,47 @@ fn newTab(window: *Window) void {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
+
+    var application_name: ?[*:0]const u16 = null;
+    var command_line: ?[*:0]u16 = null;
+    var working_directory: ?[*:0]const u16 = null;
+    if (launcher) |L| {
+        const cmd_u16 = utf16ZAllocMut(arena.allocator(), L.command_line) catch |e| oom(e);
+        command_line = cmd_u16;
+        if (L.working_directory.len > 0) {
+            const cwd_u16 = utf16ZAllocConst(arena.allocator(), L.working_directory) catch |e| oom(e);
+            working_directory = cwd_u16;
+        }
+    } else {
+        application_name = win32.L("C:\\Windows\\System32\\cmd.exe");
+    }
+
     var err: Error = undefined;
     tab.child_process = ChildProcess.startConPtyWin32(
         &err,
         arena.allocator(),
-        win32.L("C:\\Windows\\System32\\cmd.exe"),
-        null,
+        application_name,
+        command_line,
+        working_directory,
         window.hwnd,
         WM_APP_CHILD_PROCESS_DATA,
         WM_APP_CHILD_PROCESS_DATA_RESULT,
         cell_count,
         tab.id,
         &tab.reader_stop,
-    ) catch std.debug.panic("{f}", .{err});
+    ) catch {
+        // User-configurable launchers can fail (bad path, missing exe, etc.);
+        // surface and abandon this tab rather than crashing the whole app.
+        // The fallback cmd.exe path (launcher == null) still panics on failure
+        // because that's a system-level problem.
+        if (launcher != null) {
+            std.log.err("launcher '{s}' failed to start: {f}", .{ launcher.?.label, err });
+            tab.term_arena.deinit();
+            global.gpa.allocator().destroy(tab);
+            return;
+        }
+        std.debug.panic("{f}", .{err});
+    };
 
     tab.term = std.heap.page_allocator.create(vt.Terminal) catch oom(error.OutOfMemory);
     tab.term.* = vt.Terminal.init(tab.term_arena.allocator(), .{
@@ -745,6 +783,47 @@ fn newTab(window: *Window) void {
     window.tabs.append(global.gpa.allocator(), tab) catch oom(error.OutOfMemory);
     window.active_index = window.tabs.items.len - 1;
     window.onActiveChanged();
+}
+
+fn showLauncherMenu(window: *Window, client_x: i32, client_y: i32) void {
+    const launchers = global.config.launchers;
+    if (launchers.len == 0) return;
+
+    const menu = win32.CreatePopupMenu() orelse {
+        std.log.err("CreatePopupMenu failed, error={f}", .{win32.GetLastError()});
+        return;
+    };
+    defer _ = win32.DestroyMenu(menu);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for (launchers, 0..) |L, i| {
+        const label_u16 = utf16ZAllocConst(a, L.label) catch |e| oom(e);
+        const id: usize = i + 1; // 0 reserved for "cancelled"
+        if (0 == win32.AppendMenuW(menu, win32.MF_STRING, id, label_u16)) {
+            std.log.err("AppendMenuW failed, error={f}", .{win32.GetLastError()});
+            return;
+        }
+    }
+
+    var pt: win32.POINT = .{ .x = client_x, .y = client_y };
+    _ = win32.ClientToScreen(window.hwnd, &pt);
+
+    // MSDN-recommended quirk: ensure foreground so the menu dismisses
+    // correctly when the user clicks outside it.
+    _ = win32.SetForegroundWindow(window.hwnd);
+
+    const flags = win32.TRACK_POPUP_MENU_FLAGS{
+        .RETURNCMD = 1,
+        .RIGHTBUTTON = 1,
+    };
+    const selected = win32.TrackPopupMenu(menu, flags, pt.x, pt.y, 0, window.hwnd, null);
+    if (selected <= 0) return;
+    const idx: usize = @intCast(selected - 1);
+    if (idx >= launchers.len) return;
+    newTabWithLauncher(window, &launchers[idx]);
 }
 
 fn switchToTab(window: *Window, new_idx: usize) void {
@@ -1505,6 +1584,19 @@ fn WndProc(
         },
         win32.WM_RBUTTONDOWN => {
             const window = windowFromHwnd(hwnd);
+            const mouse_x: i32 = win32.xFromLparam(lparam);
+            const mouse_y: i32 = win32.yFromLparam(lparam);
+            const cs = global.renderer.cell_size;
+            if (mouse_y < cs.cy) {
+                const cell_count = computeGridCellCount(hwnd, cs);
+                const hit = hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
+                if (hit == .new_tab) {
+                    if (global.config.launchers.len > 0) {
+                        showLauncherMenu(window, mouse_x, mouse_y);
+                    }
+                    return 0;
+                }
+            }
             pasteClipboard(hwnd, window.active());
             return 0;
         },
@@ -1756,6 +1848,7 @@ const ChildProcess = struct {
         allocator: std.mem.Allocator,
         application_name: ?[*:0]const u16,
         command_line: ?[*:0]u16,
+        working_directory: ?[*:0]const u16,
         hwnd: win32.HWND,
         hwnd_msg: u32,
         hwnd_msg_result: win32.LRESULT,
@@ -1785,6 +1878,10 @@ const ChildProcess = struct {
             "CreateOutputPipe",
             win32.GetLastError(),
         );
+        defer if (!pty_handles_closed) win32.closeHandle(pty_write);
+        // Registered before the reader-thread errdefer so it runs AFTER
+        // thread.join — safe to close once the reader has exited.
+        errdefer win32.closeHandle(our_read);
 
         try setInherit(out_err, our_write, false);
         try setInherit(out_err, our_read, false);
@@ -1885,7 +1982,7 @@ const ChildProcess = struct {
                 .CREATE_UNICODE_ENVIRONMENT = 1,
             },
             @ptrCast(child_env.ptr),
-            null,
+            working_directory,
             &startup_info.StartupInfo,
             &process_info,
         )) return out_err.setWin32("CreateProcess", win32.GetLastError());
@@ -2164,6 +2261,18 @@ fn pasteUtf16(tab: *Tab, utf16: [*:0]const u16, writer: *std.Io.Writer) error{ W
 
 fn oom(e: error{OutOfMemory}) noreturn {
     @panic(@errorName(e));
+}
+
+fn utf16ZAllocMut(allocator: std.mem.Allocator, utf8: []const u8) error{OutOfMemory}![*:0]u16 {
+    const required = std.unicode.calcUtf16LeLen(utf8) catch unreachable;
+    const buf = try allocator.allocSentinel(u16, required, 0);
+    const written = std.unicode.utf8ToUtf16Le(buf[0..required], utf8) catch unreachable;
+    std.debug.assert(written == required);
+    return buf.ptr;
+}
+
+fn utf16ZAllocConst(allocator: std.mem.Allocator, utf8: []const u8) error{OutOfMemory}![*:0]const u16 {
+    return utf16ZAllocMut(allocator, utf8);
 }
 
 // Converts UTF-8 family names to heap-allocated, null-terminated UTF-16

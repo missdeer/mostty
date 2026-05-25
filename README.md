@@ -23,20 +23,31 @@ This fork adds three Windows-side changes on top of upstream:
 
 **Tabs.** One window can host multiple ConPTY-backed shells. The tab bar is painted into the top cell row of the same D3D11 surface (no extra Win32 control). Each tab owns its own terminal state, vt stream, child process, reader thread, title, and WM_CHAR surrogate carry; window-scoped state (mouse capture, scrollbar drag, selection fade) stays on the window. Closing the last tab quits.
 
-- `Ctrl+T` — new tab (defaults to `cmd.exe`)
+- `Ctrl+T` — new tab (uses the first configured launcher, or `cmd.exe` if none)
 - `Ctrl+W` — close the active tab
 - `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` — cycle tabs
 - `Ctrl+1`..`Ctrl+9` — jump to tab N
-- Click a tab to activate, its `x` to close, the `+` to open a new one
+- Left-click a tab to activate, its `x` to close, the `+` to open a new one
+- Right-click the `+` to pick a launcher from the configured list
 
 Tab teardown sets an atomic `reader_stop` and calls `CancelIoEx` so the reader thread exits cleanly whether it was blocked in `ReadFile` or mid-`SendMessage`, and the main loop waits on all child process handles via `MsgWaitForMultipleObjectsEx` so an exiting shell posts a close instead of killing the process.
 
+Custom shells / startup programs are declared in `%LOCALAPPDATA%\mite\config` (see Font configuration below for file format). Each `launcher` line is `label | command-line | working-directory` — the first `|` and the last `|` are the field separators, so the middle (command-line) segment can contain literal `|` (e.g. `cmd /c "dir | findstr foo"`). The third segment is optional; an empty working directory inherits mite's. A failed launcher (bad path, missing exe) logs an error and skips the new tab rather than crashing mite. Example:
+
+```
+launcher = cmd | C:\Windows\System32\cmd.exe |
+launcher = Git Bash | "C:\Program Files\Git\bin\bash.exe" -i | C:\Users\Fan
+launcher = PowerShell | powershell.exe -NoLogo |
+```
+
 **Font configuration.** Defaults: primary family **Consolas @ 13pt** with a minimal hardcoded fallback chain (`Segoe UI Emoji`) attached via a custom `IDWriteFontFallback`. Cell size is measured from `IDWriteFontFace` design metrics rather than a text layout of U+2588 — some monospace fonts (Rec Mono Casual included) report a wider full-block glyph than their ASCII advance, which used to stretch every letter horizontally. Sizes are configured in points and converted pt → DIPs → physical pixels (the previous DIP-direct path rendered "13pt" at ~75% of intended size). If the configured primary isn't installed, mite falls back through Cascadia Mono → Consolas → Courier New for cell-size measurement before erroring out.
 
-The user can override the defaults via `%LOCALAPPDATA%\mite\config` (one `key=value` per line, missing file → defaults). Two keys are supported:
+The user can override the defaults via `%LOCALAPPDATA%\mite\config` (one `key=value` per line, missing file → defaults). Font-related keys:
 
 - `font-family` — accepts a comma-separated list and/or repeated keys; values are accumulated in order. The first entry becomes the DirectWrite primary; the rest are prepended to the hardcoded fallback chain.
 - `font-size` — single positive float, in points.
+
+The same file also accepts `launcher` lines (see Tabs above).
 
 Example:
 

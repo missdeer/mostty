@@ -1,7 +1,14 @@
 const Config = @This();
 
+pub const Launcher = struct {
+    label: []const u8,
+    command_line: []const u8,
+    working_directory: []const u8, // empty = inherit parent
+};
+
 font_families: []const []const u8 = &.{},
 font_size_pt: ?f32 = null,
+launchers: []const Launcher = &.{},
 
 arena: ?std.heap.ArenaAllocator = null,
 
@@ -41,6 +48,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
 
     var families: std.ArrayListUnmanaged([]const u8) = .empty;
     var font_size_pt: ?f32 = null;
+    var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
 
     // Strip UTF-8 BOM if present (Notepad and other Windows editors add one).
     const input = if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) source[3..] else source;
@@ -75,16 +83,47 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             font_size_pt = n;
+        } else if (std.mem.eql(u8, key, "launcher")) {
+            const launcher = parseLauncher(a, value) orelse {
+                std.log.warn("config: {s}:{}: invalid launcher '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+            launchers.append(a, launcher) catch oom();
         } else {
             std.log.warn("config: {s}:{}: unknown key '{s}'", .{ source_name, line_no, key });
         }
     }
 
-    const slice = families.toOwnedSlice(a) catch oom();
+    const families_slice = families.toOwnedSlice(a) catch oom();
+    const launchers_slice = launchers.toOwnedSlice(a) catch oom();
     return .{
-        .font_families = slice,
+        .font_families = families_slice,
         .font_size_pt = font_size_pt,
+        .launchers = launchers_slice,
         .arena = arena,
+    };
+}
+
+fn parseLauncher(a: std.mem.Allocator, value: []const u8) ?Launcher {
+    // Split with first-and-last '|' semantics so the middle (command-line)
+    // segment may contain literal '|' (common in shell pipelines).
+    const first = std.mem.indexOfScalar(u8, value, '|') orelse return null;
+    const last = std.mem.lastIndexOfScalar(u8, value, '|').?;
+    const label = std.mem.trim(u8, value[0..first], " \t");
+    const cmd_slice = if (first == last) value[first + 1 ..] else value[first + 1 .. last];
+    const cwd_slice = if (first == last) value[0..0] else value[last + 1 ..];
+    const command_line = std.mem.trim(u8, cmd_slice, " \t");
+    const working_directory = std.mem.trim(u8, cwd_slice, " \t");
+
+    if (label.len == 0 or command_line.len == 0) return null;
+    if (!std.unicode.utf8ValidateSlice(label)) return null;
+    if (!std.unicode.utf8ValidateSlice(command_line)) return null;
+    if (!std.unicode.utf8ValidateSlice(working_directory)) return null;
+
+    return .{
+        .label = a.dupe(u8, label) catch oom(),
+        .command_line = a.dupe(u8, command_line) catch oom(),
+        .working_directory = a.dupe(u8, working_directory) catch oom(),
     };
 }
 
