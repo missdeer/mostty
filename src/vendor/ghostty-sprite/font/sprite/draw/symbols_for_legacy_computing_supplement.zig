@@ -113,7 +113,13 @@ pub fn draw1CD00_1CDE5(
             // at the end are keys into our packed struct. Since we're
             // at comptime we can metaprogram it all.
             const idx = std.mem.indexOfScalar(u8, line, '-').?;
-            for (line[idx + 1 ..]) |c| @field(current, &.{c}) = true;
+            for (line[idx + 1 ..]) |c| {
+                // Handle CRLF inputs: skip trailing '\r' (and any
+                // unexpected non-octant bytes) instead of treating
+                // them as struct field names.
+                if (c < '1' or c > '8') continue;
+                @field(current, &.{c}) = true;
+            }
         }
 
         assert(i == octants_len);
