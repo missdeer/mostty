@@ -7,6 +7,7 @@
 
 A native terminal emulator with libghostty at its core.
 
+
 ### Linux
 
 Compiles to a static universal exe that connects directly to either X11 or Wayland. For wayland, ensure XDG_SESSION_TYPE=wayland.
@@ -19,7 +20,13 @@ Uses Direct3D 11 and DirectWrite for text. Compiles to a tiny executable (less t
 
 #### Fork enhancements (Windows)
 
-This fork adds three Windows-side changes on top of upstream:
+This fork adds several Windows-side enhancements on top of upstream:
+
+- Configurable startup launchers per tab, including right-click `+` launcher selection and SSH hosts integrated into the launcher menu.
+- Confirmation prompts before closing a tab or the window to reduce accidental session loss.
+- User-configurable font family/size on Windows via `%LOCALAPPDATA%\mite\config`.
+- Rendering improvements for wide-glyph clipping, tile-design handling, and ambiguous-width symbol alignment/readability.
+- Automated Windows builds via GitHub Actions, plus repository assistant tooling/docs updates for contributors.
 
 **Tabs.** One window can host multiple ConPTY-backed shells. The tab bar is painted into the top cell row of the same D3D11 surface (no extra Win32 control). Each tab owns its own terminal state, vt stream, child process, reader thread, title, and WM_CHAR surrogate carry; window-scoped state (mouse capture, scrollbar drag, selection fade) stays on the window. Closing the last tab quits.
 
