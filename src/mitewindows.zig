@@ -1291,6 +1291,51 @@ const GridPos = struct {
     row: u16,
 };
 
+// Pixel position of the top-left of the active tab's cursor cell, including
+// the tab-bar offset (one cell row at the top).
+fn caretPixelPos(window: *Window) ?win32.POINT {
+    if (window.tabs.items.len == 0) return null;
+    const screen = window.active().term.screens.active;
+    const cs = global.renderer.cell_size;
+    const x: i32 = @as(i32, @intCast(screen.cursor.x)) * cs.cx;
+    const y: i32 = (@as(i32, @intCast(screen.cursor.y)) + 1) * cs.cy;
+    return .{ .x = x, .y = y };
+}
+
+fn setImeCompositionPos(window: *Window) void {
+    const caret = caretPixelPos(window) orelse return;
+    const himc = win32.ImmGetContext(window.hwnd) orelse return;
+    defer _ = win32.ImmReleaseContext(window.hwnd, himc);
+    var comp: win32.COMPOSITIONFORM = .{
+        .dwStyle = win32.CFS_POINT,
+        .ptCurrentPos = caret,
+        .rcArea = std.mem.zeroes(win32.RECT),
+    };
+    _ = win32.ImmSetCompositionWindow(himc, &comp);
+}
+
+fn setImeCandidatePos(window: *Window) void {
+    const caret = caretPixelPos(window) orelse return;
+    const cs = global.renderer.cell_size;
+    const himc = win32.ImmGetContext(window.hwnd) orelse return;
+    defer _ = win32.ImmReleaseContext(window.hwnd, himc);
+    // CFS_EXCLUDE: anchor the candidate list at ptCurrentPos and tell the IME
+    // to avoid covering rcArea (the caret cell). The IME flips above/below
+    // automatically when the caret is near the screen edge.
+    var cand: win32.CANDIDATEFORM = .{
+        .dwIndex = 0,
+        .dwStyle = win32.CFS_EXCLUDE,
+        .ptCurrentPos = caret,
+        .rcArea = .{
+            .left = caret.x,
+            .top = caret.y,
+            .right = caret.x + cs.cx,
+            .bottom = caret.y + cs.cy,
+        },
+    };
+    _ = win32.ImmSetCandidateWindow(himc, &cand);
+}
+
 fn WndProc(
     hwnd: win32.HWND,
     msg: u32,
@@ -1725,6 +1770,28 @@ fn WndProc(
             const hdrop: win32.HDROP = @ptrFromInt(wparam);
             onDropFiles(window, hdrop);
             return 0;
+        },
+        win32.WM_IME_STARTCOMPOSITION => {
+            const window = windowFromHwnd(hwnd);
+            setImeCompositionPos(window);
+            return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        win32.WM_IME_COMPOSITION => {
+            // Re-pin while the composition string is updating so the IME UI
+            // tracks the caret if PTY output scrolls mid-composition.
+            const GCS_COMPSTR: usize = 0x0008;
+            if ((@as(usize, @bitCast(lparam)) & GCS_COMPSTR) != 0) {
+                const window = windowFromHwnd(hwnd);
+                setImeCompositionPos(window);
+            }
+            return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        win32.WM_IME_NOTIFY => {
+            if (wparam == win32.IMN_OPENCANDIDATE or wparam == win32.IMN_CHANGECANDIDATE) {
+                const window = windowFromHwnd(hwnd);
+                setImeCandidatePos(window);
+            }
+            return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         win32.WM_RBUTTONDOWN => {
             const window = windowFromHwnd(hwnd);
