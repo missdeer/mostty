@@ -25,7 +25,11 @@ This fork adds several Windows-side enhancements on top of upstream:
 - Configurable startup launchers per tab, including right-click `+` launcher selection and SSH hosts integrated into the launcher menu.
 - Confirmation prompts before closing a tab or the window to reduce accidental session loss.
 - User-configurable font family/size on Windows via `%LOCALAPPDATA%\mite\config`.
-- Rendering improvements for wide-glyph clipping, tile-design handling, and ambiguous-width symbol alignment/readability.
+- Rendering improvements for wide-glyph clipping, tile-design handling, ambiguous-width symbol alignment/readability, and CRLF tolerance in the octant glyph parser.
+- Drag-and-drop from Explorer: dropped files are pasted as space-separated, double-quoted paths into the active tab (works under elevation via UIPI message filters).
+- IME composition and candidate windows track the caret cell instead of opening at the screen corner; the position re-pins if PTY output scrolls mid-composition.
+- Multi-line clipboard paste preserves line breaks by normalizing CRLF and bare LF to CR (matches xterm bracketed-paste, alacritty/kitty/foot).
+- Render hot-path performance pass: coalesced `InvalidateRect` via a `render_pending` flag, per-frame LRU dampening in the glyph cache, per-render selection-bounds precompute (replaces per-cell page walks), and a gamma-2.0 shader fast path (`c*c` / `sqrt` in lock-step with DirectWrite rendering params).
 - Automated Windows builds via GitHub Actions, plus repository assistant tooling/docs updates for contributors.
 
 **Tabs.** One window can host multiple ConPTY-backed shells. The tab bar is painted into the top cell row of the same D3D11 surface (no extra Win32 control). Each tab owns its own terminal state, vt stream, child process, reader thread, title, and WM_CHAR surrogate carry; window-scoped state (mouse capture, scrollbar drag, selection fade) stays on the window. Closing the last tab quits.
