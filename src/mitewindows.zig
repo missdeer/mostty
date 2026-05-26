@@ -2475,6 +2475,7 @@ fn pasteUtf16(tab: *Tab, utf16: [*:0]const u16, writer: *std.Io.Writer) error{ W
     var end_stripper: PasteEndStripper = .{};
 
     var i: usize = 0;
+    var last_was_cr = false;
     while (utf16[i] != 0) {
         const cp: u21 = blk: {
             if (std.unicode.utf16IsHighSurrogate(utf16[i])) {
@@ -2500,12 +2501,28 @@ fn pasteUtf16(tab: *Tab, utf16: [*:0]const u16, writer: *std.Io.Writer) error{ W
             break :blk c;
         };
 
-        switch (if (bracketed) try end_stripper.onCodepoint(writer, cp) else .ignored) {
+        // Normalize line endings to CR. Windows clipboards store newlines
+        // as CRLF, but terminals treat Enter as a bare CR — passing the LF
+        // through leaves it as a stray byte the shell can't interpret, so
+        // pasted lines collapse onto one line. Matches xterm bracketed
+        // paste spec and what alacritty/kitty/foot do.
+        var out_cp: u21 = cp;
+        if (cp == '\n') {
+            if (last_was_cr) {
+                last_was_cr = false;
+                continue;
+            }
+            out_cp = '\r';
+        } else {
+            last_was_cr = (cp == '\r');
+        }
+
+        switch (if (bracketed) try end_stripper.onCodepoint(writer, out_cp) else .ignored) {
             .consumed => {},
             .ignored => {
                 var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(cp, &utf8_buf) catch {
-                    std.log.err("paste: invalid codepoint U+{x} at index {}", .{ cp, i });
+                const len = std.unicode.utf8Encode(out_cp, &utf8_buf) catch {
+                    std.log.err("paste: invalid codepoint U+{x} at index {}", .{ out_cp, i });
                     return error.Reported;
                 };
                 try writer.writeAll(utf8_buf[0..len]);
