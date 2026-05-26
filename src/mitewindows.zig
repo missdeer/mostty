@@ -386,6 +386,14 @@ pub fn main() !void {
         if (hr < 0) std.log.warn("DwmEnableBlurBehindWindow failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
 
+    win32.DragAcceptFiles(hwnd, 1);
+    // UIPI: when mite runs elevated, Explorer (a lower-integrity process)
+    // can't post WM_DROPFILES / WM_COPYGLOBALDATA into our window unless
+    // we explicitly allow them through the message filter. Without this,
+    // drag-and-drop silently fails when "Run as administrator".
+    _ = win32.ChangeWindowMessageFilterEx(hwnd, win32.WM_DROPFILES, win32.MSGFLT_ALLOW, null);
+    _ = win32.ChangeWindowMessageFilterEx(hwnd, 0x0049, win32.MSGFLT_ALLOW, null); // WM_COPYGLOBALDATA
+
     if (0 == win32.UpdateWindow(hwnd)) win32.panicWin32("UpdateWindow", win32.GetLastError());
     _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
 
@@ -1711,6 +1719,13 @@ fn WndProc(
             );
             return 0;
         },
+        win32.WM_DROPFILES => {
+            const window = windowFromHwnd(hwnd);
+            if (wparam == 0) return 0;
+            const hdrop: win32.HDROP = @ptrFromInt(wparam);
+            onDropFiles(window, hdrop);
+            return 0;
+        },
         win32.WM_RBUTTONDOWN => {
             const window = windowFromHwnd(hwnd);
             const mouse_x: i32 = win32.xFromLparam(lparam);
@@ -2297,6 +2312,55 @@ fn pasteClipboard(hwnd: win32.HWND, tab: *Tab) void {
     var pty_writer = pty.write.writerStreaming(&buf);
     pasteUtf16(tab, mem, &pty_writer.interface) catch |err| switch (err) {
         error.WriteFailed => std.log.err("paste: write to pty failed with {t}", .{pty_writer.err.?}),
+        error.Reported => {},
+    };
+}
+
+fn onDropFiles(window: *Window, hdrop: win32.HDROP) void {
+    defer win32.DragFinish(hdrop);
+
+    const tab = window.active();
+    const pty = tab.child_process.pty orelse {
+        std.log.err("drop: pty closed", .{});
+        return;
+    };
+
+    const count = win32.DragQueryFileW(hdrop, 0xFFFFFFFF, null, 0);
+    if (count == 0) return;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Build a single UTF-16 buffer: each path is wrapped in double quotes
+    // and separated by a space; one trailing space lets the user keep
+    // typing arguments. Always-quote is the simplest defence against
+    // shell metacharacters (cmd's `&|<>()^`, bash's `$()`, etc.) — file
+    // paths on Windows can't contain `"` so escaping isn't needed.
+    var combined: std.ArrayListUnmanaged(u16) = .empty;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const wlen = win32.DragQueryFileW(hdrop, i, null, 0);
+        if (wlen == 0) continue;
+        const path = a.allocSentinel(u16, wlen, 0) catch |e| oom(e);
+        const got = win32.DragQueryFileW(hdrop, i, path.ptr, wlen + 1);
+        if (got == 0) continue;
+
+        if (combined.items.len > 0) combined.append(a, ' ') catch |e| oom(e);
+        combined.append(a, '"') catch |e| oom(e);
+        combined.appendSlice(a, path[0..wlen]) catch |e| oom(e);
+        combined.append(a, '"') catch |e| oom(e);
+    }
+    if (combined.items.len == 0) return;
+    combined.append(a, ' ') catch |e| oom(e);
+
+    const final = a.allocSentinel(u16, combined.items.len, 0) catch |e| oom(e);
+    @memcpy(final[0..combined.items.len], combined.items);
+
+    var write_buf: [4096]u8 = undefined;
+    var pty_writer = pty.write.writerStreaming(&write_buf);
+    pasteUtf16(tab, final.ptr, &pty_writer.interface) catch |err| switch (err) {
+        error.WriteFailed => std.log.err("drop: write to pty failed with {t}", .{pty_writer.err.?}),
         error.Reported => {},
     };
 }
