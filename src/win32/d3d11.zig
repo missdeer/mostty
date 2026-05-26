@@ -18,6 +18,8 @@ const shader = struct {
         scrollbar_height: f32,
         scrollbar_x: f32,
         scrollbar_width: f32,
+        cells_per_row: u32,
+        _pad: [3]u32 = .{ 0, 0, 0 },
     };
     const Cell = extern struct {
         glyph_index: u32,
@@ -263,16 +265,18 @@ fn createTextFormat(
 }
 
 // Custom rendering parameters so the atlas is reproducible across machines
-// and aligns with the shader's gamma 2.2 decode of the ClearType mask.
-// `enhanced_contrast=0` removes D2D's non-invertible contrast curve so the
-// stored mask is a predictable function of coverage; `RGB` stripe and
-// `NATURAL_SYMMETRIC` rendering mode pick the standard subpixel layout and
-// the best horizontal subpixel positioning (experimental — can fall back
-// to `NATURAL` if vertical edges look soft on a given monitor).
+// and aligns with the shader's gamma 2.0 (`c*c`) decode of the ClearType
+// mask. `enhanced_contrast=0` removes D2D's non-invertible contrast curve
+// so the stored mask is a predictable function of coverage; `RGB` stripe
+// and `NATURAL_SYMMETRIC` rendering mode pick the standard subpixel
+// layout and the best horizontal subpixel positioning (experimental —
+// can fall back to `NATURAL` if vertical edges look soft on a given
+// monitor). Gamma here MUST match the shader's `to_linear` exponent
+// (currently 2.0) or text will look washed out / over-saturated.
 fn buildRenderingParams(factory: *win32.IDWriteFactory) *win32.IDWriteRenderingParams {
     var params: *win32.IDWriteRenderingParams = undefined;
     const hr = factory.CreateCustomRenderingParams(
-        2.2,
+        2.0,
         0.0,
         1.0,
         win32.DWRITE_PIXEL_GEOMETRY_RGB,
@@ -599,6 +603,13 @@ pub fn render(
     const term_row_offset: u32 = 1;
     const term_shader_row: u32 = if (shader_row > term_row_offset) shader_row - term_row_offset else 0;
 
+    // Hoist per-frame atlas setup out of the per-cell loop; the cache /
+    // texture state is identical for every cell in a single frame.
+    // Also produces `tex_cell_count` needed by the const-buffer below.
+    const atlas = self.setupGlyphAtlas();
+    const glyph_cache = atlas.cache;
+    const tex_cell_count = atlas.tex_cell_count;
+
     // Update constant buffer
     {
         var mapped: win32.D3D11_MAPPED_SUBRESOURCE = undefined;
@@ -616,6 +627,10 @@ pub fn render(
         config.cell_size[1] = cs.y;
         config.col_count = shader_col;
         config.row_count = shader_row;
+        // Glyph atlas geometry — the shader uses this to convert a
+        // glyph_index to (x,y) in the atlas. Previously the shader
+        // called GetDimensions per pixel and divided by cell_size.
+        config.cells_per_row = tex_cell_count.x;
 
         // Compute scrollbar geometry in pixels (within the reserved scrollbar area)
         // Only show the thumb when scrolled up or mouse is hovering over the scrollbar.
@@ -646,7 +661,7 @@ pub fn render(
 
     // Build cell buffer from terminal state
     const cell_count = shader_col * shader_row;
-    const blank_glyph = self.generateGlyph(.{ .codepoint = ' ', .half = .single });
+    const blank_glyph = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single });
     const bg_rgba: Rgba8 = .{
         .r = @intCast((default_bg >> 16) & 0xFF),
         .g = @intCast((default_bg >> 8) & 0xFF),
@@ -676,7 +691,7 @@ pub fn render(
                 if (col < tab_bar.len) {
                     const tb = tab_bar[col];
                     cells_out[col] = .{
-                        .glyph_index = self.generateGlyph(.{ .codepoint = tb.codepoint, .half = .single }),
+                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = tb.codepoint, .half = .single }),
                         .background = tb.bg,
                         .foreground = tb.fg,
                     };
@@ -692,6 +707,37 @@ pub fn render(
 
         const screen = term.screens.active;
         const palette = &term.colors.palette.current;
+
+        // Precompute selection bounds once per render. The per-cell loop
+        // used to call `sel.contains` which walks the page linked list
+        // three times per call (~36k traversals/frame at 200x60). The
+        // selection is geometrically a contiguous range on each row, so
+        // we just need top-left/bottom-right screen coords + the
+        // per-row x-range derived from them (replicates the logic in
+        // vt.Selection.containedRowCached without re-resolving pins).
+        const SelBounds = struct {
+            tl_y: usize,
+            br_y: usize,
+            tl_x: usize,
+            br_x: usize,
+            rectangle: bool,
+            last_col: usize,
+        };
+        const sel_bounds: ?SelBounds = if (screen.selection) |sel| blk: {
+            const tl_pin = sel.topLeft(screen);
+            const br_pin = sel.bottomRight(screen);
+            const tl = screen.pages.pointFromPin(.screen, tl_pin).?.screen;
+            const br = screen.pages.pointFromPin(.screen, br_pin).?.screen;
+            break :blk SelBounds{
+                .tl_y = tl.y,
+                .br_y = br.y,
+                .tl_x = tl.x,
+                .br_x = br.x,
+                .rectangle = sel.rectangle,
+                .last_col = screen.pages.cols - 1,
+            };
+        } else null;
+
         var row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
         var screen_row: u32 = 0;
         while (row_it.next()) |row_pin| {
@@ -701,6 +747,20 @@ pub fn render(
             const page = &row_pin.node.data;
             const page_cells = page.getCells(row_pin.rowAndCell().row);
             const dst_row_offset = (screen_row + term_row_offset) * shader_col;
+
+            // Per-row x-range of the selection. `null` when the row is
+            // outside the selection entirely. One pointFromPin per row
+            // (~60 calls/frame) instead of three per cell.
+            const SelRange = struct { sx: usize, ex: usize };
+            const sel_row_range: ?SelRange = if (sel_bounds) |sb| range_blk: {
+                const py = screen.pages.pointFromPin(.screen, row_pin).?.screen.y;
+                if (py < sb.tl_y or py > sb.br_y) break :range_blk null;
+                if (sb.rectangle) break :range_blk SelRange{ .sx = sb.tl_x, .ex = sb.br_x };
+                if (sb.tl_y == sb.br_y) break :range_blk SelRange{ .sx = sb.tl_x, .ex = sb.br_x };
+                if (py == sb.tl_y) break :range_blk SelRange{ .sx = sb.tl_x, .ex = sb.last_col };
+                if (py == sb.br_y) break :range_blk SelRange{ .sx = 0, .ex = sb.br_x };
+                break :range_blk SelRange{ .sx = 0, .ex = sb.last_col };
+            } else null;
 
             // Cursor inversion is applied inline (not in a separate post-pass)
             // so that wide CJK glyphs get BOTH halves flipped, not just the
@@ -751,10 +811,8 @@ pub fn render(
                 var fg = Rgba8.fromU24(cell_fg);
 
                 // Highlight selected cells (with fade)
-                if (screen.selection) |sel| {
-                    var cell_pin = row_pin;
-                    cell_pin.x = @intCast(col);
-                    if (sel.contains(screen, cell_pin)) {
+                if (sel_row_range) |r| {
+                    if (col >= r.sx and col <= r.ex) {
                         const orig_bg = bg;
                         var sel_bg = fg;
                         sel_bg.a = 255;
@@ -775,14 +833,14 @@ pub fn render(
 
                 if (cell.wide == .wide) {
                     cells_out[dst_row_offset + col] = .{
-                        .glyph_index = self.generateGlyph(.{ .codepoint = codepoint, .half = .wide_left }),
+                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left }),
                         .background = bg,
                         .foreground = fg,
                     };
                     col += 1;
                     if (col < shader_col) {
                         cells_out[dst_row_offset + col] = .{
-                            .glyph_index = self.generateGlyph(.{ .codepoint = codepoint, .half = .wide_right }),
+                            .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right }),
                             .background = bg,
                             .foreground = fg,
                         };
@@ -792,19 +850,19 @@ pub fn render(
                 }
 
                 cells_out[dst_row_offset + col] = .{
-                    .glyph_index = self.generateGlyph(.{ .codepoint = codepoint, .half = .single }),
+                    .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single }),
                     .background = bg,
                     .foreground = fg,
                 };
                 col += 1;
             }
             // Fill remaining columns with blanks
-            while (col < shader_col) : (col += 1) {
-                cells_out[dst_row_offset + col] = .{
+            if (col < shader_col) {
+                @memset(cells_out[dst_row_offset + col ..][0 .. shader_col - col], shader.Cell{
                     .glyph_index = blank_glyph,
                     .background = bg_rgba,
                     .foreground = bg_rgba,
-                };
+                });
             }
         }
         // Fill remaining terminal rows with blanks (offset by tab bar row)
@@ -842,7 +900,7 @@ pub fn render(
                 var bx: u32 = box_x;
                 while (bx < box_x + box_w and bx < shader_col) : (bx += 1) {
                     cells_out[by * shader_col + bx] = .{
-                        .glyph_index = self.generateGlyph(.{ .codepoint = ' ', .half = .single }),
+                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single }),
                         .background = overlay_bg,
                         .foreground = overlay_fg,
                     };
@@ -857,7 +915,7 @@ pub fn render(
                     const col = tx + @as(u32, @intCast(i));
                     if (col < shader_col) {
                         cells_out[ty * shader_col + col] = .{
-                            .glyph_index = self.generateGlyph(.{ .codepoint = ch, .half = .single }),
+                            .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ch, .half = .single }),
                             .background = overlay_bg,
                             .foreground = overlay_fg,
                         };
@@ -900,7 +958,16 @@ pub fn render(
 
 // --- Glyph generation ---
 
-fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
+// Frame-invariant glyph atlas setup. Call once per render() so the
+// per-cell generateGlyph path does only the cache lookup + miss work.
+// Recreates the cache if the cell size changed or the atlas texture
+// was reallocated.
+const AtlasFrame = struct {
+    cache: *GlyphIndexCache,
+    tex_cell_count: CellXY,
+};
+
+fn setupGlyphAtlas(self: *D3d11Renderer) AtlasFrame {
     const cs = self.cell_size_xy;
     const tex_cell_count = getTextureMaxCellCount(cs);
     const tex_total: u32 = @as(u32, tex_cell_count.x) * @as(u32, tex_cell_count.y);
@@ -922,14 +989,25 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
         }
     }
 
-    const cache = blk: {
-        if (self.glyph_cache) |*c| break :blk c;
+    if (self.glyph_cache == null) {
         self.glyph_cache = GlyphIndexCache.init(
             self.glyph_cache_arena.allocator(),
             tex_total,
         ) catch oom(error.OutOfMemory);
-        break :blk &(self.glyph_cache.?);
-    };
+    }
+
+    const cache = &self.glyph_cache.?;
+    cache.beginFrame();
+    return .{ .cache = cache, .tex_cell_count = tex_cell_count };
+}
+
+fn generateGlyph(
+    self: *D3d11Renderer,
+    cache: *GlyphIndexCache,
+    tex_cell_count: CellXY,
+    key: GlyphIndexCache.Key,
+) u32 {
+    const cs = self.cell_size_xy;
 
     switch (cache.reserve(self.glyph_cache_arena.allocator(), key) catch oom(error.OutOfMemory)) {
         .newly_reserved => |reserved| {
@@ -1084,8 +1162,9 @@ fn generateGlyph(self: *D3d11Renderer, key: GlyphIndexCache.Key) u32 {
                 // Opaque black background; rendering white-on-black through
                 // ClearType yields per-subpixel coverage as the stored RGB
                 // (white·cov + black·(1-cov) = cov). The shader decodes via
-                // pow(2.2) to undo D2D's gamma encode. Grayscale fills R=G=B
-                // equally, so the same decode still produces uniform coverage.
+                // `c*c` (gamma 2.0) to undo D2D's gamma encode. Grayscale
+                // fills R=G=B equally, so the same decode still produces
+                // uniform coverage.
                 const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
                 staging.render_target.Clear(&color);
             }

@@ -7,6 +7,10 @@ cbuffer GridConfig : register(b0)
     float scrollbar_height;
     float scrollbar_x;
     float scrollbar_width;
+    // Glyph atlas geometry, supplied by CPU so the pixel shader skips a
+    // per-pixel GetDimensions/divide just to recover the same constant.
+    uint cells_per_row;
+    uint3 _pad;
 }
 
 struct Cell
@@ -37,22 +41,22 @@ float4 UnpackRgba(uint packed)
     return unpacked;
 }
 
-// gamma 2.2 approximation. Matches DirectWrite's CreateCustomRenderingParams
-// gamma so glyph coverage decoded with the same curve cancels the encode
-// applied by D2D when rendering white-on-black ClearType.
-float3 to_linear(float3 c) { return pow(max(c, 0.0), 2.2); }
+// gamma 2.0 approximation (`c*c` instead of `pow(c, 2.2)`) — the per-pixel
+// pow was hot at 1080p/120fps. Must stay in lock-step with DirectWrite's
+// CreateCustomRenderingParams gamma so the encode applied by D2D when
+// rendering white-on-black ClearType cancels exactly when decoded here.
+float3 to_linear(float3 c) { return c * c; }
 
 float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
-    // Background gradient + dither (shared by grid and scrollbar)
+    // Background gradient (per-pixel sin dither was removed — its
+    // amplitude was ±1/510 and the gradient deltas are tiny, so the
+    // banding it hid is barely perceptible after sRGB encode).
     float2 pos = sv_pos.xy / (cell_size * float2(col_count, row_count));
     float3 purple_gradient = float3(
         lerp(0.08, 0.08, pos.x),
         lerp(0.06, 0.07, pos.y),
         lerp(0.10, 0.09, (pos.x + pos.y) * 0.5)
     );
-    float noise = frac(sin(dot(sv_pos.xy, float2(12.9898, 78.233))) * 43758.5453);
-    noise = (noise - 0.5) / 255.0;
-    purple_gradient += noise;
 
     uint grid_pixel_width = col_count * cell_size.x;
 
@@ -80,10 +84,6 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     float4 bg = UnpackRgba(cell.bg);
     float4 fg = UnpackRgba(cell.fg);
 
-    uint texture_width, texture_height;
-    glyph_texture.GetDimensions(texture_width, texture_height);
-    uint cells_per_row = texture_width / cell_size.x;
-
     uint2 glyph_cell_pos = uint2(
         cell.glyph_index % cells_per_row,
         cell.glyph_index / cells_per_row
@@ -93,8 +93,8 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     float4 glyph_texel = glyph_texture.Load(int3(texture_coord, 0));
 
     // Linear-space blending. The sRGB-flavor RTV re-encodes on store.
-    // Atlas RGB is gamma-encoded ClearType mask intensity; pow(2.2) decode
-    // pairs with CreateCustomRenderingParams(gamma=2.2) to recover linear
+    // Atlas RGB is gamma-encoded ClearType mask intensity; `c*c` decode
+    // pairs with CreateCustomRenderingParams(gamma=2.0) to recover linear
     // per-subpixel coverage.
     float3 linear_gradient = to_linear(purple_gradient);
     float3 linear_fg = to_linear(fg.rgb);

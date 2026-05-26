@@ -12,12 +12,20 @@ const Node = struct {
     prev: ?u32,
     next: ?u32,
     key: ?Key,
+    // Frame counter of the last cache hit that promoted this node. Used
+    // to dampen LRU promotion to once per frame so the inner render loop
+    // doesn't rewrite linked-list pointers on every cell visit. See
+    // `reserve` and `beginFrame`.
+    touched_frame: u32 = 0,
 };
 
 map: std.AutoHashMapUnmanaged(Key, u32) = .{},
 nodes: []Node,
 front: u32,
 back: u32,
+/// Monotonic frame counter bumped by `beginFrame()`. Wraps cleanly;
+/// equality compare against `Node.touched_frame` is the only use.
+frame: u32 = 0,
 
 pub fn init(allocator: std.mem.Allocator, capacity: u32) error{OutOfMemory}!GlyphIndexCache {
     var result: GlyphIndexCache = .{
@@ -43,6 +51,13 @@ pub fn clearRetainingCapacity(self: *GlyphIndexCache) void {
     }
     self.front = 0;
     self.back = @intCast(self.nodes.len - 1);
+    self.frame = 0;
+}
+
+/// Begin a render frame. Caller must invoke this once per render() so
+/// the per-frame LRU dampening below works.
+pub fn beginFrame(self: *GlyphIndexCache) void {
+    self.frame +%= 1;
 }
 
 pub fn deinit(self: *GlyphIndexCache, allocator: std.mem.Allocator) void {
@@ -61,8 +76,18 @@ pub fn reserve(self: *GlyphIndexCache, allocator: std.mem.Allocator, key: Key) e
     {
         const entry = try self.map.getOrPut(allocator, key);
         if (entry.found_existing) {
-            self.moveToBack(entry.value_ptr.*);
-            return .{ .already_reserved = entry.value_ptr.* };
+            const idx = entry.value_ptr.*;
+            // Per-frame LRU dampening: a single render frame visits
+            // many cells that hit the same glyph (think every space in
+            // a row). Promoting on the first hit per frame is enough to
+            // preserve LRU ordering; subsequent same-frame hits skip
+            // the linked-list rewrite. Cuts ~12k pointer writes/frame
+            // at a 200x60 grid down to a few hundred.
+            if (self.nodes[idx].touched_frame != self.frame) {
+                self.nodes[idx].touched_frame = self.frame;
+                self.moveToBack(idx);
+            }
+            return .{ .already_reserved = idx };
         }
         entry.value_ptr.* = self.front;
     }
@@ -71,6 +96,7 @@ pub fn reserve(self: *GlyphIndexCache, allocator: std.mem.Allocator, key: Key) e
     std.debug.assert(self.nodes[self.front].next != null);
     const replaced = self.nodes[self.front].key;
     self.nodes[self.front].key = key;
+    self.nodes[self.front].touched_frame = self.frame;
     if (replaced) |r| {
         const removed = self.map.remove(r);
         std.debug.assert(removed);

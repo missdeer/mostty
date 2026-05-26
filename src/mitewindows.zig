@@ -80,9 +80,24 @@ const Window = struct {
     // messages, so a second WM_CLOSE (e.g. Alt+F4 hammering) or another
     // tab-bar 'x' click could otherwise stack a nested dialog.
     confirming_close: bool = false,
+    // Coalesce paint requests: PTY data arrives in small chunks and each
+    // chunk currently asks for a redraw. Without this, bursty output
+    // (`find /`, `cat large.log`) submits one InvalidateRect syscall per
+    // chunk; Windows still coalesces them into one WM_PAINT, but the
+    // duplicate syscalls cost real CPU and contend on the message queue.
+    // Flag is set on the first request after a paint and cleared inside
+    // WM_PAINT before render() so events fired *during* render still
+    // schedule a follow-up frame.
+    render_pending: bool = false,
 
     fn active(self: *Window) *Tab {
         return self.tabs.items[self.active_index];
+    }
+
+    fn requestRender(self: *Window) void {
+        if (self.render_pending) return;
+        self.render_pending = true;
+        win32.invalidateHwnd(self.hwnd);
     }
 
     fn findById(self: *Window, id: TabId) ?*Tab {
@@ -99,7 +114,7 @@ const Window = struct {
         self.selection_fade = 0;
         _ = win32.KillTimer(self.hwnd, TIMER_SELECTION_FADE);
         self.refreshWindowTitle();
-        win32.invalidateHwnd(self.hwnd);
+        self.requestRender();
     }
 
     fn refreshWindowTitle(self: *Window) void {
@@ -175,7 +190,7 @@ const VtHandler = struct {
         if (window.tabs.items[window.active_index] == tab) {
             setWindowTitleFromUtf8(self.hwnd, tab.title_buf[0..tab.title_len]);
         }
-        win32.invalidateHwnd(self.hwnd);
+        window.requestRender();
     }
 };
 
@@ -1434,7 +1449,7 @@ fn WndProc(
                         scrollbarDragTo(window.active(), mouse_yf - track_height / 2.0, win_h, track_height);
                     }
                     _ = win32.SetCapture(hwnd);
-                    win32.invalidateHwnd(hwnd);
+                    window.requestRender();
                 }
             } else {
                 const screen = window.active().term.screens.active;
@@ -1448,7 +1463,7 @@ fn WndProc(
                     screen.select(sel) catch oom(error.OutOfMemory);
                     window.mouse_capture = .selecting;
                     _ = win32.SetCapture(hwnd);
-                    win32.invalidateHwnd(hwnd);
+                    window.requestRender();
                 }
             }
             return 0;
@@ -1460,7 +1475,7 @@ fn WndProc(
                 .scrollbar_drag => {
                     window.mouse_capture = .none;
                     _ = win32.ReleaseCapture();
-                    win32.invalidateHwnd(hwnd);
+                    window.requestRender();
                 },
                 .selecting => {
                     window.mouse_capture = .none;
@@ -1487,7 +1502,7 @@ fn WndProc(
             const scroll_lines: isize = if (delta > 0) -3 else 3;
             const screen = window.active().term.screens.active;
             screen.scroll(.{ .delta_row = scroll_lines });
-            win32.invalidateHwnd(hwnd);
+            window.requestRender();
             return 0;
         },
         win32.WM_MOUSEMOVE => {
@@ -1519,7 +1534,7 @@ fn WndProc(
                         const min_track_height: f32 = 20.0;
                         const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
                         scrollbarDragTo(window.active(), @as(f32, @floatFromInt(grid_mouse_y)) - window.scrollbar_drag_offset, win_h, track_height);
-                        win32.invalidateHwnd(hwnd);
+                        window.requestRender();
                     },
                     .selecting => {
                         const screen = window.active().term.screens.active;
@@ -1530,7 +1545,7 @@ fn WndProc(
                         if (screen.pages.pin(.{ .viewport = .{ .x = @intCast(col), .y = @intCast(row) } })) |pin| {
                             if (screen.selection) |*sel| {
                                 sel.endPtr().* = pin;
-                                win32.invalidateHwnd(hwnd);
+                                window.requestRender();
                             }
                         }
                     },
@@ -1544,22 +1559,22 @@ fn WndProc(
                 const hit = hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
                 if (!hitEql(window.tab_bar_hover, hit)) {
                     window.tab_bar_hover = if (hit == .none) null else hit;
-                    win32.invalidateHwnd(hwnd);
+                    window.requestRender();
                 }
                 if (window.mouse_in_scrollbar) {
                     window.mouse_in_scrollbar = false;
-                    win32.invalidateHwnd(hwnd);
+                    window.requestRender();
                 }
                 return 0;
             } else if (window.tab_bar_hover != null) {
                 window.tab_bar_hover = null;
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
 
             const in_scrollbar = mouse_x >= grid_w;
             if (in_scrollbar != window.mouse_in_scrollbar) {
                 window.mouse_in_scrollbar = in_scrollbar;
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
             return 0;
         },
@@ -1568,29 +1583,30 @@ fn WndProc(
             window.tracking_mouse = false;
             if (window.mouse_in_scrollbar) {
                 window.mouse_in_scrollbar = false;
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
             if (window.tab_bar_hover != null) {
                 window.tab_bar_hover = null;
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
             return 0;
         },
         win32.WM_DISPLAYCHANGE => {
-            win32.invalidateHwnd(hwnd);
+            const window = windowFromHwnd(hwnd);
+            window.requestRender();
             return 0;
         },
         win32.WM_EXITSIZEMOVE => {
             const window = windowFromHwnd(hwnd);
             window.resizing = false;
-            win32.invalidateHwnd(hwnd);
+            window.requestRender();
             return 0;
         },
         win32.WM_SIZING => {
             const window = windowFromHwnd(hwnd);
             if (!window.resizing) {
                 window.resizing = true;
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
             const rect: *win32.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             const dpi = win32.dpiFromHwnd(hwnd);
@@ -1612,8 +1628,17 @@ fn WndProc(
                 var resize_err: Error = undefined;
                 tab.child_process.resize(&resize_err, cell_count) catch std.debug.panic("{f}", .{resize_err});
             }
+            // Clear before render so requests fired during render() still
+            // schedule a follow-up frame. Skip the unconditional
+            // ValidateRect when a new request landed during render —
+            // otherwise it would cancel the WM_PAINT requestRender just
+            // posted, leaving render_pending stuck true and the next
+            // frame lost.
+            window.render_pending = false;
             renderWindow(window);
-            _ = win32.ValidateRect(hwnd, null);
+            if (!window.render_pending) {
+                _ = win32.ValidateRect(hwnd, null);
+            }
             return 0;
         },
         win32.WM_PAINT => {
@@ -1621,6 +1646,7 @@ fn WndProc(
             defer win32.endPaint(hwnd, &ps);
 
             const window = windowFromHwnd(hwnd);
+            window.render_pending = false;
             renderWindow(window);
             return 0;
         },
@@ -1658,7 +1684,7 @@ fn WndProc(
             const rect: *win32.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             setWindowPosRect(hwnd, rect.*);
             window.bounds = null;
-            win32.invalidateHwnd(hwnd);
+            window.requestRender();
             return 0;
         },
         win32.WM_KEYDOWN => {
@@ -1685,12 +1711,12 @@ fn WndProc(
                 screen.clearSelection();
                 window.selection_fade = 0;
                 _ = win32.KillTimer(hwnd, TIMER_SELECTION_FADE);
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
 
             if (!screen.viewportIsBottom()) {
                 screen.scroll(.active);
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
 
             var key_buf: [16]u8 = undefined;
@@ -1722,7 +1748,7 @@ fn WndProc(
             const screen = tab.term.screens.active;
             if (!screen.viewportIsBottom()) {
                 screen.scroll(.active);
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
             const char: u16 = std.math.cast(u16, wparam) orelse {
                 std.log.warn("unexpected WM_CHAR wparam: {}", .{wparam});
@@ -1818,7 +1844,7 @@ fn WndProc(
                     _ = win32.KillTimer(hwnd, TIMER_SELECTION_FADE);
                     window.active().term.screens.active.clearSelection();
                 }
-                win32.invalidateHwnd(hwnd);
+                window.requestRender();
             }
             return 0;
         },
@@ -1830,7 +1856,7 @@ fn WndProc(
             const tab = window.findById(read_msg.tab_id) orelse return WM_APP_CHILD_PROCESS_DATA_RESULT;
             if (tab.closing) return WM_APP_CHILD_PROCESS_DATA_RESULT;
             tab.vt_stream.nextSlice(read_msg.data[0..read_msg.len]);
-            win32.invalidateHwnd(hwnd);
+            window.requestRender();
             return WM_APP_CHILD_PROCESS_DATA_RESULT;
         },
         else => return win32.DefWindowProcW(hwnd, msg, wparam, lparam),

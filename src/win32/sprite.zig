@@ -6,7 +6,7 @@
 //! The drawing code lives under `src/vendor/ghostty-sprite/` and is invoked
 //! via the comptime range table built below. We rasterize into an alpha-8
 //! z2d surface, then gamma-encode the alpha and replicate it across BGRA so
-//! the existing shader's ClearType-coverage decode (`pow(rgb, 2.2)`) treats
+//! the existing shader's ClearType-coverage decode (`c*c`, gamma 2.0) treats
 //! sprites as uniform grayscale coverage.
 
 const std = @import("std");
@@ -168,8 +168,9 @@ fn getDrawFn(cp: u21) ?*const DrawFn {
 
 /// Render the sprite for `cp` into `out_bgra` (length must be at least
 /// `cell_w * cell_h * 4`, BGRA8 row-major). Returns false if `cp` is not in
-/// the sprite range. The alpha is gamma-2.2 encoded and replicated into B,
-/// G, R; A is set to 0 (the d3d11 shader does not use the atlas alpha).
+/// the sprite range. The alpha is gamma-2.0 encoded and replicated into B,
+/// G, R; A is set to 255/opaque to match the DirectWrite-path atlas
+/// contract (the d3d11 shader does not sample the atlas alpha channel).
 ///
 /// `cell_w` is the destination cell width (cs.x for `.single` /
 /// `.wide_left` halves; for wide glyphs the caller renders twice with the
@@ -210,9 +211,12 @@ pub fn render(
         var x: u32 = 0;
         while (x < cell_w) : (x += 1) {
             const a = buf[src_row + x];
-            // Gamma-encode linear coverage so the shader's pow(rgb, 2.2)
-            // decode recovers the original linear value. For hard 0/255
-            // pixels this is a no-op; AA edges keep their intended weight.
+            // Gamma-encode linear coverage so the shader's `c*c` (gamma
+            // 2.0) decode recovers the original linear value. For hard
+            // 0/255 pixels this is a no-op; AA edges keep their intended
+            // weight. Must stay in lock-step with terminal.hlsl's
+            // `to_linear` exponent and DirectWrite's CreateCustom
+            // RenderingParams gamma.
             const encoded = gammaEncode(a);
             const dst = dst_row + x * 4;
             out_bgra[dst + 0] = encoded; // B
@@ -229,6 +233,8 @@ fn gammaEncode(linear: u8) u8 {
     if (linear == 0) return 0;
     if (linear == 255) return 255;
     const lf: f32 = @as(f32, @floatFromInt(linear)) / 255.0;
-    const ef = std.math.pow(f32, lf, 1.0 / 2.2);
+    // sqrt(c) is the inverse of the shader's `c*c` (gamma 2.0). Was
+    // `pow(c, 1/2.2)` to match the old shader; updated together.
+    const ef = @sqrt(lf);
     return @intFromFloat(@round(ef * 255.0));
 }
