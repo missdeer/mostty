@@ -1,6 +1,6 @@
 .{
-    .name = .mite,
-    .fingerprint = 0xd98529481d694051,
+    .name = .mostty,
+    .fingerprint = 0x5632e72feab3ca7c,
     .version = "0.0.1",
     .minimum_zig_version = "0.15.2",
     .dependencies = .{

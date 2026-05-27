@@ -5,7 +5,7 @@ font_size: f32 = 16.0,
 
 pub fn usage() !void {
     try std.fs.File.stderr().writeAll(
-        \\Usage: mite [options]
+        \\Usage: mostty [options]
         \\
         \\Font Options:
         \\  --ttf <path>              Use TrueType font at <path>

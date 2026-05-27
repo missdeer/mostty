@@ -29,7 +29,7 @@ fn crashMessageBox(msg: []const u8, ret_addr: usize) void {
         };
         break :blk @ptrCast(allocating.writer.buffer.ptr);
     };
-    _ = win32.MessageBoxA(null, final_msg, "Mite Crashed", .{ .ICONHAND = 1 });
+    _ = win32.MessageBoxA(null, final_msg, "Mostty Crashed", .{ .ICONHAND = 1 });
 }
 
 fn writeCrash(writer: *std.Io.Writer, msg: []const u8, ret_addr: usize) error{WriteFailed}!void {

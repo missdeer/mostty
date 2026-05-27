@@ -82,7 +82,7 @@ pub fn main() !void {
         opt.window_placement,
     );
 
-    const CLASS_NAME = win32.L("MiteWindow");
+    const CLASS_NAME = win32.L("MosttyWindow");
 
     {
         const wc = win32.WNDCLASSEXW{
@@ -108,7 +108,7 @@ pub fn main() !void {
     const hwnd = win32.CreateWindowExW(
         types.window_style_ex,
         CLASS_NAME,
-        win32.L("Mite"),
+        win32.L("Mostty"),
         types.window_style,
         placement.pos.x,
         placement.pos.y,
@@ -155,7 +155,7 @@ pub fn main() !void {
     }
 
     win32.DragAcceptFiles(hwnd, 1);
-    // UIPI: when mite runs elevated, Explorer (a lower-integrity process)
+    // UIPI: when mostty runs elevated, Explorer (a lower-integrity process)
     // can't post WM_DROPFILES / WM_COPYGLOBALDATA into our window unless
     // we explicitly allow them through the message filter. Without this,
     // drag-and-drop silently fails when "Run as administrator".

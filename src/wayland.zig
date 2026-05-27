@@ -36,7 +36,7 @@ pub const State = struct {
         };
     }
 
-    pub fn drain(self: *State, backend: *mite.Backend, pty: *mite.Pty, term: *vt.Terminal) !bool {
+    pub fn drain(self: *State, backend: *mostty.Backend, pty: *mostty.Pty, term: *vt.Terminal) !bool {
         var damaged = false;
         const reader = backend.io_pinned.stream_reader.interface();
         const writer = &backend.io_pinned.stream_writer.interface;
@@ -238,7 +238,7 @@ pub const State = struct {
         return damaged;
     }
 
-    pub fn setTitle(self: *State, backend: *mite.Backend, title: []const u8) error{WriteFailed}!void {
+    pub fn setTitle(self: *State, backend: *mostty.Backend, title: []const u8) error{WriteFailed}!void {
         try wl.xdg_toplevel.set_title(
             &backend.io_pinned.stream_writer.interface,
             self.ids.get(.xdg_toplevel),
@@ -246,7 +246,7 @@ pub const State = struct {
         );
     }
 
-    pub fn render(self: *State, backend: *mite.Backend, term: *vt.Terminal) error{WriteFailed}!void {
+    pub fn render(self: *State, backend: *mostty.Backend, term: *vt.Terminal) error{WriteFailed}!void {
         const w, const h = self.pixelSize();
         doRender(
             self.shm_buf.pixel_data,
@@ -270,7 +270,7 @@ pub const State = struct {
     }
 };
 
-pub fn init(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
+pub fn init(io_pinned: *mostty.IoPinned, cmdline: *const Cmdline) !mostty.Backend {
     var sockaddr_err: wl.SockaddrError = undefined;
     const addr = wl.getSockaddr(&sockaddr_err) catch {
         std.log.err("{f}", .{sockaddr_err});
@@ -342,19 +342,19 @@ pub fn init(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
     }
 
     // Bind required globals
-    const compositor_global = maybe_compositor orelse mite.errExit("no wl_compositor", .{});
+    const compositor_global = maybe_compositor orelse mostty.errExit("no wl_compositor", .{});
     try wl.registry.bind(writer, ids.get(.registry), compositor_global.name, wl.compositor.name, @min(wl.compositor.version, compositor_global.version), ids.new(.compositor));
 
-    const shm_global = maybe_shm orelse mite.errExit("no wl_shm", .{});
+    const shm_global = maybe_shm orelse mostty.errExit("no wl_shm", .{});
     try wl.registry.bind(writer, ids.get(.registry), shm_global.name, wl.shm.name, @min(wl.shm.version, shm_global.version), ids.new(.shm));
 
-    const xdg_wm_base_global = maybe_xdg_wm_base orelse mite.errExit("no xdg_wm_base", .{});
+    const xdg_wm_base_global = maybe_xdg_wm_base orelse mostty.errExit("no xdg_wm_base", .{});
     try wl.registry.bind(writer, ids.get(.registry), xdg_wm_base_global.name, wl.xdg_wm_base.name, @min(wl.xdg_wm_base.version, xdg_wm_base_global.version), ids.new(.xdg_wm_base));
 
-    const seat_global = maybe_seat orelse mite.errExit("no wl_seat", .{});
+    const seat_global = maybe_seat orelse mostty.errExit("no wl_seat", .{});
     try wl.registry.bind(writer, ids.get(.registry), seat_global.name, wl.seat.name, @min(wl.seat.version, seat_global.version), ids.new(.seat));
 
-    const output_global = maybe_output orelse mite.errExit("no wl_output", .{});
+    const output_global = maybe_output orelse mostty.errExit("no wl_output", .{});
     try wl.registry.bind(writer, ids.get(.registry), output_global.name, wl.output.name, @min(wl.output.version, output_global.version), ids.new(.output));
 
     // Get keyboard and pointer from seat
@@ -391,9 +391,9 @@ pub fn init(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
     const ttf: TrueType = blk: {
         if (cmdline.font_path) |path| {
             const ttf_content = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 100 * 1024 * 1024) catch |e|
-                mite.errExit("read ttf file '{s}' failed with {s}", .{ path, @errorName(e) });
+                mostty.errExit("read ttf file '{s}' failed with {s}", .{ path, @errorName(e) });
             break :blk TrueType.load(ttf_content) catch
-                mite.errExit("load ttf file '{s}' failed", .{path});
+                mostty.errExit("load ttf file '{s}' failed", .{path});
         }
         break :blk try fontconfig.match();
     };
@@ -413,14 +413,14 @@ pub fn init(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
     try wl.compositor.create_surface(writer, ids.get(.compositor), ids.new(.surface));
     try wl.xdg_wm_base.get_xdg_surface(writer, ids.get(.xdg_wm_base), ids.new(.xdg_surface), ids.get(.surface));
     try wl.xdg_surface.get_toplevel(writer, ids.get(.xdg_surface), ids.new(.xdg_toplevel));
-    try wl.xdg_toplevel.set_title(writer, ids.get(.xdg_toplevel), "mite");
+    try wl.xdg_toplevel.set_title(writer, ids.get(.xdg_toplevel), "mostty");
     // Initial empty commit to get the configure event
     try wl.surface.commit(writer, ids.get(.surface));
     try writer.flush();
 
     // Wait for initial configure
-    var win_width: i32 = mite.window_width_pt;
-    var win_height: i32 = mite.window_height_pt;
+    var win_width: i32 = mostty.window_width_pt;
+    var win_height: i32 = mostty.window_height_pt;
     var configured = false;
     while (!configured) {
         const sender, const opcode, const size = try wl.readHeader(reader);
@@ -558,17 +558,17 @@ const ShmBuffer = struct {
         const stride: u32 = @as(u32, width) * 4;
         const shm_size: u32 = stride * @as(u32, height);
 
-        const shm_fd = posix.memfd_createZ("mite-shm", 0) catch |e|
-            mite.errExit("memfd_create failed with {s}", .{@errorName(e)});
+        const shm_fd = posix.memfd_createZ("mostty-shm", 0) catch |e|
+            mostty.errExit("memfd_create failed with {s}", .{@errorName(e)});
         posix.ftruncate(shm_fd, shm_size) catch |e|
-            mite.errExit("ftruncate failed with {s}", .{@errorName(e)});
+            mostty.errExit("ftruncate failed with {s}", .{@errorName(e)});
 
         const pixels = posix.mmap(null, shm_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .SHARED }, shm_fd, 0) catch |e|
-            mite.errExit("mmap shm failed with {s}", .{@errorName(e)});
+            mostty.errExit("mmap shm failed with {s}", .{@errorName(e)});
 
         try writer.flush();
         wl.shm.create_pool(stream, ids.get(.shm), ids.new(.shm_pool), shm_fd, @intCast(shm_size)) catch |e|
-            mite.errExit("create_pool failed with {s}", .{@errorName(e)});
+            mostty.errExit("create_pool failed with {s}", .{@errorName(e)});
 
         try wl.shm_pool.create_buffer(writer, ids.get(.shm_pool), ids.new(.buffer), 0, @intCast(width), @intCast(height), @intCast(stride), .argb8888);
         try wl.shm_pool.destroy(writer, ids.get(.shm_pool));
@@ -591,17 +591,17 @@ const ShmBuffer = struct {
         const stride: u32 = @as(u32, width) * 4;
         const shm_size: u32 = stride * @as(u32, height);
 
-        const shm_fd = posix.memfd_createZ("mite-shm", 0) catch |e|
-            mite.errExit("memfd_create failed with {s}", .{@errorName(e)});
+        const shm_fd = posix.memfd_createZ("mostty-shm", 0) catch |e|
+            mostty.errExit("memfd_create failed with {s}", .{@errorName(e)});
         posix.ftruncate(shm_fd, shm_size) catch |e|
-            mite.errExit("ftruncate failed with {s}", .{@errorName(e)});
+            mostty.errExit("ftruncate failed with {s}", .{@errorName(e)});
 
         const pixels = posix.mmap(null, shm_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .SHARED }, shm_fd, 0) catch |e|
-            mite.errExit("mmap shm failed with {s}", .{@errorName(e)});
+            mostty.errExit("mmap shm failed with {s}", .{@errorName(e)});
 
         try writer.flush();
         wl.shm.create_pool(stream, ids.get(.shm), ids.get(.shm_pool), shm_fd, @intCast(shm_size)) catch |e|
-            mite.errExit("create_pool failed with {s}", .{@errorName(e)});
+            mostty.errExit("create_pool failed with {s}", .{@errorName(e)});
 
         try wl.shm_pool.create_buffer(writer, ids.get(.shm_pool), ids.get(.buffer), 0, @intCast(width), @intCast(height), @intCast(stride), .argb8888);
         try wl.shm_pool.destroy(writer, ids.get(.shm_pool));
@@ -628,10 +628,10 @@ fn doRender(
     ttf_scale: f32,
     term: *vt.Terminal,
     visible_rows: u16,
-    window_state: mite.WindowState,
+    window_state: mostty.WindowState,
 ) void {
     // Clear with background color
-    const bg_pixel = rgb24ToArgb32(mite.default_bg);
+    const bg_pixel = rgb24ToArgb32(mostty.default_bg);
     const total_pixels = @as(usize, win_width) * @as(usize, win_height);
     for (0..total_pixels) |idx| {
         pixel_data[idx] = bg_pixel;
@@ -659,13 +659,13 @@ fn doRender(
             };
             const codepoint: u21 = if (raw_codepoint == 0) ' ' else raw_codepoint;
 
-            var cell_fg: u24 = mite.default_fg;
-            var cell_bg: u24 = mite.default_bg;
+            var cell_fg: u24 = mostty.default_fg;
+            var cell_bg: u24 = mostty.default_bg;
 
             if (cell.style_id != 0) {
                 const style = page.styles.get(page.memory, cell.style_id).*;
-                cell_fg = mite.resolveColor(style.fg_color, palette, mite.default_fg);
-                cell_bg = mite.resolveColor(style.bg_color, palette, mite.default_bg);
+                cell_fg = mostty.resolveColor(style.fg_color, palette, mostty.default_fg);
+                cell_bg = mostty.resolveColor(style.bg_color, palette, mostty.default_bg);
                 if (style.flags.inverse) {
                     const tmp = cell_fg;
                     cell_fg = cell_bg;
@@ -675,7 +675,7 @@ fn doRender(
 
             // Handle bg-only cells
             switch (cell.content_tag) {
-                .bg_color_palette => cell_bg = mite.rgbToU24(palette[cell.content.color_palette]),
+                .bg_color_palette => cell_bg = mostty.rgbToU24(palette[cell.content.color_palette]),
                 .bg_color_rgb => {
                     const rgb = cell.content.color_rgb;
                     cell_bg = @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
@@ -695,9 +695,9 @@ fn doRender(
         if (cursor_y < visible_rows) {
             const cursor_screen_row: i16 = @intCast(cursor_y);
             if (window_state.focused) {
-                putGlyph(pixel_data, win_width, win_height, cell_width, cell_height, font_ascent, glyph_cache, ttf, ttf_scale, cursor_screen_row, cursor_x, ' ', mite.default_bg, mite.default_fg);
+                putGlyph(pixel_data, win_width, win_height, cell_width, cell_height, font_ascent, glyph_cache, ttf, ttf_scale, cursor_screen_row, cursor_x, ' ', mostty.default_bg, mostty.default_fg);
             } else {
-                drawRect(pixel_data, win_width, win_height, @as(i32, cursor_x) * cell_width, @as(i32, cursor_screen_row) * cell_height, cell_width, cell_height, mite.default_fg);
+                drawRect(pixel_data, win_width, win_height, @as(i32, cursor_x) * cell_width, @as(i32, cursor_screen_row) * cell_height, cell_width, cell_height, mostty.default_fg);
             }
         }
     }
@@ -1019,7 +1019,7 @@ fn evdevToChar(key: u32, shift: bool) u8 {
 const std = @import("std");
 const wl = @import("wl");
 const vt = @import("vt");
-const mite = @import("mite.zig");
+const mostty = @import("mostty.zig");
 const Cmdline = @import("Cmdline.zig");
 const TrueType = @import("TrueType");
 const fontconfig = @import("posix/fontconfig.zig");

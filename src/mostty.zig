@@ -1,10 +1,10 @@
-const mite_config: miteicon.Config = .{
-    .id = "mite",
-    .startup_wm_class = "mite",
+const mostty_config: mosttyicon.Config = .{
+    .id = "mostty",
+    .startup_wm_class = "mostty",
     .desktop_entry = .{
-        .Name = "Mite",
+        .Name = "Mostty",
         .Comment = "Terminal Emulator",
-        .Exec = "mite",
+        .Exec = "mostty",
         .Categories = "System;TerminalEmulator",
     },
 };
@@ -14,7 +14,7 @@ pub fn main() !void {
         break :blk try Cmdline.parse(&args_it);
     };
 
-    try miteicon.installDesktop(mite_config);
+    try mosttyicon.installDesktop(mostty_config);
 
     var io_pinned: IoPinned = undefined;
     var backend = blk: {
@@ -292,7 +292,7 @@ pub fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 const builtin = @import("builtin");
 const std = @import("std");
 const posix = std.posix;
-const miteicon = @import("miteicon");
+const mosttyicon = @import("mosttyicon");
 
 const os = switch (builtin.os.tag) {
     .linux => @import("os/linux.zig"),

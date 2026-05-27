@@ -22,7 +22,7 @@ pub fn getIcons(dpi: util.XY(u32)) Icons {
     });
     const small = win32.LoadImageW(
         win32.GetModuleHandleW(null),
-        @ptrFromInt(cimport.ID_ICON_MITE),
+        @ptrFromInt(cimport.ID_ICON_MOSTTY),
         .ICON,
         small_x,
         small_y,
@@ -30,7 +30,7 @@ pub fn getIcons(dpi: util.XY(u32)) Icons {
     ) orelse win32.panicWin32("LoadImage for small icon", win32.GetLastError());
     const large = win32.LoadImageW(
         win32.GetModuleHandleW(null),
-        @ptrFromInt(cimport.ID_ICON_MITE),
+        @ptrFromInt(cimport.ID_ICON_MOSTTY),
         .ICON,
         large_x,
         large_y,

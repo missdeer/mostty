@@ -1,5 +1,5 @@
 //! This exposes primitives to draw 2D graphics. The original `writeAtlas`
-//! exporter has been removed in the mite vendor; callers read the rasterized
+//! exporter has been removed in the mostty vendor; callers read the rasterized
 //! alpha buffer via `alphaBuf` / `width` / `height` and upload it themselves.
 const std = @import("std");
 const assert = @import("../../quirks.zig").inlineAssert;
@@ -121,7 +121,7 @@ pub const Canvas = struct {
         self.* = undefined;
     }
 
-    // Mite vendor: `writeAtlas` from upstream removed; it depended on
+    // Mostty vendor: `writeAtlas` from upstream removed; it depended on
     // `font.Atlas` which we don't ship. Callers extract the raw alpha-8
     // bitmap directly from `canvas.sfc` (`getWidth()`, `getHeight()`,
     // `image_surface_alpha8.buf`).

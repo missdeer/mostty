@@ -11,12 +11,12 @@ pub fn build(b: *std.Build) void {
             query.abi = .msvc;
             result = b.resolveTargetQuery(query);
         }
-        // Mite's Windows build only supports MSVC ABI today: the WinMain
+        // Mostty's Windows build only supports MSVC ABI today: the WinMain
         // shim, libcmt entry point, and ghostty-vt's C++ ABI all assume it.
         // Fail fast on explicit Windows-GNU to avoid a confusing link error.
         if (result.result.os.tag == .windows and result.result.abi != .msvc) {
             std.debug.panic(
-                "Mite's Windows build requires MSVC ABI; use -Dtarget=x86_64-windows-msvc or omit -Dtarget",
+                "Mostty's Windows build requires MSVC ABI; use -Dtarget=x86_64-windows-msvc or omit -Dtarget",
                 .{},
             );
         }
@@ -30,16 +30,16 @@ pub fn build(b: *std.Build) void {
     const appicon_dep = b.dependency("appicon", .{});
     const x11_mod = if (b.lazyDependency("x11", .{})) |dep| dep.module("x11") else null;
     const appicon_mod = appicon.createModule(b, appicon_dep, .{ .x11 = x11_mod });
-    const miteicon = appicon.createLinuxIcon(b, appicon_dep, appicon_mod, &.{
-        .{ .source = b.path("src/mite.png"), .sizes = &.{ 16, 32, 48, 128 } },
+    const mosttyicon = appicon.createLinuxIcon(b, appicon_dep, appicon_mod, &.{
+        .{ .source = b.path("src/mostty.png"), .sizes = &.{ 16, 32, 48, 128 } },
     });
 
     const main = b.path(switch (target.result.os.tag) {
-        .windows => "src/mitewindows.zig",
-        else => "src/mite.zig",
+        .windows => "src/mosttywindows.zig",
+        else => "src/mostty.zig",
     });
     const exe = b.addExecutable(.{
-        .name = "mite",
+        .name = "mostty",
         .root_module = b.createModule(.{
             .root_source_file = main,
             .target = target,
@@ -47,9 +47,9 @@ pub fn build(b: *std.Build) void {
             // Windows uses std.Thread for the ConPTY read thread.
             .single_threaded = if (target.result.os.tag == .windows) null else true,
         }),
-        .win32_manifest = b.path("src/win32/mite.manifest"),
+        .win32_manifest = b.path("src/win32/mostty.manifest"),
     });
-    addImports(b, target.result, exe.root_module, miteicon, vt, z2d);
+    addImports(b, target.result, exe.root_module, mosttyicon, vt, z2d);
 
     // ghostty-vt module brings in C++ source files (src/simd/*.cpp). On
     // non-MSVC targets we explicitly link libc/libcpp so those translation
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     }
 
     exe.addWin32ResourceFile(.{
-        .file = b.path("src/win32/mite.rc"),
+        .file = b.path("src/win32/mostty.rc"),
         // TODO: add include path if/when we use appicon to generate our .ico file
         // .include_paths = &.{ico.dirname()},
     });
@@ -85,7 +85,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    addImports(b, target.result, tests.root_module, miteicon, vt, z2d);
+    addImports(b, target.result, tests.root_module, mosttyicon, vt, z2d);
     if (target.result.abi != .msvc) {
         tests.linkLibC();
         tests.linkLibCpp();
@@ -98,11 +98,11 @@ fn addImports(
     b: *std.Build,
     target: std.Target,
     mod: *std.Build.Module,
-    miteicon: *std.Build.Module,
+    mosttyicon: *std.Build.Module,
     vt: *std.Build.Module,
     z2d: *std.Build.Module,
 ) void {
-    mod.addImport("miteicon", miteicon);
+    mod.addImport("mosttyicon", mosttyicon);
     mod.addImport("vt", vt);
     mod.addImport("z2d", z2d);
     switch (target.os.tag) {

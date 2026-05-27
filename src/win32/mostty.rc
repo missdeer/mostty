@@ -3,7 +3,7 @@
 // LANG_NEUTRAL(0), SUBLANG_NEUTRAL(0)
 LANGUAGE 0, 0
 
-ID_ICON_MITE ICON "miteterm.ico"
+ID_ICON_MOSTTY ICON "mosttyterm.ico"
 
 VS_VERSION_INFO VERSIONINFO
 //FILEVERSION     VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_COMMIT_HEIGHT
@@ -22,8 +22,8 @@ BEGIN
         //VALUE "FileDescription",    "???"
         //VALUE "FileVersion",        VERSION
         //VALUE "LegalCopyright",     "(C) 2024 ???"
-        VALUE "OriginalFilename", "mite.exe"
-        VALUE "ProductName",        "mite"
+        VALUE "OriginalFilename", "mostty.exe"
+        VALUE "ProductName",        "mostty"
         //VALUE "ProductVersion",     VERSION
         END
     END

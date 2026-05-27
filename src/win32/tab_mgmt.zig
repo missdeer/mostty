@@ -159,7 +159,7 @@ pub fn confirmAndCloseTab(window: *Window, tab_id: TabId) void {
     if (!confirmYesNo(
         window.hwnd,
         win32.L("Close this tab?"),
-        win32.L("Mite"),
+        win32.L("Mostty"),
     )) return;
     // Re-look the index: the modal's nested message pump may have
     // shifted indices (or destroyed the target tab entirely).

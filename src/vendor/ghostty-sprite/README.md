@@ -5,7 +5,7 @@ Vendored from [ghostty](https://github.com/ghostty-org/ghostty) at commit
 
 These files implement Ghostty's procedural drawing of Block Elements, Box
 Drawing, Braille, Powerline, Geometric Shapes, and Legacy Computing symbols.
-Mite uses them through `src/win32/sprite.zig` so that block-art terminal
+Mostty uses them through `src/win32/sprite.zig` so that block-art terminal
 content (Claude Code logo, TUI borders, progress bars, etc.) tiles seamlessly
 regardless of the user's font metrics.
 
@@ -45,7 +45,7 @@ Keep modifications minimal so future syncs are mechanical.
 - `font/sprite/canvas.zig`: removed `writeAtlas`, `clearClippingRegions`,
   and `font.Atlas` references. Buffer extraction is exposed via a public
   helper. `trim`, `transformation`, drawing primitives are kept verbatim.
-- `font/sprite/Face.zig`: NOT vendored; mite has its own minimal dispatcher
+- `font/sprite/Face.zig`: NOT vendored; mostty has its own minimal dispatcher
   in `src/win32/sprite.zig` that mirrors the comptime range collection.
 
 ## License

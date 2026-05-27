@@ -24,7 +24,7 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
         if (!tab_mgmt.confirmYesNo(
             window.hwnd,
             win32.L("Close window and all tabs?"),
-            win32.L("Mite"),
+            win32.L("Mostty"),
         )) return 0;
         tab_mgmt.destroyAllTabs(window);
     } else {

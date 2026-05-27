@@ -91,7 +91,7 @@ pub const Window = struct {
     pub fn refreshWindowTitle(self: *Window) void {
         const tab = self.active();
         if (tab.title_len == 0) {
-            _ = win32.SetWindowTextW(self.hwnd, win32.L("Mite"));
+            _ = win32.SetWindowTextW(self.hwnd, win32.L("Mostty"));
             return;
         }
         util.setWindowTitleFromUtf8(self.hwnd, tab.title_buf[0..tab.title_len]);

@@ -16,7 +16,7 @@ pub const Metrics = sprite_font.Metrics;
 const Canvas = sprite_font.sprite.Canvas;
 
 /// Build a reasonable sprite Metrics from just cell dimensions. Used because
-/// mite doesn't otherwise track per-face typographic metrics; the sprite
+/// mostty doesn't otherwise track per-face typographic metrics; the sprite
 /// drawing code only really depends on these values for stroke thickness and
 /// underline placement, neither of which is critical for the block / box
 /// elements that drive the visible bug.
@@ -132,7 +132,7 @@ const ranges: []const Range = blk: {
     break :blk &fixed;
 };
 
-/// True if `cp` is in mite's sprite range and will be drawn procedurally.
+/// True if `cp` is in mostty's sprite range and will be drawn procedurally.
 pub fn hasCodepoint(cp: u21) bool {
     return getDrawFn(cp) != null;
 }

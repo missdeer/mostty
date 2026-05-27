@@ -49,7 +49,7 @@ pub const State = struct {
     pixmap_width: u16,
     pixmap_height: u16,
 
-    pub fn drain(self: *State, backend: *mite.Backend, pty: *mite.Pty, term: *vt.Terminal) !bool {
+    pub fn drain(self: *State, backend: *mostty.Backend, pty: *mostty.Pty, term: *vt.Terminal) !bool {
         var damaged = drainX11Events(&self.source, &self.keymap, pty, term, &self.win_width, &self.win_height, backend, backend.font_width, backend.font_height) catch |err| switch (err) {
             error.EndOfStream => {
                 std.log.info("X11 connection closed", .{});
@@ -82,7 +82,7 @@ pub const State = struct {
         return damaged;
     }
 
-    pub fn setTitle(self: *State, _: *mite.Backend, title: []const u8) error{WriteFailed}!void {
+    pub fn setTitle(self: *State, _: *mostty.Backend, title: []const u8) error{WriteFailed}!void {
         try self.sink.ChangeProperty(
             .replace,
             self.ids.window(),
@@ -93,7 +93,7 @@ pub const State = struct {
         );
     }
 
-    pub fn render(self: *State, backend: *mite.Backend, term: *vt.Terminal) error{WriteFailed}!void {
+    pub fn render(self: *State, backend: *mostty.Backend, term: *vt.Terminal) error{WriteFailed}!void {
         try doRender(
             &self.sink,
             self.ids.window(),
@@ -115,7 +115,7 @@ pub const State = struct {
     }
 };
 
-pub fn init(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
+pub fn init(io_pinned: *mostty.IoPinned, cmdline: *const Cmdline) !mostty.Backend {
     io_pinned.stream_reader, const used_auth = try x11.draft.connect(&io_pinned.read_buf);
     errdefer x11.disconnect(io_pinned.stream_reader.getStream());
     _ = used_auth;
@@ -126,19 +126,19 @@ pub fn init(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
         else => |e| return e,
     };
 }
-fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
+fn init2(io_pinned: *mostty.IoPinned, cmdline: *const Cmdline) !mostty.Backend {
     const setup = try x11.readSetupSuccess(io_pinned.stream_reader.interface());
     std.log.info("setup reply {f}", .{setup});
     var source: x11.Source = .initFinishSetup(io_pinned.stream_reader.interface(), &setup);
     const root: Root = blk: {
         const screen = try x11.draft.readSetupDynamic(&source, &setup, .{}) orelse {
-            mite.errExit("no screen", .{});
+            mostty.errExit("no screen", .{});
         };
         break :blk .{
             .window = screen.root,
             .visual = screen.root_visual,
             .depth = x11.Depth.init(screen.root_depth) orelse
-                mite.errExit("unsupported depth {}", .{screen.root_depth}),
+                mostty.errExit("unsupported depth {}", .{screen.root_depth}),
         };
     };
     var sink: x11.RequestSink = .{ .writer = &io_pinned.stream_writer.interface };
@@ -161,8 +161,8 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
     };
     std.log.info("dpi_scale={d:.2}", .{dpi_scale});
 
-    const scaled_width: u16 = @intFromFloat(@as(f32, @floatFromInt(mite.window_width_pt)) * dpi_scale);
-    const scaled_height: u16 = @intFromFloat(@as(f32, @floatFromInt(mite.window_height_pt)) * dpi_scale);
+    const scaled_width: u16 = @intFromFloat(@as(f32, @floatFromInt(mostty.window_width_pt)) * dpi_scale);
+    const scaled_height: u16 = @intFromFloat(@as(f32, @floatFromInt(mostty.window_height_pt)) * dpi_scale);
 
     // Intern atoms
     const _NET_WM_NAME = "_NET_WM_NAME";
@@ -195,7 +195,7 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
             .visual_id = root.visual,
         },
         .{
-            .bg_pixel = root.depth.rgbFrom24(mite.default_bg),
+            .bg_pixel = root.depth.rgbFrom24(mostty.default_bg),
             .bit_gravity = .north_west,
             .event_mask = .{
                 .KeyPress = 1,
@@ -211,13 +211,13 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
 
     // Set WM_CLASS so the desktop environment can match the window to its .desktop file
     // Format: "instance\0class\0"
-    try sink.ChangeProperty(.replace, ids.window(), .WM_CLASS, .STRING, u8, .{ .ptr = "mite\x00mite\x00", .len = 10 });
+    try sink.ChangeProperty(.replace, ids.window(), .WM_CLASS, .STRING, u8, .{ .ptr = "mostty\x00mostty\x00", .len = 14 });
 
-    try miteicon.setWmIcons(&sink, ids.window(), net_wm_icon_atom);
+    try mosttyicon.setWmIcons(&sink, ids.window(), net_wm_icon_atom);
 
     const render_ext: RenderExt = blk: {
         const ext = try x11.draft.synchronousQueryExtension(&source, &sink, x11.render.name) orelse {
-            mite.errExit("X11 RENDER extension is required", .{});
+            mostty.errExit("X11 RENDER extension is required", .{});
         };
 
         // Query version (we need at least 0.10 for CreateSolidFill)
@@ -226,7 +226,7 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
         const version, _ = try source.readSynchronousReplyFull(sink.sequence, .render_QueryVersion);
         std.log.info("extension '{f}': version {}.{}", .{ x11.render.name, version.major, version.minor });
         if (version.major != 0 or version.minor < 10) {
-            mite.errExit("X11 RENDER extension version {}.{} is too old (need 0.10+)", .{ version.major, version.minor });
+            mostty.errExit("X11 RENDER extension version {}.{} is too old (need 0.10+)", .{ version.major, version.minor });
         }
 
         // Query pict formats to find A8 and screen-depth formats
@@ -251,7 +251,7 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
         try source.replyDiscard(source.replyRemainingSize());
 
         if (a8_format == null or screen_format == null) {
-            mite.errExit("X11 RENDER extension: required pict formats not found (a8={?d}, screen={?d})", .{ a8_format, screen_format });
+            mostty.errExit("X11 RENDER extension: required pict formats not found (a8={?d}, screen={?d})", .{ a8_format, screen_format });
         }
         break :blk .{ .opcode = ext.opcode_base, .a8_format = a8_format.?, .screen_format = screen_format.? };
     };
@@ -260,7 +260,7 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
     const ttf: TrueType = blk: {
         if (cmdline.font_path) |path| {
             const ttf_content = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 100 * 1024 * 1024) catch |err|
-                mite.errExit("read ttf file '{s}' failed with {s}", .{ path, @errorName(err) });
+                mostty.errExit("read ttf file '{s}' failed with {s}", .{ path, @errorName(err) });
             break :blk TrueType.load(ttf_content) catch |err| {
                 std.log.err("load ttf file '{s}' failed with {t}", .{ path, err });
                 return err;
@@ -279,7 +279,7 @@ fn init2(io_pinned: *mite.IoPinned, cmdline: *const Cmdline) !mite.Backend {
     const font_width: u8 = @intCast(ttf_font.cell_width);
     const font_height: u8 = @intCast(ttf_font.cell_height);
 
-    const gc: Gc = .{ .fg = mite.default_fg, .bg = mite.default_bg };
+    const gc: Gc = .{ .fg = mostty.default_fg, .bg = mostty.default_bg };
     try sink.CreateGc(ids.gc(), ids.window().drawable(), .{
         .foreground = root.depth.rgbFrom24(gc.fg),
         .background = root.depth.rgbFrom24(gc.bg),
@@ -563,11 +563,11 @@ const TtfFont = struct {
 fn drainX11Events(
     source: *x11.Source,
     keymap: *const x11.keymap.Full,
-    pty: *mite.Pty,
+    pty: *mostty.Pty,
     term: *vt.Terminal,
     win_width: *u16,
     win_height: *u16,
-    backend: *mite.Backend,
+    backend: *mostty.Backend,
     font_width: u8,
     font_height: u8,
 ) !bool {
@@ -687,16 +687,16 @@ fn drainX11Events(
 }
 
 fn resolveCellBg(cell: vt.Cell, page: *const vt.Page, palette: *const vt.color.Palette) u24 {
-    var cell_bg: u24 = mite.default_bg;
+    var cell_bg: u24 = mostty.default_bg;
     if (cell.style_id != 0) {
         const style = page.styles.get(page.memory, cell.style_id).*;
-        cell_bg = mite.resolveColor(style.bg_color, palette, mite.default_bg);
+        cell_bg = mostty.resolveColor(style.bg_color, palette, mostty.default_bg);
         if (style.flags.inverse) {
-            cell_bg = mite.resolveColor(style.fg_color, palette, mite.default_fg);
+            cell_bg = mostty.resolveColor(style.fg_color, palette, mostty.default_fg);
         }
     }
     switch (cell.content_tag) {
-        .bg_color_palette => cell_bg = mite.rgbToU24(palette[cell.content.color_palette]),
+        .bg_color_palette => cell_bg = mostty.rgbToU24(palette[cell.content.color_palette]),
         .bg_color_rgb => {
             const rgb = cell.content.color_rgb;
             cell_bg = @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
@@ -721,12 +721,12 @@ fn doRender(
     win_height: u16,
     dpi_scale: f32,
     ttf_font: *TtfFont,
-    window_state: mite.WindowState,
+    window_state: mostty.WindowState,
 ) error{WriteFailed}!void {
     try x11.render.FillRectangles(sink, ttf_font.render_ext_opcode, .{
         .picture_operation = .src,
         .dst_picture = ttf_font.dst_picture,
-        .color = .fromRgb24(mite.default_bg),
+        .color = .fromRgb24(mostty.default_bg),
         .rects = .init(@ptrCast(&x11.Rectangle{ .x = 0, .y = 0, .width = win_width, .height = win_height }), 1),
     });
 
@@ -747,7 +747,7 @@ fn doRender(
 
             var run_start: u16 = 0;
             var run_width: u16 = 0;
-            var run_bg: u24 = mite.default_bg;
+            var run_bg: u24 = mostty.default_bg;
 
             for (cells, 0..) |cell, col_idx| {
                 const cell_bg = resolveCellBg(cell, page, palette);
@@ -759,7 +759,7 @@ fn doRender(
                 }
 
                 // Flush previous run if non-default
-                if (run_bg != mite.default_bg and run_width > 0) {
+                if (run_bg != mostty.default_bg and run_width > 0) {
                     const px: i16 = std.math.cast(i16, run_start *| ttf_font.cell_width) orelse {
                         run_start = col;
                         run_width = ttf_font.cell_width;
@@ -780,7 +780,7 @@ fn doRender(
             }
 
             // Flush final run
-            if (run_bg != mite.default_bg and run_width > 0) {
+            if (run_bg != mostty.default_bg and run_width > 0) {
                 if (std.math.cast(i16, run_start *| ttf_font.cell_width)) |px| {
                     try x11.render.FillRectangles(sink, ttf_font.render_ext_opcode, .{
                         .picture_operation = .src,
@@ -804,7 +804,7 @@ fn doRender(
                 try x11.render.FillRectangles(sink, ttf_font.render_ext_opcode, .{
                     .picture_operation = .src,
                     .dst_picture = ttf_font.dst_picture,
-                    .color = .fromRgb24(mite.default_fg),
+                    .color = .fromRgb24(mostty.default_fg),
                     .rects = .init(@ptrCast(&x11.Rectangle{ .x = px, .y = py, .width = ttf_font.cell_width, .height = ttf_font.cell_height }), 1),
                 });
             }
@@ -830,13 +830,13 @@ fn doRender(
                 };
                 const codepoint: u21 = if (raw_codepoint == 0) continue else raw_codepoint;
 
-                var cell_fg: u24 = mite.default_fg;
+                var cell_fg: u24 = mostty.default_fg;
 
                 if (cell.style_id != 0) {
                     const style = page.styles.get(page.memory, cell.style_id).*;
-                    cell_fg = mite.resolveColor(style.fg_color, palette, mite.default_fg);
+                    cell_fg = mostty.resolveColor(style.fg_color, palette, mostty.default_fg);
                     if (style.flags.inverse) {
-                        cell_fg = mite.resolveColor(style.bg_color, palette, mite.default_bg);
+                        cell_fg = mostty.resolveColor(style.bg_color, palette, mostty.default_bg);
                     }
                 }
 
@@ -862,12 +862,12 @@ fn doRender(
                     };
                     const cp: u21 = if (raw_cp == 0) ' ' else raw_cp;
                     if (cp != ' ') {
-                        try ttf_font.putFgGlyph(sink, cursor_screen_row, cursor_x, cp, mite.default_bg);
+                        try ttf_font.putFgGlyph(sink, cursor_screen_row, cursor_x, cp, mostty.default_bg);
                     }
                 }
             } else if (std.math.cast(i16, cursor_x *| font_width)) |px| {
                 if (std.math.cast(i16, cursor_screen_row *| font_height)) |py| {
-                    try gc_state.update(sink, gc, depth, .{ .fg = mite.default_fg });
+                    try gc_state.update(sink, gc, depth, .{ .fg = mostty.default_fg });
                     try sink.PolyRectangle(offscreen_pixmap.drawable(), gc, .initAssume(&.{
                         .{ .x = px, .y = py, .width = font_width -| 1, .height = font_height -| 1 },
                     }));
@@ -1125,9 +1125,9 @@ fn parseXftDpi(data: []const u8) ?f32 {
 
 const std = @import("std");
 const x11 = @import("x11");
-const miteicon = @import("miteicon");
+const mosttyicon = @import("mosttyicon");
 const vt = @import("vt");
-const mite = @import("mite.zig");
+const mostty = @import("mostty.zig");
 const Cmdline = @import("Cmdline.zig");
 const TrueType = @import("TrueType");
 const fontconfig = @import("posix/fontconfig.zig");

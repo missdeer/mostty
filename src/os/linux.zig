@@ -6,9 +6,9 @@ pub fn setWinsz(fd: posix.fd_t, cols: u16, rows: u16) void {
     }
 }
 
-pub fn openAndSpawn(cols: u16, rows: u16) mite.Pty {
+pub fn openAndSpawn(cols: u16, rows: u16) mostty.Pty {
     const dev_ptmx = "/dev/ptmx";
-    const master = posix.open(dev_ptmx, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0) catch |err| mite.errExit(
+    const master = posix.open(dev_ptmx, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0) catch |err| mostty.errExit(
         "open '{s}' failed with {t}",
         .{ dev_ptmx, err },
     );
@@ -18,14 +18,14 @@ pub fn openAndSpawn(cols: u16, rows: u16) mite.Pty {
     var unlock: i32 = 0;
     switch (posix.errno(linux.ioctl(master, linux.T.IOCSPTLCK, @intFromPtr(&unlock)))) {
         .SUCCESS => {},
-        else => |e| mite.errExit("IOCSPTLCK failed with {t}", .{e}),
+        else => |e| mostty.errExit("IOCSPTLCK failed with {t}", .{e}),
     }
 
     // Get the slave PTY number
     var pty_num: u32 = 0;
     switch (posix.errno(linux.ioctl(master, linux.T.IOCGPTN, @intFromPtr(&pty_num)))) {
         .SUCCESS => {},
-        else => |e| mite.errExit("IOCGPTN failed with {t}", .{e}),
+        else => |e| mostty.errExit("IOCGPTN failed with {t}", .{e}),
     }
 
     // Build slave path: /dev/pts/N
@@ -36,35 +36,35 @@ pub fn openAndSpawn(cols: u16, rows: u16) mite.Pty {
     setWinsz(master, cols, rows);
 
     // Fork
-    const pid = posix.fork() catch |err| mite.errExit("fork failed with {t}", .{err});
+    const pid = posix.fork() catch |err| mostty.errExit("fork failed with {t}", .{err});
     if (pid == 0) {
         // Child process
         posix.close(master);
 
         // Create new session
-        if (linux.setsid() == -1) mite.errExit("setsid failed", .{});
+        if (linux.setsid() == -1) mostty.errExit("setsid failed", .{});
 
         // Open the slave — this becomes the controlling terminal
-        const slave = posix.open(pts_path_z, .{ .ACCMODE = .RDWR }, 0) catch |err| mite.errExit(
+        const slave = posix.open(pts_path_z, .{ .ACCMODE = .RDWR }, 0) catch |err| mostty.errExit(
             "open '{s}' failed with {t}",
             .{ pts_path_z, err },
         );
 
         // Set up stdin/stdout/stderr
-        posix.dup2(slave, 0) catch |err| mite.errExit("dup2 stdin failed with {t}", .{err});
-        posix.dup2(slave, 1) catch |err| mite.errExit("dup2 stdout failed with {t}", .{err});
-        posix.dup2(slave, 2) catch |err| mite.errExit("dup2 stderr failed with {t}", .{err});
+        posix.dup2(slave, 0) catch |err| mostty.errExit("dup2 stdin failed with {t}", .{err});
+        posix.dup2(slave, 1) catch |err| mostty.errExit("dup2 stdout failed with {t}", .{err});
+        posix.dup2(slave, 2) catch |err| mostty.errExit("dup2 stderr failed with {t}", .{err});
         if (slave > 2) posix.close(slave);
 
         // Exec shell with TERM=xterm-256color
         const shell = posix.getenv("SHELL") orelse "/bin/sh";
-        const envp = mite.setTermEnv();
+        const envp = mostty.setTermEnv();
         const err = posix.execvpeZ(
             @ptrCast(shell.ptr),
             &[_:null]?[*:0]const u8{ @ptrCast(shell.ptr), null },
             envp,
         );
-        mite.errExit("exec '{s}' failed with {t}", .{ shell, err });
+        mostty.errExit("exec '{s}' failed with {t}", .{ shell, err });
     }
 
     return .{ .master = master, .pid = pid, .cols = cols, .rows = rows };
@@ -73,5 +73,5 @@ pub fn openAndSpawn(cols: u16, rows: u16) mite.Pty {
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
-const mite = @import("../mite.zig");
+const mostty = @import("../mostty.zig");
 

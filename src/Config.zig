@@ -19,7 +19,7 @@ pub fn loadDefault(gpa: std.mem.Allocator) Config {
     };
     defer gpa.free(localappdata);
 
-    const path = std.fs.path.join(gpa, &.{ localappdata, "mite", "config" }) catch oom();
+    const path = std.fs.path.join(gpa, &.{ localappdata, "mostty", "config" }) catch oom();
     defer gpa.free(path);
 
     return loadPath(gpa, path);

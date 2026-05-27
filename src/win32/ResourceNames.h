@@ -1,1 +1,1 @@
-#define ID_ICON_MITE 1
+#define ID_ICON_MOSTTY 1
