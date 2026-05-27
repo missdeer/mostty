@@ -18,6 +18,25 @@ const TabId = types.TabId;
 const Window = state.Window;
 const global = global_mod.global;
 
+// Effects callback fired when the terminal title changes (OSC 0/2). The
+// stream_terminal Handler has no user context, so walk back through the
+// Stream's `handler` field to the owning Tab via @fieldParentPtr. The
+// Window comes from the singleton `global.window` (set once in WM_CREATE).
+fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
+    if (global.window == null) return;
+    const window: *Window = &global.window.?;
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", handler);
+    const tab: *Tab = @fieldParentPtr("vt_stream", stream);
+    const title = handler.terminal.getTitle() orelse return;
+    const n = @min(title.len, tab.title_buf.len);
+    @memcpy(tab.title_buf[0..n], title[0..n]);
+    tab.title_len = n;
+    if (window.tabs.items[window.active_index] == tab) {
+        util.setWindowTitleFromUtf8(window.hwnd, tab.title_buf[0..tab.title_len]);
+    }
+    window.requestRender();
+}
+
 pub fn newTab(window: *Window) void {
     const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0)
         &global.config.launchers[0]
@@ -95,9 +114,12 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
     }) catch |e| std.debug.panic("Terminal.init: {}", .{e});
 
     tab.vt_stream = .initAlloc(global.gpa.allocator(), .{
-        .readonly = tab.term.vtHandler(),
-        .window = window,
-        .tab_id = tab.id,
+        .terminal = tab.term,
+        .effects = effects: {
+            var e: vt.TerminalStream.Handler.Effects = .readonly;
+            e.title_changed = onTitleChanged;
+            break :effects e;
+        },
     });
 
     window.tabs.append(global.gpa.allocator(), tab) catch util.oom(error.OutOfMemory);

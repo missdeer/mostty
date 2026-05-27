@@ -2,6 +2,29 @@ pub const panic = std.debug.FullPanic(panic_mod.panicHandler);
 
 pub const WndProc = dispatch.WndProc;
 
+// Subsystem=Windows + MSVC ABI pulls libcmt's exe_winmain.obj as the startup,
+// which calls WinMain instead of the Zig-style `main`. We can't suppress
+// libcmt's startup (highway/simdutf require linkLibC), so provide a WinMain
+// that delegates to main. Use @export rather than a root `pub export fn WinMain`
+// because Zig's std/start.zig has a @compileError on @hasDecl(root, "WinMain")
+// for the link_libc=false path; routing through a differently-named local
+// decl keeps that path compileable.
+comptime {
+    if (builtin.link_libc) {
+        @export(&winMain, .{ .name = "WinMain" });
+    }
+}
+
+fn winMain(
+    _: ?win32.HINSTANCE,
+    _: ?win32.HINSTANCE,
+    _: ?win32.PSTR,
+    _: c_int,
+) callconv(.winapi) c_int {
+    main() catch return 1;
+    return 0;
+}
+
 pub fn main() !void {
     const opt: struct {
         window_placement: window_geom.WindowPlacementOptions = .{},
@@ -212,6 +235,7 @@ const state = @import("win32/state.zig");
 const types = @import("win32/types.zig");
 const util = @import("win32/util.zig");
 const window_geom = @import("win32/window_geom.zig");
+const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
 

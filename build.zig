@@ -1,5 +1,27 @@
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = target: {
+        var result = b.standardTargetOptions(.{});
+        // On Windows, default to MSVC ABI. The ghostty-vt module's C++ source
+        // files (src/simd/*.cpp) are compiled with MSVC ABI because ghostty's
+        // own build.zig forces it, so the exe ABI must match or clang's
+        // intrinsics headers break under MSVC SDK include paths. Mirror the
+        // override from ghostty's src/build/Config.zig.
+        if (result.result.os.tag == .windows and result.query.abi == null) {
+            var query = result.query;
+            query.abi = .msvc;
+            result = b.resolveTargetQuery(query);
+        }
+        // Mite's Windows build only supports MSVC ABI today: the WinMain
+        // shim, libcmt entry point, and ghostty-vt's C++ ABI all assume it.
+        // Fail fast on explicit Windows-GNU to avoid a confusing link error.
+        if (result.result.os.tag == .windows and result.result.abi != .msvc) {
+            std.debug.panic(
+                "Mite's Windows build requires MSVC ABI; use -Dtarget=x86_64-windows-msvc or omit -Dtarget",
+                .{},
+            );
+        }
+        break :target result;
+    };
     const optimize = b.standardOptimizeOption(.{});
 
     const vt = b.dependency("ghostty", .{}).module("ghostty-vt");
@@ -29,6 +51,16 @@ pub fn build(b: *std.Build) void {
     });
     addImports(b, target.result, exe.root_module, miteicon, vt, z2d);
 
+    // ghostty-vt module brings in C++ source files (src/simd/*.cpp). On
+    // non-MSVC targets we explicitly link libc/libcpp so those translation
+    // units find their headers. On MSVC the MSVC SDK headers already cover
+    // both C and C++ (pulled in transitively via ghostty-vt's own libC link),
+    // and adding our own linkLibC here is redundant.
+    if (target.result.abi != .msvc) {
+        exe.linkLibC();
+        exe.linkLibCpp();
+    }
+
     exe.addWin32ResourceFile(.{
         .file = b.path("src/win32/mite.rc"),
         // TODO: add include path if/when we use appicon to generate our .ico file
@@ -54,6 +86,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     addImports(b, target.result, tests.root_module, miteicon, vt, z2d);
+    if (target.result.abi != .msvc) {
+        tests.linkLibC();
+        tests.linkLibCpp();
+    }
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
 }

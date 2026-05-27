@@ -17,7 +17,7 @@ pub const Tab = struct {
     child_process: ChildProcess,
     term: *vt.Terminal,
     term_arena: std.heap.ArenaAllocator,
-    vt_stream: vt.Stream(VtHandler),
+    vt_stream: vt.TerminalStream,
     title_buf: [512]u8 = undefined,
     title_len: usize = 0,
     // UTF-16 high surrogate carried across two WM_CHAR calls. Per-tab
@@ -98,45 +98,3 @@ pub const Window = struct {
     }
 };
 
-// VtHandler intercepts `window_title` actions; everything else is delegated
-// to the readonly handler.
-//
-// Invariant: `window: *Window` is dereferenced from the reader thread (via
-// SendMessage on the UI thread) and during normal handling. Its validity
-// depends on `global.window` being set exactly once in WM_CREATE and never
-// reassigned to null or moved while tabs exist. If multi-window support is
-// added later, VtHandler must look the window up by hwnd instead.
-pub const VtHandler = struct {
-    const vt_mod = @import("vt");
-
-    readonly: vt_mod.ReadonlyHandler,
-    window: *Window,
-    tab_id: TabId,
-
-    pub fn vt(
-        self: *VtHandler,
-        comptime action: vt_mod.StreamAction.Tag,
-        value: vt_mod.StreamAction.Value(action),
-    ) void {
-        switch (action) {
-            .window_title => self.handleTitle(value.title),
-            else => {},
-        }
-        self.readonly.vt(action, value);
-    }
-
-    pub fn deinit(self: *VtHandler) void {
-        self.readonly.deinit();
-    }
-
-    fn handleTitle(self: *VtHandler, title: []const u8) void {
-        const tab = self.window.findById(self.tab_id) orelse return;
-        const n = @min(title.len, tab.title_buf.len);
-        @memcpy(tab.title_buf[0..n], title[0..n]);
-        tab.title_len = n;
-        if (self.window.tabs.items[self.window.active_index] == tab) {
-            util.setWindowTitleFromUtf8(self.window.hwnd, tab.title_buf[0..tab.title_len]);
-        }
-        self.window.requestRender();
-    }
-};
