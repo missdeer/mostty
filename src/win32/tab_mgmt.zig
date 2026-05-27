@@ -37,6 +37,64 @@ fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
     window.requestRender();
 }
 
+// Write a query response (CSI c, DECRQM, DSR, XTVERSION, kitty keyboard
+// query, size report, kitty graphics ACK, ...) back to the PTY. Without
+// this, tools like nvim/fzf/less hang waiting for the reply they parse off
+// stdin. Reached only via vt_stream.nextSlice on the UI thread; replies
+// are small (a few bytes) and go through the same path as user keystrokes
+// (see writeToActivePty), so synchronous writeAll is fine in practice.
+fn onWritePty(handler: *vt.TerminalStream.Handler, data: [:0]const u8) void {
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", handler);
+    const tab: *Tab = @fieldParentPtr("vt_stream", stream);
+    if (tab.closing) return;
+    const pty = tab.child_process.pty orelse return;
+    pty.writeFlushAll(data) catch |e| std.log.err(
+        "write_pty failed (tab {}): {s}",
+        .{ tab.id, @errorName(e) },
+    );
+}
+
+// Pull the return type of one of the Effects callback pointers. Lets us
+// reference types like `device_attributes.Attributes` / `size_report.Size`
+// without ghostty-vt's lib_vt.zig having to re-export them.
+fn EffectReturnType(comptime field: []const u8) type {
+    const Effects = vt.TerminalStream.Handler.Effects;
+    const opt = @typeInfo(@FieldType(Effects, field)).optional;
+    const ptr = @typeInfo(opt.child).pointer;
+    const func = @typeInfo(ptr.child).@"fn";
+    return func.return_type.?;
+}
+
+// Encode the response for CSI c / CSI > c / CSI = c. Defaults match what
+// ghostty itself reports (VT220 / ANSI color) — good enough for nvim,
+// fzf, less, etc.
+fn onDeviceAttributes(_: *vt.TerminalStream.Handler) EffectReturnType("device_attributes") {
+    return .{};
+}
+
+// XTVERSION (CSI > 0 q). Without this, the fallback inside ghostty-vt
+// answers "libghostty"; override so apps that switch on the terminal
+// identifier see "mostty".
+fn onXtVersion(_: *vt.TerminalStream.Handler) []const u8 {
+    return "mostty";
+}
+
+// Pixel-based size queries (CSI 14/16/18 t). Cell width/height come from
+// the active renderer; rows/cols from the per-tab terminal state. Returns
+// null (silently ignored) if the renderer hasn't measured a cell yet.
+fn onSize(handler: *vt.TerminalStream.Handler) EffectReturnType("size") {
+    const cs = global.renderer.cell_size;
+    const cell_width = std.math.cast(u32, cs.cx) orelse return null;
+    const cell_height = std.math.cast(u32, cs.cy) orelse return null;
+    if (cell_width == 0 or cell_height == 0) return null;
+    return .{
+        .rows = handler.terminal.rows,
+        .columns = handler.terminal.cols,
+        .cell_width = cell_width,
+        .cell_height = cell_height,
+    };
+}
+
 pub fn newTab(window: *Window) void {
     const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0)
         &global.config.launchers[0]
@@ -118,6 +176,10 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         .effects = effects: {
             var e: vt.TerminalStream.Handler.Effects = .readonly;
             e.title_changed = onTitleChanged;
+            e.write_pty = onWritePty;
+            e.device_attributes = onDeviceAttributes;
+            e.xtversion = onXtVersion;
+            e.size = onSize;
             break :effects e;
         },
     });
