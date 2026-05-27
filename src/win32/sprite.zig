@@ -210,14 +210,11 @@ pub fn render(
         const dst_row = y * cell_w * 4;
         var x: u32 = 0;
         while (x < cell_w) : (x += 1) {
-            const a = buf[src_row + x];
             // Gamma-encode linear coverage so the shader's `c*c` (gamma
-            // 2.0) decode recovers the original linear value. For hard
-            // 0/255 pixels this is a no-op; AA edges keep their intended
-            // weight. Must stay in lock-step with terminal.hlsl's
-            // `to_linear` exponent and DirectWrite's CreateCustom
-            // RenderingParams gamma.
-            const encoded = gammaEncode(a);
+            // 2.0) decode recovers the original linear value. Must stay
+            // in lock-step with terminal.hlsl's `to_linear` exponent and
+            // DirectWrite's CreateCustom RenderingParams gamma.
+            const encoded = gamma_lut[buf[src_row + x]];
             const dst = dst_row + x * 4;
             out_bgra[dst + 0] = encoded; // B
             out_bgra[dst + 1] = encoded; // G
@@ -229,12 +226,16 @@ pub fn render(
     return true;
 }
 
-fn gammaEncode(linear: u8) u8 {
-    if (linear == 0) return 0;
-    if (linear == 255) return 255;
-    const lf: f32 = @as(f32, @floatFromInt(linear)) / 255.0;
-    // sqrt(c) is the inverse of the shader's `c*c` (gamma 2.0). Was
-    // `pow(c, 1/2.2)` to match the old shader; updated together.
-    const ef = @sqrt(lf);
-    return @intFromFloat(@round(ef * 255.0));
-}
+// sqrt(c/255)*255, comptime-baked. Inverse of the shader's `c*c` (gamma 2.0)
+// decode. Replaces a per-pixel sqrt that ran ~30-50 cycles; LUT lookup is
+// ~5 cycles. Endpoints 0/255 are exact by construction.
+const gamma_lut: [256]u8 = blk: {
+    @setEvalBranchQuota(10_000);
+    var lut: [256]u8 = undefined;
+    for (&lut, 0..) |*slot, i| {
+        const lf: f32 = @as(f32, @floatFromInt(i)) / 255.0;
+        const ef = @sqrt(lf);
+        slot.* = @intFromFloat(@round(ef * 255.0));
+    }
+    break :blk lut;
+};

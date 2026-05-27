@@ -83,6 +83,12 @@ dcomp_visual: *win32.IDCompositionVisual = undefined,
 swap_chain: ?*win32.IDXGISwapChain2 = null,
 target_view: ?*win32.ID3D11RenderTargetView = null,
 shader_cells: ShaderCells = .{},
+// CPU shadow of the GPU cell buffer. Per-row equality vs scratch picks
+// which rows actually need UpdateSubresource; on a steady-state terminal
+// (idle prompt, partial-screen output) most rows are unchanged.
+// Reallocated on grow; the grow flag forces full upload that frame so
+// the GPU and shadow are seeded consistently.
+shadow_cells: []shader.Cell = &.{},
 glyph_texture: GlyphTexture = .{},
 glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
 glyph_cache: ?GlyphIndexCache = null,
@@ -530,6 +536,8 @@ pub fn deinit(self: *D3d11Renderer) void {
     _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_texture.release();
     self.shader_cells.release();
+    std.heap.page_allocator.free(self.shadow_cells);
+    self.shadow_cells = &.{};
     // Clear all D3D state and flush before releasing the swap chain,
     // otherwise DXGI keeps the window surface and GDI can't draw to it.
     self.context.ClearState();
@@ -603,6 +611,16 @@ pub fn render(
     const term_row_offset: u32 = 1;
     const term_shader_row: u32 = if (shader_row > term_row_offset) shader_row - term_row_offset else 0;
 
+    // Defensive cap matching the per-row scratch capacity below. Must come
+    // before `shader_cells.updateCount` / `ensureShadowCapacity`: those
+    // mutate GPU buffer and CPU shadow; bailing out after either would
+    // leave shadow allocated but un-seeded, and a later in-range frame
+    // with unchanged `cell_count` would diff against undefined bytes and
+    // silently skip uploads. `render.zig` already gates `total_cols`, but
+    // we keep this as a localized safety net.
+    const max_shader_col: u32 = 4096;
+    if (shader_col > max_shader_col) return;
+
     // Hoist per-frame atlas setup out of the per-cell loop; the cache /
     // texture state is identical for every cell in a single frame.
     // Also produces `tex_cell_count` needed by the const-buffer below.
@@ -669,20 +687,25 @@ pub fn render(
         .a = 0,
     };
 
-    self.shader_cells.updateCount(self.device, cell_count);
+    const cells_recreated = self.shader_cells.updateCount(self.device, cell_count);
     if (cell_count > 0) {
-        var mapped: win32.D3D11_MAPPED_SUBRESOURCE = undefined;
-        const hr = self.context.Map(
-            &self.shader_cells.cell_buf.ID3D11Resource,
-            0,
-            .WRITE_DISCARD,
-            0,
-            &mapped,
-        );
-        if (hr < 0) fatalHr("MapCellBuffer", hr);
-        defer self.context.Unmap(&self.shader_cells.cell_buf.ID3D11Resource, 0);
+        const shadow_grown = self.ensureShadowCapacity(cell_count);
+        // resize overlay re-writes arbitrary rows after the main per-row
+        // upload pass has already issued UpdateSubresource for them; rather
+        // than backtracking, force-full when resizing so shadow == GPU at
+        // the end of the main pass and the overlay sees a known state.
+        const force_full = cells_recreated or shadow_grown or resizing;
 
-        const cells_out: [*]shader.Cell = @ptrCast(@alignCast(mapped.pData));
+        // Per-row CPU scratch; one row at a time stays in L1 while we both
+        // build it and diff it against the shadow. `max_shader_col` was
+        // already gated above before any state mutation.
+        var row_scratch: [max_shader_col]shader.Cell = undefined;
+        const scratch = row_scratch[0..shader_col];
+        const blank_cell: shader.Cell = .{
+            .glyph_index = blank_glyph,
+            .background = bg_rgba,
+            .foreground = bg_rgba,
+        };
 
         // Tab bar in shader row 0.
         {
@@ -690,19 +713,16 @@ pub fn render(
             while (col < shader_col) : (col += 1) {
                 if (col < tab_bar.len) {
                     const tb = tab_bar[col];
-                    cells_out[col] = .{
+                    scratch[col] = .{
                         .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = tb.codepoint, .half = .single }),
                         .background = tb.bg,
                         .foreground = tb.fg,
                     };
                 } else {
-                    cells_out[col] = .{
-                        .glyph_index = blank_glyph,
-                        .background = bg_rgba,
-                        .foreground = bg_rgba,
-                    };
+                    scratch[col] = blank_cell;
                 }
             }
+            self.uploadCellRow(0, scratch, force_full);
         }
 
         const screen = term.screens.active;
@@ -746,7 +766,6 @@ pub fn render(
 
             const page = &row_pin.node.data;
             const page_cells = page.getCells(row_pin.rowAndCell().row);
-            const dst_row_offset = (screen_row + term_row_offset) * shader_col;
 
             // Per-row x-range of the selection. `null` when the row is
             // outside the selection entirely. One pointFromPin per row
@@ -832,14 +851,14 @@ pub fn render(
                 }
 
                 if (cell.wide == .wide) {
-                    cells_out[dst_row_offset + col] = .{
+                    scratch[col] = .{
                         .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left }),
                         .background = bg,
                         .foreground = fg,
                     };
                     col += 1;
                     if (col < shader_col) {
-                        cells_out[dst_row_offset + col] = .{
+                        scratch[col] = .{
                             .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right }),
                             .background = bg,
                             .foreground = fg,
@@ -849,7 +868,7 @@ pub fn render(
                     continue;
                 }
 
-                cells_out[dst_row_offset + col] = .{
+                scratch[col] = .{
                     .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single }),
                     .background = bg,
                     .foreground = fg,
@@ -858,27 +877,32 @@ pub fn render(
             }
             // Fill remaining columns with blanks
             if (col < shader_col) {
-                @memset(cells_out[dst_row_offset + col ..][0 .. shader_col - col], shader.Cell{
-                    .glyph_index = blank_glyph,
-                    .background = bg_rgba,
-                    .foreground = bg_rgba,
-                });
+                @memset(scratch[col..shader_col], blank_cell);
             }
-        }
-        // Fill remaining terminal rows with blanks (offset by tab bar row)
-        while (screen_row < term_shader_row) : (screen_row += 1) {
+
             const dst_row_offset = (screen_row + term_row_offset) * shader_col;
-            @memset(cells_out[dst_row_offset..][0..shader_col], shader.Cell{
-                .glyph_index = blank_glyph,
-                .background = bg_rgba,
-                .foreground = bg_rgba,
-            });
+            self.uploadCellRow(dst_row_offset, scratch, force_full);
+        }
+        // Fill remaining terminal rows with blanks (offset by tab bar row).
+        // The row content is identical across iterations so we build scratch
+        // once and let uploadCellRow's diff skip any row whose shadow already
+        // matches.
+        if (screen_row < term_shader_row) {
+            @memset(scratch, blank_cell);
+            while (screen_row < term_shader_row) : (screen_row += 1) {
+                const dst_row_offset = (screen_row + term_row_offset) * shader_col;
+                self.uploadCellRow(dst_row_offset, scratch, force_full);
+            }
         }
 
         // Cursor inversion is applied inline in the per-row cell loop so
         // wide CJK gets both halves flipped, not just the left one.
 
         // Draw resize overlay (e.g. "80x25") in the terminal region (skip tab bar row).
+        // force_full above guarantees the shadow now mirrors GPU exactly, so we
+        // can pull each overlaid row out of the shadow, apply the overlay
+        // edits in-place, and re-upload — no need to recompute the row from
+        // terminal state.
         if (resizing) {
             const overlay_bg = Rgba8.fromU24(0x333333);
             const overlay_fg = Rgba8.fromU24(0xffffff);
@@ -894,33 +918,37 @@ pub fn render(
             const box_y_inner = (term_shader_row -| box_h) / 2;
             const box_y = box_y_inner + term_row_offset;
 
-            // Draw background box
+            const tx = box_x + (box_w -| text_len) / 2;
+            const ty = box_y + 1;
+
             var by: u32 = box_y;
             while (by < box_y + box_h and by < shader_row) : (by += 1) {
+                const dst_row_offset = by * shader_col;
+                @memcpy(scratch, self.shadow_cells[dst_row_offset..][0..shader_col]);
+
+                // Background box on this row.
                 var bx: u32 = box_x;
                 while (bx < box_x + box_w and bx < shader_col) : (bx += 1) {
-                    cells_out[by * shader_col + bx] = .{
+                    scratch[bx] = .{
                         .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single }),
                         .background = overlay_bg,
                         .foreground = overlay_fg,
                     };
                 }
-            }
-
-            // Draw text centered
-            const tx = box_x + (box_w -| text_len) / 2;
-            const ty = box_y + 1;
-            if (ty < shader_row) {
-                for (text, 0..) |ch, i| {
-                    const col = tx + @as(u32, @intCast(i));
-                    if (col < shader_col) {
-                        cells_out[ty * shader_col + col] = .{
-                            .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ch, .half = .single }),
-                            .background = overlay_bg,
-                            .foreground = overlay_fg,
-                        };
+                // Text on the middle row only.
+                if (by == ty) {
+                    for (text, 0..) |ch, i| {
+                        const tcol = tx + @as(u32, @intCast(i));
+                        if (tcol < shader_col) {
+                            scratch[tcol] = .{
+                                .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ch, .half = .single }),
+                                .background = overlay_bg,
+                                .foreground = overlay_fg,
+                            };
+                        }
                     }
                 }
+                self.uploadCellRow(dst_row_offset, scratch, true);
             }
         }
     }
@@ -1453,15 +1481,21 @@ const ShaderCells = struct {
     cell_buf: *win32.ID3D11Buffer = undefined,
     cell_view: *win32.ID3D11ShaderResourceView = undefined,
 
-    fn updateCount(self: *ShaderCells, device: *win32.ID3D11Device, count: u32) void {
-        if (count == self.count) return;
+    /// Returns true when the underlying buffer was (re)created, signaling
+    /// the caller that the CPU shadow must be reseeded by a forced full
+    /// upload this frame.
+    fn updateCount(self: *ShaderCells, device: *win32.ID3D11Device, count: u32) bool {
+        if (count == self.count) return false;
         self.release();
         if (count > 0) {
             const buf_desc: win32.D3D11_BUFFER_DESC = .{
                 .ByteWidth = count * @sizeOf(shader.Cell),
-                .Usage = .DYNAMIC,
+                // DEFAULT + UpdateSubresource: row-level partial writes,
+                // unchanged rows skipped via shadow diff. Previously DYNAMIC
+                // + Map(WRITE_DISCARD) forced full-buffer rewrite per frame.
+                .Usage = .DEFAULT,
                 .BindFlags = .{ .SHADER_RESOURCE = 1 },
-                .CPUAccessFlags = .{ .WRITE = 1 },
+                .CPUAccessFlags = .{},
                 .MiscFlags = .{ .BUFFER_STRUCTURED = 1 },
                 .StructureByteStride = @sizeOf(shader.Cell),
             };
@@ -1486,6 +1520,7 @@ const ShaderCells = struct {
             if (hr2 < 0) fatalHr("CreateCellView", hr2);
         }
         self.count = count;
+        return true;
     }
 
     fn release(self: *ShaderCells) void {
@@ -1718,6 +1753,52 @@ fn rgbToU24(rgb: vt.color.RGB) u24 {
 
 fn fatalHr(what: []const u8, hresult: win32.HRESULT) noreturn {
     std.debug.panic("{s} failed, hresult=0x{x}", .{ what, @as(u32, @bitCast(hresult)) });
+}
+
+/// Grow `shadow_cells` to hold `count` entries. Returns true on grow so the
+/// caller forces a full upload that frame (newly-allocated tail is undefined
+/// and would otherwise alias a stale row's content). Shrinks are kept as-is:
+/// the tail past `count` is never read.
+fn ensureShadowCapacity(self: *D3d11Renderer, count: u32) bool {
+    if (self.shadow_cells.len >= count) return false;
+    std.heap.page_allocator.free(self.shadow_cells);
+    self.shadow_cells = std.heap.page_allocator.alloc(shader.Cell, count) catch oom(error.OutOfMemory);
+    return true;
+}
+
+/// Diff `scratch` against the shadow row at `row_start_cell`; if changed (or
+/// `force_full`), push the row to the GPU via UpdateSubresource and sync the
+/// shadow. `row_start_cell` is in cell units (not bytes).
+fn uploadCellRow(
+    self: *D3d11Renderer,
+    row_start_cell: u32,
+    scratch: []const shader.Cell,
+    force_full: bool,
+) void {
+    const shadow_row = self.shadow_cells[row_start_cell..][0..scratch.len];
+    if (!force_full and std.mem.eql(
+        u8,
+        std.mem.sliceAsBytes(shadow_row),
+        std.mem.sliceAsBytes(scratch),
+    )) return;
+    const cell_bytes: u32 = @sizeOf(shader.Cell);
+    const box: win32.D3D11_BOX = .{
+        .left = row_start_cell * cell_bytes,
+        .right = (row_start_cell + @as(u32, @intCast(scratch.len))) * cell_bytes,
+        .top = 0,
+        .bottom = 1,
+        .front = 0,
+        .back = 1,
+    };
+    self.context.UpdateSubresource(
+        &self.shader_cells.cell_buf.ID3D11Resource,
+        0,
+        &box,
+        scratch.ptr,
+        0,
+        0,
+    );
+    @memcpy(shadow_row, scratch);
 }
 
 fn lerpRgba8(a: Rgba8, b: Rgba8, t: f32) Rgba8 {
