@@ -129,8 +129,10 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
         std.log.err("pty closed", .{});
         return 0;
     };
-    // Ctrl+Shift+V or Shift+Insert: paste from clipboard
-    if ((wparam == @intFromEnum(win32.VK_V) and util.isCtrlDown() and util.isShiftDown()) or
+    // Ctrl+V, Ctrl+Shift+V, or Shift+Insert: paste from clipboard.
+    // Exclude Alt: AltGr is reported as Ctrl+Alt, so AltGr+V must stay a
+    // printable character on layouts that map it.
+    if ((wparam == @intFromEnum(win32.VK_V) and util.isCtrlDown() and !util.isAltDown()) or
         (wparam == @intFromEnum(win32.VK_INSERT) and util.isShiftDown()))
     {
         paste.pasteClipboard(hwnd, tab);
@@ -194,8 +196,8 @@ pub fn onChar(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LR
     if (char == 0x09 and shift) return 0;
     // Ctrl+Tab is a tab-switch shortcut; suppress the resulting \t.
     if (char == 0x09 and ctrl) return 0;
-    // Suppress Ctrl+Shift+V control character (paste is handled in WM_KEYDOWN)
-    if (char == 0x16 and shift) return 0;
+    // Suppress Ctrl+V control character (paste is handled in WM_KEYDOWN)
+    if (char == 0x16) return 0;
     // Ctrl+T (0x14) and Ctrl+W (0x17) are tab shortcuts; suppress.
     if (ctrl and !shift) {
         if (char == 0x14 or char == 0x17) return 0;

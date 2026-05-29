@@ -21,6 +21,10 @@ pub fn isShiftDown() bool {
     return win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0;
 }
 
+pub fn isAltDown() bool {
+    return win32.GetKeyState(@intFromEnum(win32.VK_MENU)) < 0;
+}
+
 pub fn rectIntFromSize(args: struct { left: i32, top: i32, width: i32, height: i32 }) win32.RECT {
     return .{
         .left = args.left,
