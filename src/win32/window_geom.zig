@@ -61,8 +61,14 @@ pub fn calcWindowPlacement(
     );
 
     const wanted_size: win32.SIZE = .{
-        .cx = win32.scaleDpi(i32, @as(i32, @intCast(opt.width orelse 900)), result.dpi.x),
-        .cy = win32.scaleDpi(i32, @as(i32, @intCast(opt.height orelse 700)), result.dpi.y),
+        .cx = if (opt.width) |w|
+            win32.scaleDpi(i32, @as(i32, @intCast(w)), result.dpi.x)
+        else
+            @divTrunc(work_size.cx * 70, 100), // leave 15% margin on each side
+        .cy = if (opt.height) |h|
+            win32.scaleDpi(i32, @as(i32, @intCast(h)), result.dpi.y)
+        else
+            @divTrunc(work_size.cy * 80, 100), // leave 10% margin top and bottom
     };
     const bounding_size: win32.SIZE = .{
         .cx = @min(wanted_size.cx, work_size.cx),
