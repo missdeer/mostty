@@ -31,11 +31,20 @@ pub fn main() !void {
     } = .{};
 
     const maybe_monitor: ?win32.HMONITOR = blk: {
+        const pt: win32.POINT = if (opt.window_placement.left != null or opt.window_placement.top != null) .{
+            .x = opt.window_placement.left orelse 0,
+            .y = opt.window_placement.top orelse 0,
+        } else cursor: {
+            // No explicit placement: center on the monitor the cursor is on.
+            var cursor: win32.POINT = undefined;
+            if (0 == win32.GetCursorPos(&cursor)) {
+                std.log.warn("GetCursorPos failed, error={f}", .{win32.GetLastError()});
+                break :cursor win32.POINT{ .x = 0, .y = 0 };
+            }
+            break :cursor cursor;
+        };
         break :blk win32.MonitorFromPoint(
-            .{
-                .x = opt.window_placement.left orelse 0,
-                .y = opt.window_placement.top orelse 0,
-            },
+            pt,
             win32.MONITOR_DEFAULTTOPRIMARY,
         ) orelse {
             std.log.warn("MonitorFromPoint failed, error={f}", .{win32.GetLastError()});
@@ -56,7 +65,7 @@ pub fn main() !void {
             std.log.warn("GetDpiForMonitor failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
             break :blk .{ .x = 96, .y = 96 };
         }
-        std.log.debug("primary monitor dpi {}x{}", .{ dpi.x, dpi.y });
+        std.log.debug("monitor dpi {}x{}", .{ dpi.x, dpi.y });
         break :blk dpi;
     };
 
