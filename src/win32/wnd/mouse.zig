@@ -216,8 +216,8 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
         if (hit == .new_tab) {
             launcher.showLauncherMenu(window, mouse_x, mouse_y);
-            return 0;
         }
+        return 0;
     }
     paste.pasteClipboard(hwnd, window.active());
     return 0;
