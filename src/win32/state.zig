@@ -5,6 +5,7 @@ const vt = @import("vt");
 const types = @import("types.zig");
 const util = @import("util.zig");
 const cp_mod = @import("child_process.zig");
+const vt_stream_mod = @import("vt_stream.zig");
 
 const TabId = types.TabId;
 const TabHit = types.TabHit;
@@ -17,7 +18,7 @@ pub const Tab = struct {
     child_process: ChildProcess,
     term: *vt.Terminal,
     term_arena: std.heap.ArenaAllocator,
-    vt_stream: vt.TerminalStream,
+    vt_stream: vt_stream_mod.Stream,
     title_buf: [512]u8 = undefined,
     title_len: usize = 0,
     // UTF-16 high surrogate carried across two WM_CHAR calls. Per-tab
@@ -97,4 +98,3 @@ pub const Window = struct {
         util.setWindowTitleFromUtf8(self.hwnd, tab.title_buf[0..tab.title_len]);
     }
 };
-

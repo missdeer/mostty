@@ -9,6 +9,7 @@ const global_mod = @import("global.zig");
 const state = @import("state.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const vt_stream_mod = @import("vt_stream.zig");
 const window_geom = @import("window_geom.zig");
 
 const ChildProcess = cp_mod.ChildProcess;
@@ -18,6 +19,12 @@ const TabId = types.TabId;
 const Window = state.Window;
 const global = global_mod.global;
 
+fn tabFromEffectHandler(handler: *vt.TerminalStream.Handler) *Tab {
+    const mostty_handler: *vt_stream_mod.Handler = @fieldParentPtr("inner", handler);
+    const stream: *vt_stream_mod.Stream = @fieldParentPtr("handler", mostty_handler);
+    return @fieldParentPtr("vt_stream", stream);
+}
+
 // Effects callback fired when the terminal title changes (OSC 0/2). The
 // stream_terminal Handler has no user context, so walk back through the
 // Stream's `handler` field to the owning Tab via @fieldParentPtr. The
@@ -25,8 +32,7 @@ const global = global_mod.global;
 fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
     if (global.window == null) return;
     const window: *Window = &global.window.?;
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", handler);
-    const tab: *Tab = @fieldParentPtr("vt_stream", stream);
+    const tab = tabFromEffectHandler(handler);
     const title = handler.terminal.getTitle() orelse return;
     const n = @min(title.len, tab.title_buf.len);
     @memcpy(tab.title_buf[0..n], title[0..n]);
@@ -44,8 +50,7 @@ fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
 // are small (a few bytes) and go through the same path as user keystrokes
 // (see writeToActivePty), so synchronous writeAll is fine in practice.
 fn onWritePty(handler: *vt.TerminalStream.Handler, data: [:0]const u8) void {
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", handler);
-    const tab: *Tab = @fieldParentPtr("vt_stream", stream);
+    const tab = tabFromEffectHandler(handler);
     if (tab.closing) return;
     const pty = tab.child_process.pty orelse return;
     pty.writeFlushAll(data) catch |e| std.log.err(
@@ -171,9 +176,9 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         .rows = cell_count.row,
     }) catch |e| std.debug.panic("Terminal.init: {}", .{e});
 
-    tab.vt_stream = .initAlloc(global.gpa.allocator(), .{
-        .terminal = tab.term,
-        .effects = effects: {
+    tab.vt_stream = .initAlloc(
+        global.gpa.allocator(),
+        vt_stream_mod.Handler.init(tab.term, effects: {
             var e: vt.TerminalStream.Handler.Effects = .readonly;
             e.title_changed = onTitleChanged;
             e.write_pty = onWritePty;
@@ -181,8 +186,8 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
             e.xtversion = onXtVersion;
             e.size = onSize;
             break :effects e;
-        },
-    });
+        }),
+    );
 
     window.tabs.append(global.gpa.allocator(), tab) catch util.oom(error.OutOfMemory);
     window.active_index = window.tabs.items.len - 1;
