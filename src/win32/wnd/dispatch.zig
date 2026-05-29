@@ -49,6 +49,7 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = win32.WM_IME_NOTIFY, .handler = &ime.onImeNotify },
     // misc
     .{ .msg = win32.WM_TIMER, .handler = &misc.onTimer },
+    .{ .msg = win32.WM_SYSCOMMAND, .handler = &misc.onSysCommand },
     .{ .msg = win32.WM_DROPFILES, .handler = &misc.onDropFiles },
     .{ .msg = types.WM_APP_CHILD_PROCESS_DATA, .handler = &misc.onAppChildProcessData },
 };

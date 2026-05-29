@@ -38,6 +38,10 @@ pub const WM_APP_CHILD_PROCESS_DATA_RESULT = 0x1bb502b6;
 pub const WM_APP_CLOSE_TAB = win32.WM_APP + 1;
 pub const TIMER_SELECTION_FADE: usize = 1;
 
+// System-menu command id. Must be < 0xF000 (system range) and a multiple of
+// 16, since DefWindowProc masks WM_SYSCOMMAND wparam with 0xFFF0.
+pub const IDM_OPEN_SETTINGS: usize = 0x0010;
+
 pub const window_style = win32.WS_OVERLAPPEDWINDOW;
 pub const window_style_ex = win32.WINDOW_EX_STYLE{
     .APPWINDOW = 1,

@@ -12,14 +12,19 @@ launchers: []const Launcher = &.{},
 
 arena: ?std.heap.ArenaAllocator = null,
 
+// The default config location, %LOCALAPPDATA%/mostty/config. Returns null when
+// LOCALAPPDATA is unset. Caller owns the returned slice.
+pub fn defaultPath(gpa: std.mem.Allocator) ?[]const u8 {
+    const localappdata = std.process.getEnvVarOwned(gpa, "LOCALAPPDATA") catch return null;
+    defer gpa.free(localappdata);
+    return std.fs.path.join(gpa, &.{ localappdata, "mostty", "config" }) catch oom();
+}
+
 pub fn loadDefault(gpa: std.mem.Allocator) Config {
-    const localappdata = std.process.getEnvVarOwned(gpa, "LOCALAPPDATA") catch |err| {
-        std.log.info("config: LOCALAPPDATA unavailable ({s}); using defaults", .{@errorName(err)});
+    const path = defaultPath(gpa) orelse {
+        std.log.info("config: LOCALAPPDATA unavailable; using defaults", .{});
         return .{};
     };
-    defer gpa.free(localappdata);
-
-    const path = std.fs.path.join(gpa, &.{ localappdata, "mostty", "config" }) catch oom();
     defer gpa.free(path);
 
     return loadPath(gpa, path);

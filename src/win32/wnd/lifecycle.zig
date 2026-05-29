@@ -12,6 +12,10 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     std.debug.assert(global.window == null);
     global.window = .{ .hwnd = hwnd };
     const window = &global.window.?;
+    if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
+        _ = win32.AppendMenuW(menu, win32.MF_SEPARATOR, 0, null);
+        _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_OPEN_SETTINGS, win32.L("Open Settings File..."));
+    }
     tab_mgmt.newTab(window);
     return 0;
 }
