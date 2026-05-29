@@ -11,7 +11,7 @@ pub const global = struct {
     pub var renderer: d3d11 = undefined;
     pub var window: ?state.Window = null;
     pub var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    pub var config: *const Config = undefined;
+    pub var config: Config = .{};
 };
 
 pub fn windowFromHwnd(hwnd: win32.HWND) *state.Window {

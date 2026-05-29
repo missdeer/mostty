@@ -52,6 +52,7 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = win32.WM_SYSCOMMAND, .handler = &misc.onSysCommand },
     .{ .msg = win32.WM_DROPFILES, .handler = &misc.onDropFiles },
     .{ .msg = types.WM_APP_CHILD_PROCESS_DATA, .handler = &misc.onAppChildProcessData },
+    .{ .msg = types.WM_APP_CONFIG_CHANGED, .handler = &misc.onAppConfigChanged },
 };
 
 comptime {

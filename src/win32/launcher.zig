@@ -55,12 +55,27 @@ fn loadSshHostsErr(arena: std.mem.Allocator) ![]const SshHost {
     return hosts.toOwnedSlice(arena);
 }
 
+fn dupeLaunchers(a: std.mem.Allocator, src: []const Config.Launcher) []const Config.Launcher {
+    const out = a.alloc(Config.Launcher, src.len) catch |e| util.oom(e);
+    for (src, out) |s, *d| d.* = .{
+        .label = a.dupe(u8, s.label) catch |e| util.oom(e),
+        .command_line = a.dupe(u8, s.command_line) catch |e| util.oom(e),
+        .working_directory = a.dupe(u8, s.working_directory) catch |e| util.oom(e),
+    };
+    return out;
+}
+
 pub fn showLauncherMenu(window: *Window, client_x: i32, client_y: i32) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const launchers = global.config.launchers;
+    // Copy launcher entries into our arena before TrackPopupMenu: that call
+    // runs a modal message loop which can dispatch a config hot-reload
+    // (WM_TIMER -> reloadConfig), deinit'ing the arena behind
+    // global.config.launchers and dangling this slice by the time we index it
+    // after the menu returns.
+    const launchers = dupeLaunchers(a, global.config.launchers);
     const ssh_hosts = loadSshHosts(a);
     if (launchers.len == 0 and ssh_hosts.len == 0) return;
 

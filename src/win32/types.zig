@@ -36,7 +36,12 @@ pub const ReadMsg = struct {
 pub const WM_APP_CHILD_PROCESS_DATA = win32.WM_APP + 0;
 pub const WM_APP_CHILD_PROCESS_DATA_RESULT = 0x1bb502b6;
 pub const WM_APP_CLOSE_TAB = win32.WM_APP + 1;
+pub const WM_APP_CONFIG_CHANGED = win32.WM_APP + 2;
 pub const TIMER_SELECTION_FADE: usize = 1;
+pub const TIMER_CONFIG_RELOAD: usize = 2;
+// Coalesce the burst of change notifications an editor emits on save (and let
+// it finish writing / release its lock) before re-reading the config.
+pub const CONFIG_RELOAD_DEBOUNCE_MS: u32 = 150;
 
 // System-menu command id. Must be < 0xF000 (system range) and a multiple of
 // 16, since DefWindowProc masks WM_SYSCOMMAND wparam with 0xFFF0.

@@ -30,6 +30,24 @@ pub fn loadDefault(gpa: std.mem.Allocator) Config {
     return loadPath(gpa, path);
 }
 
+pub const ReloadError = error{ReadFailed};
+
+// Like loadDefault, but distinguishes a transient read failure (config locked
+// while an editor is mid-save) from "file absent", so the live-reload path can
+// keep the previous config instead of clobbering it with defaults. A genuinely
+// missing file still yields defaults (the user deleting the config legitimately
+// means "all defaults").
+pub fn loadDefaultChecked(gpa: std.mem.Allocator) ReloadError!Config {
+    const path = defaultPath(gpa) orelse return .{};
+    defer gpa.free(path);
+    const bytes = std.fs.cwd().readFileAlloc(gpa, path, 64 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return error.ReadFailed,
+    };
+    defer gpa.free(bytes);
+    return parse(gpa, bytes, path);
+}
+
 pub fn loadPath(gpa: std.mem.Allocator, path: []const u8) Config {
     const bytes = std.fs.cwd().readFileAlloc(gpa, path, 64 * 1024) catch |err| switch (err) {
         error.FileNotFound => {

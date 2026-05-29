@@ -2,13 +2,21 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 
 const Config = @import("../../Config.zig");
+const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const paste = @import("../paste.zig");
 const types = @import("../types.zig");
 const util = @import("../util.zig");
+const window_geom = @import("../window_geom.zig");
 
+const Error = err_mod.Error;
 const ReadMsg = types.ReadMsg;
 const global = global_mod.global;
+
+// Bounded retries when a config reload hits a transiently-locked file (editor
+// mid-save). Reset to 0 on every successful reload.
+var config_reload_retries: u32 = 0;
+const config_reload_max_retries: u32 = 3;
 
 pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     if (wparam == types.TIMER_SELECTION_FADE) {
@@ -21,7 +29,89 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         }
         window.requestRender();
     }
+    if (wparam == types.TIMER_CONFIG_RELOAD) {
+        _ = win32.KillTimer(hwnd, types.TIMER_CONFIG_RELOAD);
+        reloadConfig(hwnd);
+    }
     return 0;
+}
+
+// The watcher thread posts this for every change to the config directory.
+// Arm (or re-arm) a one-shot debounce timer rather than reloading inline:
+// re-arming on each notification coalesces the burst an editor emits on save.
+pub fn onAppConfigChanged(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    _ = win32.SetTimer(hwnd, types.TIMER_CONFIG_RELOAD, types.CONFIG_RELOAD_DEBOUNCE_MS, null);
+    return 0;
+}
+
+// Re-reads the config and applies it. Launchers are read live from
+// global.config so they take effect by the swap alone; font changes require
+// rebuilding renderer state, reflowing every tab's grid to the new cell size,
+// and a full repaint.
+fn reloadConfig(hwnd: win32.HWND) void {
+    const gpa = global.gpa.allocator();
+    const new_cfg = Config.loadDefaultChecked(gpa) catch {
+        // File unreadable (editor holds it open without read sharing). Re-arm
+        // and retry shortly, keeping the previous config rather than defaults.
+        // The debounce window already lets most editor saves settle first.
+        if (config_reload_retries < config_reload_max_retries) {
+            config_reload_retries += 1;
+            _ = win32.SetTimer(hwnd, types.TIMER_CONFIG_RELOAD, types.CONFIG_RELOAD_DEBOUNCE_MS, null);
+        } else {
+            config_reload_retries = 0;
+            std.log.warn("config: reload gave up (file busy); keeping previous config", .{});
+        }
+        return;
+    };
+    config_reload_retries = 0;
+
+    const font_changed = !fontConfigEql(&global.config, &new_cfg);
+    if (font_changed) {
+        // Leak the previous UTF-16 family list: the renderer still holds
+        // pointers into it until updateFont republishes. New list lives for
+        // the renderer's lifetime, same leak-by-design as startup.
+        const families = util.utf16FontFamilies(gpa, new_cfg.font_families);
+        global.renderer.updateFont(.{
+            .families = families,
+            .font_size_pt = new_cfg.font_size_pt,
+        });
+    }
+
+    // Explicit move: Config owns an arena, so publish the new value before
+    // freeing the old one and never defer-deinit new_cfg.
+    var old = global.config;
+    global.config = new_cfg;
+    old.deinit();
+
+    if (font_changed) {
+        if (global.window) |*window| {
+            // Stale geometry token captured at the old cell size.
+            window.bounds = null;
+            const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.cell_size);
+            for (window.tabs.items) |tab| {
+                tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
+                    std.debug.panic("Terminal.resize: {}", .{e});
+                var resize_err: Error = undefined;
+                tab.child_process.resize(&resize_err, cell_count) catch std.debug.panic("{f}", .{resize_err});
+            }
+            window.requestRender();
+        }
+    }
+}
+
+fn fontConfigEql(a: *const Config, b: *const Config) bool {
+    if (!optF32Eql(a.font_size_pt, b.font_size_pt)) return false;
+    if (a.font_families.len != b.font_families.len) return false;
+    for (a.font_families, b.font_families) |x, y| {
+        if (!std.mem.eql(u8, x, y)) return false;
+    }
+    return true;
+}
+
+fn optF32Eql(a: ?f32, b: ?f32) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.? == b.?;
 }
 
 pub fn onSysCommand(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {

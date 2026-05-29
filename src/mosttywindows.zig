@@ -65,13 +65,11 @@ pub fn main() !void {
     // Load user config and convert font-family list to UTF-16 sentinel-terminated
     // strings. The UTF-16 storage is leaked: it lives for the lifetime of the
     // global renderer (i.e. the whole process).
-    var config = Config.loadDefault(global.gpa.allocator());
-    defer config.deinit();
-    global.config = &config;
-    const font_families_u16 = util.utf16FontFamilies(global.gpa.allocator(), config.font_families);
+    global.config = Config.loadDefault(global.gpa.allocator());
+    const font_families_u16 = util.utf16FontFamilies(global.gpa.allocator(), global.config.font_families);
     const font_config: d3d11.FontConfig = .{
         .families = font_families_u16,
-        .font_size_pt = config.font_size_pt,
+        .font_size_pt = global.config.font_size_pt,
     };
     global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
     const cell_size = global.renderer.cell_size;
@@ -170,6 +168,8 @@ pub fn main() !void {
     _ = win32.SetForegroundWindow(hwnd);
     _ = win32.BringWindowToTop(hwnd);
 
+    config_watch.start(hwnd);
+
     while (true) {
         const window: *state.Window = blk: {
             while (true) {
@@ -226,6 +226,7 @@ pub fn main() !void {
 }
 
 const Config = @import("Config.zig");
+const config_watch = @import("win32/config_watch.zig");
 const d3d11 = @import("win32/d3d11.zig");
 const dispatch = @import("win32/wnd/dispatch.zig");
 const global_mod = @import("win32/global.zig");

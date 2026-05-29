@@ -527,6 +527,47 @@ pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     self.glyph_cache_cell_size = null;
 }
 
+// Re-applies font configuration at runtime (config hot-reload). Unlike
+// updateDpi this also rebuilds the fallback chain, since the family list
+// itself may have changed. The caller owns the lifetime of the [*:0]u16
+// strings in font_config (same contract as init); the renderer keeps
+// pointers into them via effective_primary/effective_user_fallbacks.
+pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
+    const effective_primary: [*:0]const u16 = if (font_config.families.len > 0)
+        font_config.families[0]
+    else
+        default_primary_font_family;
+    const effective_user_fallbacks: []const [*:0]const u16 = if (font_config.families.len > 1)
+        font_config.families[1..]
+    else
+        &.{};
+    const effective_font_size_pt: f32 = font_config.font_size_pt orelse default_font_size_pt;
+
+    _ = self.font_fallback.IUnknown.Release();
+    self.font_fallback = buildFontFallback(self.dwrite_factory, effective_user_fallbacks);
+    _ = self.text_format.IUnknown.Release();
+    self.text_format = createTextFormat(&self.dwrite_factory.IDWriteFactory, self.dpi, self.font_fallback, effective_primary, effective_font_size_pt);
+
+    self.font_size_pt = effective_font_size_pt;
+    self.effective_primary = effective_primary;
+    self.effective_user_fallbacks = effective_user_fallbacks;
+
+    const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, self.dpi, effective_primary, effective_font_size_pt);
+    self.cell_size = new_cs;
+    self.cell_size_xy = .{
+        .x = @intCast(new_cs.cx),
+        .y = @intCast(new_cs.cy),
+    };
+
+    // Font changed: drop the glyph atlas so glyphs re-rasterize at the new face/size.
+    if (self.glyph_cache) |*c| {
+        c.deinit(self.glyph_cache_arena.allocator());
+        self.glyph_cache = null;
+    }
+    _ = self.glyph_cache_arena.reset(.free_all);
+    self.glyph_cache_cell_size = null;
+}
+
 pub fn deinit(self: *D3d11Renderer) void {
     self.staging_texture.release();
     if (self.glyph_cache) |*c| {
