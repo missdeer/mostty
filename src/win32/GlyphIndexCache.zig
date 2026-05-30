@@ -3,9 +3,16 @@ const std = @import("std");
 
 pub const Half = enum(u2) { single, wide_left, wide_right };
 
-pub const Key = packed struct(u23) {
+// One slot per (codepoint, half, style) so the same character rendered in
+// regular/bold/italic/bold-italic occupies distinct atlas entries. We trust
+// the LRU to absorb the 4x style fanout — real workloads are regular-dominant
+// with bold/italic as sparse syntax/prompt embellishments.
+pub const Style = enum(u2) { regular, bold, italic, bold_italic };
+
+pub const Key = packed struct(u25) {
     codepoint: u21,
     half: Half,
+    style: Style,
 };
 
 const Node = struct {

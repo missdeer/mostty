@@ -95,9 +95,23 @@ fn reloadConfig(hwnd: win32.HWND) void {
         // pointers into it until updateFont republishes. New list lives for
         // the renderer's lifetime, same leak-by-design as startup.
         const families = util.utf16FontFamilies(gpa, new_cfg.font_families);
+        const codepoint_maps = util.utf16CodepointMaps(gpa, new_cfg.font_codepoint_maps);
         global.renderer.updateFont(.{
             .families = families,
+            .family_bold = util.utf16FamilyOptional(gpa, new_cfg.font_family_bold),
+            .family_italic = util.utf16FamilyOptional(gpa, new_cfg.font_family_italic),
+            .family_bold_italic = util.utf16FamilyOptional(gpa, new_cfg.font_family_bold_italic),
+            .synthesize_bold = new_cfg.font_synthetic_style.bold,
+            .synthesize_italic = new_cfg.font_synthetic_style.italic,
+            .synthesize_bold_italic = new_cfg.font_synthetic_style.bold_italic,
+            .style_specs = .{
+                util.convertStyleSpec(gpa, new_cfg.font_style),
+                util.convertStyleSpec(gpa, new_cfg.font_style_bold),
+                util.convertStyleSpec(gpa, new_cfg.font_style_italic),
+                util.convertStyleSpec(gpa, new_cfg.font_style_bold_italic),
+            },
             .font_size_pt = new_cfg.font_size_pt,
+            .codepoint_maps = codepoint_maps,
         });
     }
 
@@ -138,7 +152,29 @@ fn fontConfigEql(a: *const Config, b: *const Config) bool {
     for (a.font_families, b.font_families) |x, y| {
         if (!std.mem.eql(u8, x, y)) return false;
     }
+    if (!std.mem.eql(u8, a.font_family_bold, b.font_family_bold)) return false;
+    if (!std.mem.eql(u8, a.font_family_italic, b.font_family_italic)) return false;
+    if (!std.mem.eql(u8, a.font_family_bold_italic, b.font_family_bold_italic)) return false;
+    if (!std.meta.eql(a.font_synthetic_style, b.font_synthetic_style)) return false;
+    if (!fontStyleEql(a.font_style, b.font_style)) return false;
+    if (!fontStyleEql(a.font_style_bold, b.font_style_bold)) return false;
+    if (!fontStyleEql(a.font_style_italic, b.font_style_italic)) return false;
+    if (!fontStyleEql(a.font_style_bold_italic, b.font_style_bold_italic)) return false;
+    if (a.font_codepoint_maps.len != b.font_codepoint_maps.len) return false;
+    for (a.font_codepoint_maps, b.font_codepoint_maps) |x, y| {
+        if (x.range_start != y.range_start) return false;
+        if (x.range_end != y.range_end) return false;
+        if (!std.mem.eql(u8, x.family, y.family)) return false;
+    }
     return true;
+}
+
+fn fontStyleEql(a: Config.FontStyle, b: Config.FontStyle) bool {
+    if (@as(std.meta.Tag(Config.FontStyle), a) != @as(std.meta.Tag(Config.FontStyle), b)) return false;
+    return switch (a) {
+        .default, .disabled => true,
+        .named => |an| std.mem.eql(u8, an, b.named),
+    };
 }
 
 fn optF32Eql(a: ?f32, b: ?f32) bool {

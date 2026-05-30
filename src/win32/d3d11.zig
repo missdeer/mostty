@@ -71,8 +71,14 @@ const_buf: *win32.ID3D11Buffer,
 // DirectWrite
 dwrite_factory: *win32.IDWriteFactory2,
 d2d_factory: *win32.ID2D1Factory,
-text_format: *win32.IDWriteTextFormat,
-font_fallback: *win32.IDWriteFontFallback,
+// One IDWriteTextFormat per (bold, italic) combination, indexed by
+// `@intFromEnum(GlyphIndexCache.Style)`. Each format owns its own preferred
+// family AND fallback chain so style-specific families can be plumbed
+// independently (Step 2.2). When the user doesn't set a style-family it
+// inherits the regular primary, and DirectWrite's synthetic bold/oblique
+// kicks in via the format's weight/style.
+text_formats: [4]*win32.IDWriteTextFormat,
+font_fallbacks: [4]*win32.IDWriteFontFallback,
 rendering_params: *win32.IDWriteRenderingParams,
 dpi: u32,
 
@@ -104,14 +110,79 @@ cell_size_xy: CellXY,
 // of the [*:0]u16 strings are owned by the caller of `init`.
 font_size_pt: f32,
 effective_primary: [*:0]const u16,
+// Per-style primary overrides for bold/italic/bold-italic respectively.
+// null entry == inherit regular primary. Held so updateDpi can rebuild
+// text_formats without the caller re-supplying the font config.
+effective_style_primaries: [3]?[*:0]const u16,
+// Active `font-style*` pins retained for updateDpi rebuilds. Pointers into
+// the caller's UTF-16 storage; same leak-by-design lifetime as families.
+effective_style_specs: [4]FontConfig.StyleSpec,
+// Maps a requested style (from styleFromFlags) to the style slot actually
+// used at render time. Identity by default; entries 1..3 may collapse to 0
+// when synthesis is disabled AND the chosen family lacks a real face.
+// The cache key uses the EFFECTIVE style so suppressed cells share the
+// regular atlas slots — no redundant entries for identical pixels.
+effective_style: [4]GlyphIndexCache.Style,
 effective_user_fallbacks: []const [*:0]const u16,
+effective_codepoint_maps: []const FontConfig.CodepointMapEntry,
 
 pub const FontConfig = struct {
+    pub const StyleSpec = union(enum) {
+        default,
+        disabled,
+        named: [*:0]const u16, // UTF-16 face name, caller-owned (same lifetime as families)
+    };
+
+    pub const CodepointMapEntry = struct {
+        /// Inclusive range. `first == last` for a single-codepoint mapping.
+        first: u32,
+        last: u32,
+        /// UTF-16 null-terminated family name. Caller-owned, same lifetime
+        /// contract as `families` (renderer holds the pointer until next
+        /// updateFont).
+        family: [*:0]const u16,
+    };
+
     /// First entry becomes the primary family; the rest are inserted at the
     /// front of the fallback chain. Empty -> use built-in defaults.
     families: []const [*:0]const u16 = &.{},
+    /// Per-style primary family overrides. `null` -> inherit the regular
+    /// primary (single-family-everywhere is the common case). The
+    /// per-style fallback chain prepends THIS family in front of the regular
+    /// chain, so user fallbacks still kick in for glyphs the style-specific
+    /// family lacks (matches Ghostty's permissive behavior).
+    family_bold: ?[*:0]const u16 = null,
+    family_italic: ?[*:0]const u16 = null,
+    family_bold_italic: ?[*:0]const u16 = null,
+    /// When false for a style, AND the corresponding family lacks a real face
+    /// matching that style, the renderer falls back to the regular text format
+    /// for those cells (no DirectWrite synthesis). True (the default) lets
+    /// DirectWrite synthesize via DWRITE_FONT_WEIGHT / DWRITE_FONT_STYLE.
+    /// Known limitation: only the PRIMARY family of the style is checked;
+    /// fallback faces inside the chain may still be synthesized per-glyph,
+    /// which would require a shaping-pipeline-aware audit out of scope here.
+    synthesize_bold: bool = true,
+    synthesize_italic: bool = true,
+    synthesize_bold_italic: bool = true,
+    /// `font-style*` per-slot face pin. Index order matches GlyphIndexCache.Style.
+    /// `.default` = use the style's natural weight/slant (NORMAL/NORMAL for
+    /// regular, BOLD/NORMAL for bold, etc.) with DirectWrite synthesis as
+    /// allowed by `synthesize_*`. `.disabled` = forbid using a real face for
+    /// this style, collapsing the slot to regular when synthesis is off.
+    /// `.named` = look up the named face in the chosen family (en-us name
+    /// match, case-insensitive) and use its real weight/style/stretch.
+    style_specs: [4]StyleSpec = .{ .default, .default, .default, .default },
     /// Font size in points. Null -> use built-in default.
     font_size_pt: ?f32 = null,
+    /// Per-range forced font assignments. Applied at the head of the
+    /// DirectWrite fallback chain (before the global family mapping), so for
+    /// codepoints NOT covered by the preferred family the user-mapped family
+    /// is picked first. They do NOT override the preferred family itself —
+    /// DirectWrite consults the preferred family before any fallback, so if
+    /// the primary covers the codepoint its glyph wins. Typical use is
+    /// mapping emoji / icon ranges that the primary monospace font lacks.
+    /// Overlapping user ranges resolve in declaration order (earlier wins).
+    codepoint_maps: []const CodepointMapEntry = &.{},
 };
 
 const scrollbar_logical_width: u16 = 14;
@@ -245,14 +316,17 @@ fn createTextFormat(
     font_fallback: *win32.IDWriteFontFallback,
     primary: [*:0]const u16,
     font_size_pt_val: f32,
+    weight: win32.DWRITE_FONT_WEIGHT,
+    slant: win32.DWRITE_FONT_STYLE,
+    stretch: win32.DWRITE_FONT_STRETCH,
 ) *win32.IDWriteTextFormat {
     var text_format: *win32.IDWriteTextFormat = undefined;
     const hr = dwrite_factory.CreateTextFormat(
         primary,
         null,
-        .NORMAL,
-        .NORMAL,
-        .NORMAL,
+        weight,
+        slant,
+        stretch,
         fontSizeDips(dpi, font_size_pt_val),
         win32.L(""),
         &text_format,
@@ -270,6 +344,259 @@ fn createTextFormat(
     if (wwhr < 0) fatalHr("SetWordWrapping", wwhr);
 
     return text_format;
+}
+
+// Resolved face attributes used to drive CreateTextFormat for a named-face
+// style spec. When a `font-style*` name doesn't match any face in the family,
+// we keep the slot's natural attributes and emit a warning.
+const FaceAttrs = struct {
+    weight: win32.DWRITE_FONT_WEIGHT,
+    slant: win32.DWRITE_FONT_STYLE,
+    stretch: win32.DWRITE_FONT_STRETCH,
+};
+
+// Looks up a named face within `family` (system collection only). Match is
+// case-insensitive against the en-us face name. Returns the face's real
+// weight/slant/stretch on success, or null when family/face is missing.
+// Known limitation: localized face names beyond en-us aren't matched — users
+// running a non-English DirectWrite locale should still see their face
+// surface under its en-us name (the canonical key the OS exposes).
+fn resolveNamedFace(
+    factory: *win32.IDWriteFactory,
+    family: [*:0]const u16,
+    name: [*:0]const u16,
+) ?FaceAttrs {
+    var collection: *win32.IDWriteFontCollection = undefined;
+    if (factory.GetSystemFontCollection(&collection, 0) < 0) return null;
+    defer _ = collection.IUnknown.Release();
+
+    var idx: u32 = 0;
+    var exists: win32.BOOL = 0;
+    if (collection.FindFamilyName(family, &idx, &exists) < 0 or exists == 0) return null;
+
+    var fam: *win32.IDWriteFontFamily = undefined;
+    if (collection.GetFontFamily(idx, &fam) < 0) return null;
+    defer _ = fam.IUnknown.Release();
+
+    const wanted = std.mem.span(name);
+    const count = fam.IDWriteFontList.GetFontCount();
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var font: *win32.IDWriteFont = undefined;
+        if (fam.IDWriteFontList.GetFont(i, &font) < 0) continue;
+        defer _ = font.IUnknown.Release();
+        // Skip simulated faces so a name like "Bold" doesn't bind to a
+        // simulated bold of a regular file — defeats the purpose of pinning.
+        if (!std.meta.eql(font.GetSimulations(), win32.DWRITE_FONT_SIMULATIONS_NONE)) continue;
+
+        var names: *win32.IDWriteLocalizedStrings = undefined;
+        if (font.GetFaceNames(&names) < 0) continue;
+        defer _ = names.IUnknown.Release();
+
+        // Look up the en-us index; fall through to index 0 if absent.
+        var en_idx: u32 = 0;
+        var en_found: win32.BOOL = 0;
+        _ = names.FindLocaleName(win32.L("en-us"), &en_idx, &en_found);
+        const which: u32 = if (en_found != 0) en_idx else 0;
+
+        var len: u32 = 0;
+        if (names.GetStringLength(which, &len) < 0 or len == 0) continue;
+        var buf: [128:0]u16 = undefined;
+        if (len + 1 > buf.len) continue;
+        if (names.GetString(which, &buf, len + 1) < 0) continue;
+
+        if (utf16EqlIgnoreAsciiCase(buf[0..len], wanted)) {
+            return .{
+                .weight = font.GetWeight(),
+                .slant = font.GetStyle(),
+                .stretch = font.GetStretch(),
+            };
+        }
+    }
+    return null;
+}
+
+// Case-insensitive only in the ASCII range; non-ASCII codepoints must match
+// exactly (no Unicode case folding — that would need ICU/uucode). Common
+// English face names ("Bold", "SemiBold", "Heavy") fold case correctly;
+// non-ASCII face names still match when the user spells them exactly as
+// stored in the en-us face name table.
+fn utf16EqlIgnoreAsciiCase(a: []const u16, b: []const u16) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x > 0x7F or y > 0x7F) {
+            if (x != y) return false;
+        } else if (std.ascii.toLower(@intCast(x)) != std.ascii.toLower(@intCast(y))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True if `family` (in the system font collection) has at least one font
+// matching the requested weight/style criteria — i.e. a "real" face exists,
+// no DirectWrite synthesis needed. Returns false if the family isn't
+// installed at all (the renderer's existing measurement-fallback machinery
+// will pick a different family at draw time anyway).
+//
+// Both axes are matched STRICTLY:
+//   - When `match_bold` is true:  weight >= BOLD (700) required; else < BOLD.
+//   - When `match_italic` is true: slant != NORMAL required; else == NORMAL.
+// Both flags must match within a single font for `bold_italic`. The strict
+// negative match matters: without `weight < BOLD` on the italic-only slot, a
+// bold-italic face would be accepted as satisfying the "italic" slot — and
+// likewise a bold-italic face would falsely satisfy the "bold" (upright) slot.
+fn familyHasRealFace(
+    factory: *win32.IDWriteFactory,
+    family: [*:0]const u16,
+    match_bold: bool,
+    match_italic: bool,
+) bool {
+    var collection: *win32.IDWriteFontCollection = undefined;
+    if (factory.GetSystemFontCollection(&collection, 0) < 0) return false;
+    defer _ = collection.IUnknown.Release();
+
+    var idx: u32 = 0;
+    var exists: win32.BOOL = 0;
+    if (collection.FindFamilyName(family, &idx, &exists) < 0 or exists == 0) return false;
+
+    var fam: *win32.IDWriteFontFamily = undefined;
+    if (collection.GetFontFamily(idx, &fam) < 0) return false;
+    defer _ = fam.IUnknown.Release();
+
+    const count = fam.IDWriteFontList.GetFontCount();
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var font: *win32.IDWriteFont = undefined;
+        if (fam.IDWriteFontList.GetFont(i, &font) < 0) continue;
+        defer _ = font.IUnknown.Release();
+        // Faces with DirectWrite simulations applied don't count as real:
+        // a simulated bold face from a regular file is exactly what we're
+        // trying to suppress.
+        if (!std.meta.eql(font.GetSimulations(), win32.DWRITE_FONT_SIMULATIONS_NONE)) continue;
+        const is_bold = @intFromEnum(font.GetWeight()) >= @intFromEnum(win32.DWRITE_FONT_WEIGHT_BOLD);
+        const is_italic = font.GetStyle() != .NORMAL;
+        if (is_bold == match_bold and is_italic == match_italic) return true;
+    }
+    return false;
+}
+
+// Map each requested style to its effective slot. A style slot collapses to
+// .regular when:
+//   - `font-style*` for the slot is `.disabled` (explicit user opt-out), OR
+//   - `font-style*` is `.named` and the named face doesn't exist (no usable
+//     real face was found, and synthesis is suppressed), OR
+//   - synthesis is disabled AND the family has no real face matching the
+//     slot's natural weight/slant criteria.
+// `.named` with a successful resolution is treated as "real face exists"
+// regardless of synthesize_X — the user explicitly pinned the face.
+fn computeEffectiveStyle(
+    factory: *win32.IDWriteFactory,
+    regular_primary: [*:0]const u16,
+    style_primaries: [3]?[*:0]const u16,
+    synthesize: [3]bool,
+    style_specs: [4]FontConfig.StyleSpec,
+) [4]GlyphIndexCache.Style {
+    var out: [4]GlyphIndexCache.Style = .{ .regular, .bold, .italic, .bold_italic };
+    const slots = [_]struct { match_bold: bool, match_italic: bool, slot: usize }{
+        .{ .match_bold = true, .match_italic = false, .slot = 1 },
+        .{ .match_bold = false, .match_italic = true, .slot = 2 },
+        .{ .match_bold = true, .match_italic = true, .slot = 3 },
+    };
+    for (slots, 0..) |s, ai| {
+        const spec = style_specs[s.slot];
+        // Explicit user opt-out always collapses, regardless of synthesis policy.
+        if (spec == .disabled) {
+            out[s.slot] = .regular;
+            continue;
+        }
+        // `.named`: trust the user's pin — if the name resolved at format-build
+        // time, the slot has a real face. We don't re-probe here.
+        if (spec == .named) {
+            const fam = style_primaries[ai] orelse regular_primary;
+            if (resolveNamedFace(factory, fam, spec.named) == null) {
+                // Name didn't match anything real. Treat like "no real face":
+                // if user also forbids synthesis we MUST collapse, otherwise
+                // keep the slot (DirectWrite will synthesize from natural).
+                if (!synthesize[ai]) out[s.slot] = .regular;
+            }
+            continue;
+        }
+        // `.default`: legacy Step 2.3 rule.
+        if (synthesize[ai]) continue;
+        const fam = style_primaries[ai] orelse regular_primary;
+        if (!familyHasRealFace(factory, fam, s.match_bold, s.match_italic)) {
+            out[s.slot] = .regular;
+        }
+    }
+    return out;
+}
+
+// Builds the four (regular, bold, italic, bold-italic) (text_format,
+// fallback) pairs. Index MUST match GlyphIndexCache.Style ordinals.
+// `style_primaries` carries optional per-style family overrides
+// (font-family-bold/italic/bold-italic); when null the slot inherits the
+// regular primary AND uses DirectWrite's synthetic bold/oblique for weight.
+// `style_specs` overrides the natural weight/slant when the user pinned a
+// specific face via `font-style*`.
+fn createTextFormatSet(
+    factory: *win32.IDWriteFactory2,
+    dpi: u32,
+    regular_primary: [*:0]const u16,
+    style_primaries: [3]?[*:0]const u16, // bold, italic, bold-italic (indexes 1..3)
+    style_specs: [4]FontConfig.StyleSpec,
+    user_fallbacks: []const [*:0]const u16,
+    codepoint_maps: []const FontConfig.CodepointMapEntry,
+    font_size_pt_val: f32,
+) struct { formats: [4]*win32.IDWriteTextFormat, fallbacks: [4]*win32.IDWriteFontFallback } {
+    const Slot = struct {
+        primary: [*:0]const u16,
+        style_primary: ?[*:0]const u16,
+        weight: win32.DWRITE_FONT_WEIGHT,
+        slant: win32.DWRITE_FONT_STYLE,
+        stretch: win32.DWRITE_FONT_STRETCH,
+    };
+    var slots: [4]Slot = .{
+        .{ .primary = regular_primary, .style_primary = null, .weight = .NORMAL, .slant = .NORMAL, .stretch = .NORMAL },
+        .{ .primary = style_primaries[0] orelse regular_primary, .style_primary = style_primaries[0], .weight = .BOLD, .slant = .NORMAL, .stretch = .NORMAL },
+        .{ .primary = style_primaries[1] orelse regular_primary, .style_primary = style_primaries[1], .weight = .NORMAL, .slant = .ITALIC, .stretch = .NORMAL },
+        .{ .primary = style_primaries[2] orelse regular_primary, .style_primary = style_primaries[2], .weight = .BOLD, .slant = .ITALIC, .stretch = .NORMAL },
+    };
+
+    // Apply `font-style*` pins: a named face shifts the slot's CreateTextFormat
+    // attributes to the face's real weight/slant/stretch (no synthesis).
+    // `.disabled` is a no-op here — collapsing to regular happens later via
+    // computeEffectiveStyle's "no real face" path. Missing names warn once.
+    for (style_specs, 0..) |spec, i| {
+        switch (spec) {
+            .default, .disabled => {},
+            .named => |name| {
+                if (resolveNamedFace(&factory.IDWriteFactory, slots[i].primary, name)) |attrs| {
+                    slots[i].weight = attrs.weight;
+                    slots[i].slant = attrs.slant;
+                    slots[i].stretch = attrs.stretch;
+                } else {
+                    std.log.warn("font-style: face not found in family; keeping natural attributes", .{});
+                }
+            },
+        }
+    }
+
+    var formats: [4]*win32.IDWriteTextFormat = undefined;
+    var fallbacks: [4]*win32.IDWriteFontFallback = undefined;
+    for (slots, 0..) |s, i| {
+        fallbacks[i] = buildFontFallback(factory, regular_primary, s.style_primary, user_fallbacks, codepoint_maps);
+        formats[i] = createTextFormat(&factory.IDWriteFactory, dpi, fallbacks[i], s.primary, font_size_pt_val, s.weight, s.slant, s.stretch);
+    }
+    return .{ .formats = formats, .fallbacks = fallbacks };
+}
+
+fn releaseTextFormatSet(
+    formats: *[4]*win32.IDWriteTextFormat,
+    fallbacks: *[4]*win32.IDWriteFontFallback,
+) void {
+    for (formats) |tf| _ = tf.IUnknown.Release();
+    for (fallbacks) |fb| _ = fb.IUnknown.Release();
 }
 
 // Custom rendering parameters so the atlas is reproducible across machines
@@ -300,9 +627,25 @@ fn buildRenderingParams(factory: *win32.IDWriteFactory) *win32.IDWriteRenderingP
 // fonts, and DirectWrite walks it linearly.
 const max_user_fallbacks: usize = 32;
 
+// Fallback object composition order (this is the order DirectWrite walks
+// AFTER it has already failed to find the codepoint in the text format's
+// preferred family — the preferred family is consulted before any fallback):
+//   1. codepoint-map entries (range-specific)
+//   2. style_primary (when set; e.g. font-family-bold)
+//   3. regular_primary (the global primary family — keeps visual cohesion
+//      when style-family is partial; matches Ghostty's permissive behavior)
+//   4. user_fallbacks (font-family entries 2..N)
+//   5. font_fallback_families (built-in: Emoji)
+//   6. system fallback (CJK, etc.)
+//
+// `style_primary == null` means "this style inherits the regular primary",
+// and step 2 is skipped — step 3 alone provides it.
 fn buildFontFallback(
     factory: *win32.IDWriteFactory2,
+    regular_primary: [*:0]const u16,
+    style_primary: ?[*:0]const u16,
     user_fallbacks: []const [*:0]const u16,
+    codepoint_maps: []const FontConfig.CodepointMapEntry,
 ) *win32.IDWriteFontFallback {
     var builder: *win32.IDWriteFontFallbackBuilder = undefined;
     {
@@ -311,11 +654,54 @@ fn buildFontFallback(
     }
     defer _ = builder.IUnknown.Release();
 
+    // Per-range forced mappings go in FIRST so within the FALLBACK lookup
+    // they win over the global mapping below for the codepoints they cover.
+    // Note: this only matters when DirectWrite has already decided the
+    // preferred family doesn't cover the codepoint — the preferred family is
+    // consulted before any fallback object, so codepoint-map is fallback-only,
+    // not an override of the primary. Overlapping user ranges resolve in
+    // declaration order (earlier wins) — same first-match rule.
+    for (codepoint_maps) |entry| {
+        const range = win32.DWRITE_UNICODE_RANGE{ .first = entry.first, .last = entry.last };
+        const family_ptr: ?*const u16 = @ptrCast(entry.family);
+        var family_arr = [_]?*const u16{family_ptr};
+        const hr = builder.AddMapping(
+            @ptrCast(&range),
+            1,
+            &family_arr,
+            1,
+            null,
+            null,
+            null,
+            1.0,
+        );
+        if (hr < 0) fatalHr("AddMapping(codepoint-map)", hr);
+    }
+
     // AddMapping takes a prioritized list of family names for a single Unicode
     // range, in order. Calling it once per family with the full range would
     // make only the first family ever match (DirectWrite picks the first
     // mapping whose range contains the codepoint, then walks its family list).
-    var family_ptrs: [max_user_fallbacks + font_fallback_families.len]?*const u16 = undefined;
+    // Layout: [style_primary?, regular_primary, user_fallbacks..., builtin...]
+    const reserved_head: usize = 2; // style_primary + regular_primary slots
+    var family_ptrs: [reserved_head + max_user_fallbacks + font_fallback_families.len]?*const u16 = undefined;
+    var n: usize = 0;
+    if (style_primary) |sp| {
+        // Best-effort alias dedup: skip the slot only when the caller forwarded
+        // the SAME pointer for both, which is how an unset style winds up here.
+        // A user writing the same family TWICE (e.g. `font-family-bold = X`
+        // matching the regular `font-family = X`) yields distinct allocations
+        // and would NOT dedup — that's acceptable; DirectWrite just walks the
+        // family twice. String compare would be more thorough but not worth
+        // the cost for this corner.
+        if (@intFromPtr(sp) != @intFromPtr(regular_primary)) {
+            family_ptrs[n] = @ptrCast(sp);
+            n += 1;
+        }
+    }
+    family_ptrs[n] = @ptrCast(regular_primary);
+    n += 1;
+
     const user_n = @min(user_fallbacks.len, max_user_fallbacks);
     if (user_fallbacks.len > max_user_fallbacks) {
         std.log.warn("config: dropping {d} extra font-family fallback(s) past cap {d}", .{
@@ -323,20 +709,21 @@ fn buildFontFallback(
             max_user_fallbacks,
         });
     }
-    for (user_fallbacks[0..user_n], 0..) |family, i| {
-        family_ptrs[i] = @ptrCast(family);
+    for (user_fallbacks[0..user_n]) |family| {
+        family_ptrs[n] = @ptrCast(family);
+        n += 1;
     }
-    for (font_fallback_families, 0..) |family, i| {
-        family_ptrs[user_n + i] = @ptrCast(family);
+    for (font_fallback_families) |family| {
+        family_ptrs[n] = @ptrCast(family);
+        n += 1;
     }
-    const total = user_n + font_fallback_families.len;
     const full_range = win32.DWRITE_UNICODE_RANGE{ .first = 0, .last = 0x10FFFF };
     {
         const hr = builder.AddMapping(
             @ptrCast(&full_range),
             1,
             &family_ptrs,
-            @intCast(total),
+            @intCast(n),
             null,
             null,
             null,
@@ -462,9 +849,20 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         if (hr < 0) fatalHr("DWriteCreateFactory", hr);
     }
 
-    const font_fallback = buildFontFallback(dwrite_factory, effective_user_fallbacks);
     const rendering_params = buildRenderingParams(&dwrite_factory.IDWriteFactory);
-    const text_format = createTextFormat(&dwrite_factory.IDWriteFactory, dpi, font_fallback, effective_primary, effective_font_size_pt);
+    const style_primaries: [3]?[*:0]const u16 = .{ font_config.family_bold, font_config.family_italic, font_config.family_bold_italic };
+    const synthesize: [3]bool = .{ font_config.synthesize_bold, font_config.synthesize_italic, font_config.synthesize_bold_italic };
+    const effective_style = computeEffectiveStyle(&dwrite_factory.IDWriteFactory, effective_primary, style_primaries, synthesize, font_config.style_specs);
+    const set = createTextFormatSet(
+        dwrite_factory,
+        dpi,
+        effective_primary,
+        style_primaries,
+        font_config.style_specs,
+        effective_user_fallbacks,
+        font_config.codepoint_maps,
+        effective_font_size_pt,
+    );
 
     const cell_size = measureCellSize(&dwrite_factory.IDWriteFactory, dpi, effective_primary, effective_font_size_pt);
     const cell_size_xy: CellXY = .{
@@ -492,8 +890,8 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         .const_buf = const_buf,
         .dwrite_factory = dwrite_factory,
         .d2d_factory = d2d_factory,
-        .text_format = text_format,
-        .font_fallback = font_fallback,
+        .text_formats = set.formats,
+        .font_fallbacks = set.fallbacks,
         .rendering_params = rendering_params,
         .cell_size = .{
             .cx = cell_size_xy.x,
@@ -503,14 +901,34 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         .dpi = dpi,
         .font_size_pt = effective_font_size_pt,
         .effective_primary = effective_primary,
+        .effective_style_primaries = style_primaries,
+        .effective_style_specs = font_config.style_specs,
+        .effective_style = effective_style,
         .effective_user_fallbacks = effective_user_fallbacks,
+        .effective_codepoint_maps = font_config.codepoint_maps,
     };
 }
 
 pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     if (dpi == self.dpi) return;
-    _ = self.text_format.IUnknown.Release();
-    self.text_format = createTextFormat(&self.dwrite_factory.IDWriteFactory, dpi, self.font_fallback, self.effective_primary, self.font_size_pt);
+    // DPI alone doesn't change style-family bindings or face availability,
+    // so `effective_style` survives untouched. text_formats embed
+    // size-in-DIPs so they must be rebuilt; we rebuild fallbacks too to keep
+    // init/updateDpi/updateFont sharing one codepath (cost: a few micro-
+    // allocations on a rare event).
+    releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    const set = createTextFormatSet(
+        self.dwrite_factory,
+        dpi,
+        self.effective_primary,
+        self.effective_style_primaries,
+        self.effective_style_specs,
+        self.effective_user_fallbacks,
+        self.effective_codepoint_maps,
+        self.font_size_pt,
+    );
+    self.text_formats = set.formats;
+    self.font_fallbacks = set.fallbacks;
     self.dpi = dpi;
 
     const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
@@ -545,14 +963,30 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
         &.{};
     const effective_font_size_pt: f32 = font_config.font_size_pt orelse default_font_size_pt;
 
-    _ = self.font_fallback.IUnknown.Release();
-    self.font_fallback = buildFontFallback(self.dwrite_factory, effective_user_fallbacks);
-    _ = self.text_format.IUnknown.Release();
-    self.text_format = createTextFormat(&self.dwrite_factory.IDWriteFactory, self.dpi, self.font_fallback, effective_primary, effective_font_size_pt);
+    releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    const style_primaries: [3]?[*:0]const u16 = .{ font_config.family_bold, font_config.family_italic, font_config.family_bold_italic };
+    const synthesize: [3]bool = .{ font_config.synthesize_bold, font_config.synthesize_italic, font_config.synthesize_bold_italic };
+    const effective_style = computeEffectiveStyle(&self.dwrite_factory.IDWriteFactory, effective_primary, style_primaries, synthesize, font_config.style_specs);
+    const set = createTextFormatSet(
+        self.dwrite_factory,
+        self.dpi,
+        effective_primary,
+        style_primaries,
+        font_config.style_specs,
+        effective_user_fallbacks,
+        font_config.codepoint_maps,
+        effective_font_size_pt,
+    );
+    self.text_formats = set.formats;
+    self.font_fallbacks = set.fallbacks;
 
     self.font_size_pt = effective_font_size_pt;
     self.effective_primary = effective_primary;
+    self.effective_style_primaries = style_primaries;
+    self.effective_style_specs = font_config.style_specs;
+    self.effective_style = effective_style;
     self.effective_user_fallbacks = effective_user_fallbacks;
+    self.effective_codepoint_maps = font_config.codepoint_maps;
 
     const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, self.dpi, effective_primary, effective_font_size_pt);
     self.cell_size = new_cs;
@@ -589,9 +1023,8 @@ pub fn deinit(self: *D3d11Renderer) void {
     self.context.Flush();
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
-    _ = self.text_format.IUnknown.Release();
+    releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
     _ = self.rendering_params.IUnknown.Release();
-    _ = self.font_fallback.IUnknown.Release();
     _ = self.dwrite_factory.IUnknown.Release();
     _ = self.const_buf.IUnknown.Release();
     _ = self.pixel_shader.IUnknown.Release();
@@ -725,7 +1158,7 @@ pub fn render(
 
     // Build cell buffer from terminal state
     const cell_count = shader_col * shader_row;
-    const blank_glyph = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single });
+    const blank_glyph = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single, .style = .regular });
 
     // Effective default fg/bg come from the terminal's dynamic colors (seeded
     // from the theme at tab creation, overridable live by OSC 10/11), falling
@@ -766,7 +1199,7 @@ pub fn render(
                 if (col < tab_bar.len) {
                     const tb = tab_bar[col];
                     scratch[col] = .{
-                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = tb.codepoint, .half = .single }),
+                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = tb.codepoint, .half = .single, .style = .regular }),
                         .background = tb.bg,
                         .foreground = tb.fg,
                     };
@@ -862,11 +1295,15 @@ pub fn render(
                 // equality) so a cell explicitly painted with the theme's bg
                 // color stays opaque, and inverse video stays opaque too.
                 var is_default_bg = true;
+                var bold = false;
+                var italic = false;
 
                 if (cell.style_id != 0) {
                     const style = page.styles.get(page.memory, cell.style_id).*;
                     cell_fg = resolveColor(style.fg_color, palette, eff_fg);
                     cell_bg = resolveColor(style.bg_color, palette, eff_bg);
+                    bold = style.flags.bold;
+                    italic = style.flags.italic;
                     if (style.flags.inverse) {
                         const tmp = cell_fg;
                         cell_fg = cell_bg;
@@ -919,16 +1356,18 @@ pub fn render(
                     fg = cursor_fg_rgba;
                 }
 
+                const style_kind = self.effective_style[@intFromEnum(styleFromFlags(bold, italic))];
+
                 if (cell.wide == .wide) {
                     scratch[col] = .{
-                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left }),
+                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left, .style = style_kind }),
                         .background = bg,
                         .foreground = fg,
                     };
                     col += 1;
                     if (col < shader_col) {
                         scratch[col] = .{
-                            .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right }),
+                            .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right, .style = style_kind }),
                             .background = bg,
                             .foreground = fg,
                         };
@@ -938,7 +1377,7 @@ pub fn render(
                 }
 
                 scratch[col] = .{
-                    .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single }),
+                    .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single, .style = style_kind }),
                     .background = bg,
                     .foreground = fg,
                 };
@@ -999,7 +1438,7 @@ pub fn render(
                 var bx: u32 = box_x;
                 while (bx < box_x + box_w and bx < shader_col) : (bx += 1) {
                     scratch[bx] = .{
-                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single }),
+                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single, .style = .regular }),
                         .background = overlay_bg,
                         .foreground = overlay_fg,
                     };
@@ -1010,7 +1449,7 @@ pub fn render(
                         const tcol = tx + @as(u32, @intCast(i));
                         if (tcol < shader_col) {
                             scratch[tcol] = .{
-                                .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ch, .half = .single }),
+                                .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ch, .half = .single, .style = .regular }),
                                 .background = overlay_bg,
                                 .foreground = overlay_fg,
                             };
@@ -1161,12 +1600,16 @@ fn generateGlyph(
             const is_ambiguous_symbol = sprite.isAmbiguousOverflow(key.codepoint);
 
             // IDWriteTextLayout lets us measure the rendered ink before drawing.
+            // Style index picks bold / italic / bold-italic text formats; in
+            // Step 2.1 these still share the regular family and differ only by
+            // synthetic weight/oblique applied by DirectWrite.
+            const text_format = self.text_formats[@intFromEnum(key.style)];
             var layout: *win32.IDWriteTextLayout = undefined;
             {
                 const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
                     @ptrCast(utf16_buf[0..utf16_len].ptr),
                     @intCast(utf16_len),
-                    self.text_format,
+                    text_format,
                     target_width,
                     cs_y_f,
                     &layout,
@@ -1818,6 +2261,16 @@ fn resolveColor(c: vt.Style.Color, palette: *const vt.color.Palette, default: u2
 
 fn rgbToU24(rgb: vt.color.RGB) u24 {
     return @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
+}
+
+// Ordinal MUST match GlyphIndexCache.Style. Kept here (not in
+// GlyphIndexCache) because flags->style is a renderer-layer mapping, while
+// the enum itself is a pure cache-key concern.
+fn styleFromFlags(bold: bool, italic: bool) GlyphIndexCache.Style {
+    if (bold and italic) return .bold_italic;
+    if (bold) return .bold;
+    if (italic) return .italic;
+    return .regular;
 }
 
 fn fatalHr(what: []const u8, hresult: win32.HRESULT) noreturn {

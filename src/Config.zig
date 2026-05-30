@@ -6,6 +6,39 @@ pub const Launcher = struct {
     working_directory: []const u8, // empty = inherit parent
 };
 
+// One contiguous range of codepoints that should resolve to a specific font
+// family during DirectWrite fallback (i.e. when the preferred family for the
+// active text format doesn't cover the codepoint). `range_end` is inclusive;
+// equal to `range_start` for a single-codepoint mapping. Ghostty's
+// `font-codepoint-map = U+A-U+B[,U+C-U+D]=Family` syntax expands into one
+// entry per range, all sharing the same family.
+pub const CodepointMap = struct {
+    range_start: u21,
+    range_end: u21,
+    family: []const u8,
+};
+
+// Per-style permission to let DirectWrite synthesize a missing face (algorithmic
+// bold / oblique) when the chosen family lacks a real one. Default: all true,
+// matching Ghostty. `false` for a style means: if the family has no real face,
+// fall back to the regular text format (no synthesis).
+pub const SyntheticStyle = struct {
+    bold: bool = true,
+    italic: bool = true,
+    bold_italic: bool = true,
+};
+
+// Ghostty's `font-style*` value. `.default` = no override (current
+// synthesis/family logic applies). `.disabled` = explicitly forbid using a
+// real face for this style; combined with `font-synthetic-style = no-X` this
+// forces fall-through to the regular text format. `.named` = pick the named
+// face within the chosen family, using its real weight/style/stretch.
+pub const FontStyle = union(enum) {
+    default,
+    disabled,
+    named: []const u8,
+};
+
 // Resolved theme/color state. Pure value type (no arena-backed pointers) so it
 // survives the Config arena being freed on hot-reload, and can be copied into
 // the renderer / each tab's vt color state cheaply. `palette` defaults to the
@@ -52,7 +85,19 @@ fn rebaseDynamicRGB(c: *vt.color.DynamicRGB, new_default: ?vt.color.RGB) void {
 }
 
 font_families: []const []const u8 = &.{},
+// Per-style primary family overrides. Empty -> inherit the regular family
+// (one of font_families or the renderer's built-in default). Each is a single
+// family name, not a fallback list — fallback comes from font_families.
+font_family_bold: []const u8 = &.{},
+font_family_italic: []const u8 = &.{},
+font_family_bold_italic: []const u8 = &.{},
+font_synthetic_style: SyntheticStyle = .{},
+font_style: FontStyle = .default,
+font_style_bold: FontStyle = .default,
+font_style_italic: FontStyle = .default,
+font_style_bold_italic: FontStyle = .default,
 font_size_pt: ?f32 = null,
+font_codepoint_maps: []const CodepointMap = &.{},
 launchers: []const Launcher = &.{},
 theme: ThemeColors = .{},
 
@@ -116,7 +161,16 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     const a = arena.allocator();
 
     var families: std.ArrayListUnmanaged([]const u8) = .empty;
+    var family_bold: []const u8 = &.{};
+    var family_italic: []const u8 = &.{};
+    var family_bold_italic: []const u8 = &.{};
+    var synthetic: SyntheticStyle = .{};
+    var style_regular: FontStyle = .default;
+    var style_bold: FontStyle = .default;
+    var style_italic: FontStyle = .default;
+    var style_bold_italic: FontStyle = .default;
     var font_size_pt: ?f32 = null;
+    var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
     var theme: ThemeColors = .{};
 
@@ -168,6 +222,25 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 const owned = a.dupe(u8, name) catch oom();
                 families.append(a, owned) catch oom();
             }
+        } else if (std.mem.eql(u8, key, "font-family-bold")) {
+            family_bold = a.dupe(u8, value) catch oom();
+        } else if (std.mem.eql(u8, key, "font-family-italic")) {
+            family_italic = a.dupe(u8, value) catch oom();
+        } else if (std.mem.eql(u8, key, "font-family-bold-italic")) {
+            family_bold_italic = a.dupe(u8, value) catch oom();
+        } else if (std.mem.eql(u8, key, "font-synthetic-style")) {
+            synthetic = parseSyntheticStyle(value) orelse {
+                std.log.warn("config: {s}:{}: invalid font-synthetic-style '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+        } else if (std.mem.eql(u8, key, "font-style")) {
+            style_regular = parseFontStyle(a, value);
+        } else if (std.mem.eql(u8, key, "font-style-bold")) {
+            style_bold = parseFontStyle(a, value);
+        } else if (std.mem.eql(u8, key, "font-style-italic")) {
+            style_italic = parseFontStyle(a, value);
+        } else if (std.mem.eql(u8, key, "font-style-bold-italic")) {
+            style_bold_italic = parseFontStyle(a, value);
         } else if (std.mem.eql(u8, key, "font-size")) {
             const n = std.fmt.parseFloat(f32, value) catch {
                 std.log.warn("config: {s}:{}: invalid font-size '{s}'", .{ source_name, line_no, value });
@@ -178,6 +251,10 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             font_size_pt = n;
+        } else if (std.mem.eql(u8, key, "font-codepoint-map")) {
+            parseCodepointMap(a, value, &codepoint_maps) catch {
+                std.log.warn("config: {s}:{}: invalid font-codepoint-map '{s}'", .{ source_name, line_no, value });
+            };
         } else if (std.mem.eql(u8, key, "launcher")) {
             const launcher = parseLauncher(a, value) orelse {
                 std.log.warn("config: {s}:{}: invalid launcher '{s}'", .{ source_name, line_no, value });
@@ -190,14 +267,116 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     }
 
     const families_slice = families.toOwnedSlice(a) catch oom();
+    const codepoint_maps_slice = codepoint_maps.toOwnedSlice(a) catch oom();
     const launchers_slice = launchers.toOwnedSlice(a) catch oom();
     return .{
         .font_families = families_slice,
+        .font_family_bold = family_bold,
+        .font_family_italic = family_italic,
+        .font_family_bold_italic = family_bold_italic,
+        .font_synthetic_style = synthetic,
+        .font_style = style_regular,
+        .font_style_bold = style_bold,
+        .font_style_italic = style_italic,
+        .font_style_bold_italic = style_bold_italic,
         .font_size_pt = font_size_pt,
+        .font_codepoint_maps = codepoint_maps_slice,
         .launchers = launchers_slice,
         .theme = theme,
         .arena = arena,
     };
+}
+
+// Empty value is treated as `.default` so users can clear a previously-set
+// key on hot-reload by writing `font-style = `. Anything else (including
+// `true`) is taken as a face name — Ghostty's only special value is `false`.
+fn parseFontStyle(a: std.mem.Allocator, value: []const u8) FontStyle {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return .default;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false")) return .disabled;
+    return .{ .named = a.dupe(u8, trimmed) catch oom() };
+}
+
+// Ghostty syntax: `true`/`false` for all-on/all-off, or a comma-separated
+// list of negations subtracted from the all-on baseline:
+// `no-bold`, `no-italic`, `no-bold-italic` (combine with commas).
+// Returns null on any unrecognized token — caller logs and discards the line.
+fn parseSyntheticStyle(value: []const u8) ?SyntheticStyle {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+
+    if (std.ascii.eqlIgnoreCase(trimmed, "true") or std.ascii.eqlIgnoreCase(trimmed, "yes")) {
+        return .{ .bold = true, .italic = true, .bold_italic = true };
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "false") or std.ascii.eqlIgnoreCase(trimmed, "no")) {
+        return .{ .bold = false, .italic = false, .bold_italic = false };
+    }
+
+    var out: SyntheticStyle = .{};
+    var it = std.mem.splitScalar(u8, trimmed, ',');
+    while (it.next()) |raw| {
+        const tok = std.mem.trim(u8, raw, " \t");
+        if (tok.len == 0) continue;
+        if (std.ascii.eqlIgnoreCase(tok, "no-bold")) {
+            out.bold = false;
+        } else if (std.ascii.eqlIgnoreCase(tok, "no-italic")) {
+            out.italic = false;
+        } else if (std.ascii.eqlIgnoreCase(tok, "no-bold-italic")) {
+            out.bold_italic = false;
+        } else return null;
+    }
+    return out;
+}
+
+// Parses `<ranges>=<family>` where ranges is comma-separated
+// `U+HEX[-U+HEX]`. Each range becomes a CodepointMap entry; all entries on the
+// line share the same (duped) family string. Returns `error.Invalid` on any
+// syntactic problem — caller logs and discards the line.
+fn parseCodepointMap(
+    a: std.mem.Allocator,
+    value: []const u8,
+    out: *std.ArrayListUnmanaged(CodepointMap),
+) error{Invalid}!void {
+    const eq = std.mem.lastIndexOfScalar(u8, value, '=') orelse return error.Invalid;
+    const ranges_part = std.mem.trim(u8, value[0..eq], " \t");
+    const family_part = std.mem.trim(u8, value[eq + 1 ..], " \t");
+    if (ranges_part.len == 0 or family_part.len == 0) return error.Invalid;
+    if (!std.unicode.utf8ValidateSlice(family_part)) return error.Invalid;
+
+    const family_dup = a.dupe(u8, family_part) catch oom();
+
+    // Stage entries locally so a malformed segment mid-line rejects the whole
+    // line atomically — partial application would leave a half-mapped range.
+    var staged: std.ArrayListUnmanaged(CodepointMap) = .empty;
+    defer staged.deinit(a);
+
+    var rit = std.mem.splitScalar(u8, ranges_part, ',');
+    while (rit.next()) |raw_range| {
+        const range = std.mem.trim(u8, raw_range, " \t");
+        if (range.len == 0) return error.Invalid;
+        const dash = std.mem.indexOfScalar(u8, range, '-');
+        const start = parseCodepoint(if (dash) |d| range[0..d] else range) orelse return error.Invalid;
+        const end = if (dash) |d|
+            parseCodepoint(range[d + 1 ..]) orelse return error.Invalid
+        else
+            start;
+        if (end < start) return error.Invalid;
+        staged.append(a, .{ .range_start = start, .range_end = end, .family = family_dup }) catch oom();
+    }
+    if (staged.items.len == 0) return error.Invalid;
+    out.appendSlice(a, staged.items) catch oom();
+}
+
+// Accepts `U+HEX`, `u+HEX`, or bare `HEX` (Ghostty's reference uses the
+// `U+` form exclusively; bare hex is a pragmatic concession for hand-edited
+// configs). Caps at 0x10FFFF — the Unicode scalar maximum.
+fn parseCodepoint(raw: []const u8) ?u21 {
+    const s = std.mem.trim(u8, raw, " \t");
+    const hex = if (s.len >= 2 and (s[0] == 'U' or s[0] == 'u') and s[1] == '+') s[2..] else s;
+    if (hex.len == 0) return null;
+    const v = std.fmt.parseInt(u32, hex, 16) catch return null;
+    if (v > 0x10FFFF) return null;
+    return @intCast(v);
 }
 
 // Parses `#RRGGBB` / `RRGGBB` into a packed 0xRRGGBB. Named X11 colors are not
@@ -261,7 +440,11 @@ fn isKnownUnsupportedKey(key: []const u8) bool {
     return std.mem.eql(u8, key, "unfocused-split-fill") or
         std.mem.eql(u8, key, "palette-generate") or
         std.mem.eql(u8, key, "palette-harmonious") or
-        std.mem.eql(u8, key, "config-file");
+        std.mem.eql(u8, key, "config-file") or
+        // macOS-only / shaping-pipeline keys: no Windows equivalent in mostty.
+        std.mem.eql(u8, key, "font-thicken") or
+        std.mem.eql(u8, key, "font-thicken-strength") or
+        std.mem.eql(u8, key, "font-shaping-break");
 }
 
 // Resolves `theme = X` to a file and folds its color keys into `theme` as the
@@ -458,6 +641,121 @@ test "parse reads color keys into theme" {
     try std.testing.expectEqual(@as(?u24, 0x445566), cfg.theme.selection_background);
     // Index not set by the theme keeps the standard xterm cube (non-zero).
     try std.testing.expectEqual(vt.color.default[16], cfg.theme.palette[16]);
+}
+
+test "parse font-codepoint-map: single, range, multi-range, repeats" {
+    const src =
+        \\font-codepoint-map = U+1F300-U+1F5FF=Noto Color Emoji
+        \\font-codepoint-map = U+2500-U+257F,U+2580-U+259F=Cascadia Mono
+        \\font-codepoint-map = U+4E2D=Noto Sans CJK SC
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 4), cfg.font_codepoint_maps.len);
+
+    const m0 = cfg.font_codepoint_maps[0];
+    try std.testing.expectEqual(@as(u21, 0x1F300), m0.range_start);
+    try std.testing.expectEqual(@as(u21, 0x1F5FF), m0.range_end);
+    try std.testing.expectEqualStrings("Noto Color Emoji", m0.family);
+
+    const m1 = cfg.font_codepoint_maps[1];
+    try std.testing.expectEqual(@as(u21, 0x2500), m1.range_start);
+    try std.testing.expectEqual(@as(u21, 0x257F), m1.range_end);
+    try std.testing.expectEqualStrings("Cascadia Mono", m1.family);
+
+    const m2 = cfg.font_codepoint_maps[2];
+    try std.testing.expectEqual(@as(u21, 0x2580), m2.range_start);
+    try std.testing.expectEqual(@as(u21, 0x259F), m2.range_end);
+    // Same family pointer reused within one line.
+    try std.testing.expectEqual(m1.family.ptr, m2.family.ptr);
+
+    const m3 = cfg.font_codepoint_maps[3];
+    try std.testing.expectEqual(@as(u21, 0x4E2D), m3.range_start);
+    try std.testing.expectEqual(@as(u21, 0x4E2D), m3.range_end);
+}
+
+test "parse font-codepoint-map: malformed lines are skipped atomically" {
+    // A line with one good range and one bad range must reject the whole line
+    // (atomic) so a typo can't half-map. Following lines still parse.
+    const src =
+        \\font-codepoint-map = U+1F300-U+1F5FF,GARBAGE=Emoji
+        \\font-codepoint-map = =Empty
+        \\font-codepoint-map = U+30-U+10=Reversed
+        \\font-codepoint-map = U+1F600=Good
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 1), cfg.font_codepoint_maps.len);
+    try std.testing.expectEqual(@as(u21, 0x1F600), cfg.font_codepoint_maps[0].range_start);
+    try std.testing.expectEqualStrings("Good", cfg.font_codepoint_maps[0].family);
+}
+
+test "parseCodepoint accepts U+/u+/bare hex; rejects overflow" {
+    try std.testing.expectEqual(@as(?u21, 0x4E2D), parseCodepoint("U+4E2D"));
+    try std.testing.expectEqual(@as(?u21, 0x4E2D), parseCodepoint("u+4e2d"));
+    try std.testing.expectEqual(@as(?u21, 0x4E2D), parseCodepoint("4E2D"));
+    try std.testing.expectEqual(@as(?u21, null), parseCodepoint(""));
+    try std.testing.expectEqual(@as(?u21, null), parseCodepoint("U+"));
+    try std.testing.expectEqual(@as(?u21, null), parseCodepoint("ZZZ"));
+    try std.testing.expectEqual(@as(?u21, null), parseCodepoint("110000")); // > 0x10FFFF
+    try std.testing.expectEqual(@as(?u21, 0x10FFFF), parseCodepoint("10FFFF"));
+}
+
+test "parse font-style: default/false/named" {
+    const src =
+        \\font-style = SemiBold
+        \\font-style-bold = Heavy
+        \\font-style-italic = false
+        \\font-style-bold-italic =
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expect(cfg.font_style == .named);
+    try std.testing.expectEqualStrings("SemiBold", cfg.font_style.named);
+    try std.testing.expect(cfg.font_style_bold == .named);
+    try std.testing.expectEqualStrings("Heavy", cfg.font_style_bold.named);
+    try std.testing.expect(cfg.font_style_italic == .disabled);
+    // Empty value resets to default.
+    try std.testing.expect(cfg.font_style_bold_italic == .default);
+}
+
+test "parseSyntheticStyle: true/false/list/invalid" {
+    {
+        const s = parseSyntheticStyle("true").?;
+        try std.testing.expect(s.bold and s.italic and s.bold_italic);
+    }
+    {
+        const s = parseSyntheticStyle("FALSE").?;
+        try std.testing.expect(!s.bold and !s.italic and !s.bold_italic);
+    }
+    {
+        const s = parseSyntheticStyle("no-bold").?;
+        try std.testing.expect(!s.bold and s.italic and s.bold_italic);
+    }
+    {
+        const s = parseSyntheticStyle("no-bold, no-italic").?;
+        try std.testing.expect(!s.bold and !s.italic and s.bold_italic);
+    }
+    {
+        const s = parseSyntheticStyle("no-bold,no-italic,no-bold-italic").?;
+        try std.testing.expect(!s.bold and !s.italic and !s.bold_italic);
+    }
+    // Unknown token poisons the whole line.
+    try std.testing.expectEqual(@as(?SyntheticStyle, null), parseSyntheticStyle("no-bold,bogus"));
+    try std.testing.expectEqual(@as(?SyntheticStyle, null), parseSyntheticStyle(""));
+}
+
+test "font-thicken/font-shaping-break are silently ignored" {
+    const src =
+        \\font-thicken = true
+        \\font-thicken-strength = 128
+        \\font-shaping-break = cursor
+    ;
+    // Should produce no entries, no panic. Warning-as-error would surface via
+    // the unknown-key warn, which these keys must NOT trigger.
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 0), cfg.font_codepoint_maps.len);
 }
 
 const std = @import("std");

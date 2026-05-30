@@ -75,10 +75,25 @@ pub fn main() !void {
     // strings. The UTF-16 storage is leaked: it lives for the lifetime of the
     // global renderer (i.e. the whole process).
     global.config = Config.loadDefault(global.gpa.allocator());
-    const font_families_u16 = util.utf16FontFamilies(global.gpa.allocator(), global.config.font_families);
+    const gpa_alloc = global.gpa.allocator();
+    const font_families_u16 = util.utf16FontFamilies(gpa_alloc, global.config.font_families);
+    const codepoint_maps_u16 = util.utf16CodepointMaps(gpa_alloc, global.config.font_codepoint_maps);
     const font_config: d3d11.FontConfig = .{
         .families = font_families_u16,
+        .family_bold = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_bold),
+        .family_italic = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_italic),
+        .family_bold_italic = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_bold_italic),
+        .synthesize_bold = global.config.font_synthetic_style.bold,
+        .synthesize_italic = global.config.font_synthetic_style.italic,
+        .synthesize_bold_italic = global.config.font_synthetic_style.bold_italic,
+        .style_specs = .{
+            util.convertStyleSpec(gpa_alloc, global.config.font_style),
+            util.convertStyleSpec(gpa_alloc, global.config.font_style_bold),
+            util.convertStyleSpec(gpa_alloc, global.config.font_style_italic),
+            util.convertStyleSpec(gpa_alloc, global.config.font_style_bold_italic),
+        },
         .font_size_pt = global.config.font_size_pt,
+        .codepoint_maps = codepoint_maps_u16,
     };
     global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
     const cell_size = global.renderer.cell_size;
