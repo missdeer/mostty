@@ -420,13 +420,13 @@ pub fn render(
     const sz = win32.getClientSize(hwnd);
     const client_w: u32 = @intCast(sz.cx);
     const client_h: u32 = @intCast(sz.cy);
+    if (client_w == 0 or client_h == 0) return;
 
     // Lazy swap chain init
     if (self.swap_chain == null) {
         self.swap_chain = self.initSwapChain(hwnd, client_w, client_h);
     }
     const swap_chain = self.swap_chain.?;
-    if (client_w == 0 or client_h == 0) return;
 
     // Resize swap chain if needed
     {

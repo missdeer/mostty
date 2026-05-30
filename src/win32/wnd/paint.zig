@@ -5,6 +5,7 @@ const d3d11 = @import("../d3d11.zig");
 const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const render = @import("../render.zig");
+const types = @import("../types.zig");
 const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
 
@@ -20,6 +21,9 @@ pub fn onPaint(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESUL
     defer win32.endPaint(hwnd, &ps);
 
     const window = global_mod.windowFromHwnd(hwnd);
+    // Match onWindowPosChanged: don't consume render_pending while iconic so
+    // any request that landed before this paint still fires on restore.
+    if (win32.IsIconic(hwnd) != 0) return 0;
     window.render_pending = false;
     render.renderWindow(window);
     return 0;
@@ -55,16 +59,33 @@ pub fn onSizing(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM) ?w
     return 0;
 }
 
-pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.cell_size);
+    const pos: *const win32.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    const iconic = win32.IsIconic(hwnd) != 0;
 
-    for (window.tabs.items) |tab| {
-        tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
-            std.debug.panic("Terminal.resize: {}", .{e});
-        var resize_err: Error = undefined;
-        tab.child_process.resize(&resize_err, cell_count) catch std.debug.panic("{f}", .{resize_err});
+    if (pos.flags.NOSIZE == 0 and !iconic) {
+        const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.cell_size);
+
+        for (window.tabs.items) |tab| {
+            if (tab.closing) continue;
+            if (tab.term.cols == cell_count.col and tab.term.rows == cell_count.row) continue;
+            tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
+                std.debug.panic("Terminal.resize: {}", .{e});
+            var resize_err: Error = undefined;
+            tab.child_process.resize(&resize_err, cell_count) catch |e| switch (e) {
+                error.Closed => {
+                    tab.closing = true;
+                    _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
+                },
+                error.Error => std.debug.panic("{f}", .{resize_err}),
+            };
+        }
     }
+
+    // Nothing to paint while minimized; leave render_pending alone so any
+    // request that landed before this message still fires on restore.
+    if (iconic) return 0;
     // Clear before render so requests fired during render() still
     // schedule a follow-up frame. Skip the unconditional
     // ValidateRect when a new request landed during render —

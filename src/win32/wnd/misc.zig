@@ -131,12 +131,27 @@ fn reloadConfig(hwnd: win32.HWND) void {
         if (global.window) |*window| {
             // Stale geometry token captured at the old cell size.
             window.bounds = null;
-            const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.cell_size);
-            for (window.tabs.items) |tab| {
-                tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
-                    std.debug.panic("Terminal.resize: {}", .{e});
-                var resize_err: Error = undefined;
-                tab.child_process.resize(&resize_err, cell_count) catch std.debug.panic("{f}", .{resize_err});
+            // Skip the PTY/Terminal resize loop while iconic for the same
+            // reason as onWindowPosChanged: the client area is 0x0 so the
+            // grid would be 1x1, which destabilizes ConPTY. The next
+            // WM_WINDOWPOSCHANGED on restore re-syncs to the real grid.
+            const iconic = win32.IsIconic(hwnd) != 0;
+            if (!iconic) {
+                const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.cell_size);
+                for (window.tabs.items) |tab| {
+                    if (tab.closing) continue;
+                    if (tab.term.cols == cell_count.col and tab.term.rows == cell_count.row) continue;
+                    tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
+                        std.debug.panic("Terminal.resize: {}", .{e});
+                    var resize_err: Error = undefined;
+                    tab.child_process.resize(&resize_err, cell_count) catch |e| switch (e) {
+                        error.Closed => {
+                            tab.closing = true;
+                            _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
+                        },
+                        error.Error => std.debug.panic("{f}", .{resize_err}),
+                    };
+                }
             }
             window.requestRender();
         }

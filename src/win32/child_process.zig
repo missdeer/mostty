@@ -35,12 +35,20 @@ pub const ChildProcess = struct {
         }
     }
 
-    pub fn resize(self: *ChildProcess, out_err: *Error, cell_count: GridPos) error{Error}!void {
+    // Conhost dropped the pipe on its side. ERROR_NO_DATA shows up after a
+    // degenerate (1x1) resize while minimized; ERROR_BROKEN_PIPE shows up
+    // when the child process exited and the reader thread hasn't yet driven
+    // the WM_APP_CLOSE_TAB lifecycle. Both mean the PTY is dead.
+    const ERROR_NO_DATA_HRESULT: win32.HRESULT = @bitCast(@as(u32, 0x800700E8));
+    const ERROR_BROKEN_PIPE_HRESULT: win32.HRESULT = @bitCast(@as(u32, 0x8007006D));
+
+    pub fn resize(self: *ChildProcess, out_err: *Error, cell_count: GridPos) error{ Error, Closed }!void {
         const pty = self.pty orelse return;
         const hr = win32.ResizePseudoConsole(
             pty.hpcon,
             .{ .X = @intCast(cell_count.col), .Y = @intCast(cell_count.row) },
         );
+        if (hr == ERROR_NO_DATA_HRESULT or hr == ERROR_BROKEN_PIPE_HRESULT) return error.Closed;
         if (hr < 0) return out_err.setHresult("ResizePseudoConsole", hr);
     }
 
