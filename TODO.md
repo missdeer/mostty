@@ -8,3 +8,4 @@
 - [x]接入 ghostty-vt 的 write_pty 回调，把 CSI c / DECRQM 等终端查询的响应写回 PTY（当前缺失会让 nvim/fzf 等依赖查询的工具行为异常）
 - [x]在标题栏右键系统菜单上添加一个`Theme`子菜单，列出所有可用的theme，点击菜单项则切换到该theme，但这个切换只是当前session热切换，程序下次启动时仍从配置文件中读取theme
 - [x]git commit 5a2709b 修正了emoji彩色渲染后，似乎整体渲染性能变差了，需要调研是否可以优化
+- [x]增加鼠标移动和点击事件响应，以供TUI正确渲染，比如`python -m textual`

@@ -15,6 +15,7 @@ pub const MouseCapture = enum {
     none,
     scrollbar_drag,
     selecting,
+    mouse_report,
 };
 
 pub const WindowBounds = struct {

@@ -19,6 +19,7 @@ pub const Tab = struct {
     term: *vt.Terminal,
     term_arena: std.heap.ArenaAllocator,
     vt_stream: vt_stream_mod.Stream,
+    mouse_last_cell: ?vt.Coordinate = null,
     title_buf: [512]u8 = undefined,
     title_len: usize = 0,
     // UTF-16 high surrogate carried across two WM_CHAR calls. Per-tab
@@ -45,6 +46,10 @@ pub const Window = struct {
     mouse_in_scrollbar: bool = false,
     selection_fade: f32 = 0,
     mouse_capture: MouseCapture = .none,
+    // Tab id captured at mouse_report press time. Mouse reports during the
+    // captured drag write to this tab even if the user Ctrl+Tabs the active
+    // tab mid-drag; null when no mouse-report capture is in flight.
+    mouse_report_tab_id: ?TabId = null,
     scrollbar_drag_offset: f32 = 0,
     resizing: bool = false,
     tab_bar_hover: ?TabHit = null,

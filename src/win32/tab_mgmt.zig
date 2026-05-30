@@ -313,8 +313,7 @@ pub fn destroyTab(window: *Window, tab: *Tab) void {
     window.onActiveChanged();
 }
 
-pub fn writeToActivePty(window: *Window, bytes: []const u8) void {
-    const tab = window.active();
+pub fn writeToPty(tab: *Tab, bytes: []const u8) void {
     const pty = tab.child_process.pty orelse {
         std.log.err("write: pty closed for tab {}", .{tab.id});
         return;
@@ -323,4 +322,8 @@ pub fn writeToActivePty(window: *Window, bytes: []const u8) void {
         "write to pty failed: {s}",
         .{@errorName(e)},
     );
+}
+
+pub fn writeToActivePty(window: *Window, bytes: []const u8) void {
+    writeToPty(window.active(), bytes);
 }

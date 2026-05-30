@@ -27,10 +27,13 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     // mouse
     .{ .msg = win32.WM_LBUTTONDOWN, .handler = &mouse.onLButtonDown },
     .{ .msg = win32.WM_LBUTTONUP, .handler = &mouse.onLButtonUp },
+    .{ .msg = win32.WM_MBUTTONDOWN, .handler = &mouse.onMButtonDown },
+    .{ .msg = win32.WM_MBUTTONUP, .handler = &mouse.onMButtonUp },
     .{ .msg = win32.WM_MOUSEWHEEL, .handler = &mouse.onMouseWheel },
     .{ .msg = win32.WM_MOUSEMOVE, .handler = &mouse.onMouseMove },
     .{ .msg = win32.WM_MOUSELEAVE, .handler = &mouse.onMouseLeave },
     .{ .msg = win32.WM_RBUTTONDOWN, .handler = &mouse.onRButtonDown },
+    .{ .msg = win32.WM_RBUTTONUP, .handler = &mouse.onRButtonUp },
     // keyboard
     .{ .msg = win32.WM_KEYDOWN, .handler = &keyboard.onKeyDown },
     .{ .msg = win32.WM_CHAR, .handler = &keyboard.onChar },
