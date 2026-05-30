@@ -48,6 +48,14 @@ pub const CONFIG_RELOAD_DEBOUNCE_MS: u32 = 150;
 // 16, since DefWindowProc masks WM_SYSCOMMAND wparam with 0xFFF0.
 pub const IDM_OPEN_SETTINGS: usize = 0x0010;
 
+// Theme submenu IDs occupy 0x1000..0x5000 in steps of 16: clear of
+// IDM_OPEN_SETTINGS and the system range (>=0xF000). The Theme menu is
+// grouped by first letter (0-9, A-Z, #), so 1024 items is comfortably more
+// than Ghostty's ~460 bundled themes.
+pub const IDM_THEME_BASE: usize = 0x1000;
+pub const MAX_THEME_ITEMS: usize = 1024;
+pub const IDM_THEME_END: usize = IDM_THEME_BASE + MAX_THEME_ITEMS * 0x10;
+
 pub const window_style = win32.WS_OVERLAPPEDWINDOW;
 pub const window_style_ex = win32.WINDOW_EX_STYLE{
     .APPWINDOW = 1,

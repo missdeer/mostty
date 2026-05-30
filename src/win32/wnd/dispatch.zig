@@ -50,6 +50,7 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     // misc
     .{ .msg = win32.WM_TIMER, .handler = &misc.onTimer },
     .{ .msg = win32.WM_SYSCOMMAND, .handler = &misc.onSysCommand },
+    .{ .msg = win32.WM_INITMENUPOPUP, .handler = &misc.onInitMenuPopup },
     .{ .msg = win32.WM_SETTINGCHANGE, .handler = &misc.onSettingChange },
     .{ .msg = win32.WM_DROPFILES, .handler = &misc.onDropFiles },
     .{ .msg = types.WM_APP_CHILD_PROCESS_DATA, .handler = &misc.onAppChildProcessData },

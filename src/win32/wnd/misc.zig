@@ -5,12 +5,14 @@ const Config = @import("../../Config.zig");
 const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const paste = @import("../paste.zig");
+const state = @import("../state.zig");
 const types = @import("../types.zig");
 const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
 
 const Error = err_mod.Error;
 const ReadMsg = types.ReadMsg;
+const Window = state.Window;
 const global = global_mod.global;
 
 // Bounded retries when a config reload hits a transiently-locked file (editor
@@ -145,6 +147,9 @@ fn reloadConfig(hwnd: win32.HWND) void {
             for (window.tabs.items) |tab| {
                 global.config.theme.rebaseTerminal(tab.term);
             }
+            // Config file is the stronger signal than any prior session pick:
+            // resync the menu's check mark to whatever the file declares now.
+            setActiveThemeName(window, global.config.theme_name);
             window.requestRender();
         }
     }
@@ -189,11 +194,192 @@ fn optF32Eql(a: ?f32, b: ?f32) bool {
 
 pub fn onSysCommand(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     // DefWindowProc uses the low 4 bits internally; mask before comparing.
-    if ((wparam & 0xFFF0) == types.IDM_OPEN_SETTINGS) {
+    const masked = wparam & 0xFFF0;
+    if (masked == types.IDM_OPEN_SETTINGS) {
         openSettingsFile(hwnd);
         return 0;
     }
+    if (masked >= types.IDM_THEME_BASE and masked < types.IDM_THEME_END) {
+        applyThemePickById(hwnd, masked);
+        return 0;
+    }
     return null; // delegate the rest (Move/Size/Close/...) to DefWindowProcW
+}
+
+// Rebuilds the Theme submenu when it's about to be displayed. Other popups
+// (the OS-provided system commands, and the per-letter group submenus we
+// populate eagerly below) fall through to DefWindowProc.
+//
+// The Theme menu is grouped by first character (0-9, A-Z, #) because a single
+// flat list of 400+ themes is unusable. Draining items via DeleteMenu on the
+// parent also destroys each child group submenu (MSDN: DeleteMenu frees the
+// handle to a submenu attached via MF_POPUP), so old groups don't leak across
+// rebuilds.
+pub fn onInitMenuPopup(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    const window = global.window orelse return null;
+    const sub = window.theme_submenu orelse return null;
+    const menu: win32.HMENU = @ptrFromInt(wparam);
+    if (menu != sub) return null;
+
+    while (true) {
+        const count = win32.GetMenuItemCount(menu);
+        if (count <= 0) break;
+        _ = win32.DeleteMenu(menu, 0, win32.MF_BYPOSITION);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const gpa = global.gpa.allocator();
+    const names = Config.listThemeNames(gpa);
+    defer {
+        for (names) |n| gpa.free(n);
+        gpa.free(names);
+    }
+
+    if (names.len == 0) {
+        _ = win32.AppendMenuW(menu, .{ .GRAYED = 1 }, 0, win32.L("(no themes found)"));
+        return 0;
+    }
+
+    // 28 buckets: 0="0-9", 1..26="A".."Z", 27="#" (everything else).
+    const bucket_count = 28;
+    var buckets: [bucket_count]std.ArrayListUnmanaged([]const u8) = @splat(.empty);
+    for (names) |name| {
+        buckets[bucketFor(name)].append(a, name) catch |e| util.oom(e);
+    }
+
+    var next_id: usize = types.IDM_THEME_BASE;
+    var truncated_at: ?usize = null;
+    var idx: usize = 0;
+    while (idx < bucket_count) : (idx += 1) {
+        const items = buckets[idx].items;
+        if (items.len == 0) continue;
+
+        const group = win32.CreatePopupMenu() orelse {
+            std.log.err("CreatePopupMenu (theme group) failed, error={f}", .{win32.GetLastError()});
+            continue;
+        };
+        var group_has_active = false;
+
+        for (items) |name| {
+            if (next_id >= types.IDM_THEME_END) {
+                truncated_at = truncated_at orelse names.len;
+                break;
+            }
+            const label_w = util.utf16ZAllocConst(a, name) catch |e| util.oom(e);
+            const checked = matchesActive(window.active_theme_name, name);
+            if (checked) group_has_active = true;
+            const flags: win32.MENU_ITEM_FLAGS = .{ .CHECKED = if (checked) 1 else 0 };
+            _ = win32.AppendMenuW(group, flags, next_id, label_w);
+            next_id += 0x10;
+        }
+
+        const group_label_w = util.utf16ZAllocConst(a, bucketLabel(idx)) catch |e| util.oom(e);
+        // Parent-letter check mark helps users spot the active group without
+        // expanding every submenu. POPUP attaches the group as a child.
+        const parent_flags: win32.MENU_ITEM_FLAGS = .{
+            .POPUP = 1,
+            .CHECKED = if (group_has_active) 1 else 0,
+        };
+        _ = win32.AppendMenuW(menu, parent_flags, @intFromPtr(group), group_label_w);
+
+        if (truncated_at != null) break;
+    }
+
+    if (truncated_at) |total| {
+        std.log.warn("theme submenu: id range exhausted at {}/{} themes", .{ types.MAX_THEME_ITEMS, total });
+    }
+    return 0;
+}
+
+// GetMenuStringW(MF_BYCOMMAND) does not recurse into child submenus, so walk
+// the tree ourselves. Returns the number of UTF-16 units written (excluding
+// NUL), or 0 if the id isn't present anywhere under `root`.
+fn findMenuItemText(root: win32.HMENU, id: i32, buf: [*:0]u16, cap: i32) i32 {
+    const direct = win32.GetMenuStringW(root, @bitCast(id), buf, cap, win32.MF_BYCOMMAND);
+    if (direct > 0) return direct;
+    const count = win32.GetMenuItemCount(root);
+    if (count <= 0) return 0;
+    var i: i32 = 0;
+    while (i < count) : (i += 1) {
+        const child = win32.GetSubMenu(root, i) orelse continue;
+        const got = findMenuItemText(child, id, buf, cap);
+        if (got > 0) return got;
+    }
+    return 0;
+}
+
+fn matchesActive(active: ?[]const u8, name: []const u8) bool {
+    const cur = active orelse return false;
+    return std.ascii.eqlIgnoreCase(cur, name);
+}
+
+fn bucketFor(name: []const u8) usize {
+    if (name.len == 0) return 27;
+    const c = name[0];
+    if (c >= '0' and c <= '9') return 0;
+    if (c >= 'A' and c <= 'Z') return 1 + (c - 'A');
+    if (c >= 'a' and c <= 'z') return 1 + (c - 'a');
+    return 27;
+}
+
+fn bucketLabel(idx: usize) []const u8 {
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    return switch (idx) {
+        0 => "0-9",
+        27 => "#",
+        else => letters[idx - 1 .. idx],
+    };
+}
+
+// Resolves the picked menu item back to its theme name via the menu itself
+// (avoids index-drift races if the themes dir changed between popup and click).
+// Theme items live in per-letter sub-submenus, so search recursively —
+// GetMenuStringW(MF_BYCOMMAND) only searches the menu it was given, not its
+// descendants.
+fn applyThemePickById(hwnd: win32.HWND, id: usize) void {
+    const window = global_mod.windowFromHwnd(hwnd);
+    const sub = window.theme_submenu orelse return;
+
+    var buf: [260:0]u16 = undefined;
+    const written = findMenuItemText(sub, @intCast(id), &buf, buf.len);
+    if (written <= 0) {
+        std.log.warn("theme pick: menu lookup for id=0x{x} failed", .{id});
+        return;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const name_u8 = std.unicode.utf16LeToUtf8Alloc(a, buf[0..@intCast(written)]) catch |e| {
+        std.log.warn("theme pick: utf16->utf8 failed: {s}", .{@errorName(e)});
+        return;
+    };
+
+    const gpa = global.gpa.allocator();
+    var new_theme = Config.loadThemeColorsByName(gpa, name_u8) orelse return;
+    global.config.color_overrides.applyTo(&new_theme);
+    global.config.theme = new_theme;
+
+    for (window.tabs.items) |tab| {
+        global.config.theme.rebaseTerminal(tab.term);
+    }
+    setActiveThemeName(window, name_u8);
+    window.requestRender();
+}
+
+// Replaces window.active_theme_name with a fresh gpa-owned copy. Null name
+// clears it.
+fn setActiveThemeName(window: *Window, name: ?[]const u8) void {
+    const gpa = global.gpa.allocator();
+    if (window.active_theme_name) |old| gpa.free(old);
+    window.active_theme_name = null;
+    if (name) |n| {
+        window.active_theme_name = gpa.dupe(u8, n) catch null;
+    }
 }
 
 // Opens %LOCALAPPDATA%/mostty/config in notepad.exe, creating an empty file

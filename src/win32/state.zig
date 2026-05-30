@@ -61,6 +61,15 @@ pub const Window = struct {
     // WM_PAINT before render() so events fired *during* render still
     // schedule a follow-up frame.
     render_pending: bool = false,
+    // System-menu "Theme" cascading submenu. Owned by the system menu once
+    // attached, so Windows destroys it with the parent — no manual cleanup.
+    // Items are rebuilt on each WM_INITMENUPOPUP.
+    theme_submenu: ?win32.HMENU = null,
+    // Name of the theme currently applied in this session (gpa-owned). Seeded
+    // from the parsed config's `theme = X`, replaced when the user picks a
+    // theme through the submenu, and resynced from the config on hot-reload.
+    // Null when no theme is active.
+    active_theme_name: ?[]u8 = null,
 
     pub fn active(self: *Window) *Tab {
         return self.tabs.items[self.active_index];

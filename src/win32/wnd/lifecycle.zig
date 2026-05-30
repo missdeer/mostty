@@ -14,7 +14,17 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     const window = &global.window.?;
     if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
         _ = win32.AppendMenuW(menu, win32.MF_SEPARATOR, 0, null);
+        if (win32.CreatePopupMenu()) |sub| {
+            window.theme_submenu = sub;
+            // Cast HMENU to the uintptr id slot AppendMenuW expects for MF_POPUP.
+            const sub_id: usize = @intFromPtr(sub);
+            _ = win32.AppendMenuW(menu, win32.MF_POPUP, sub_id, win32.L("Theme"));
+        }
         _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_OPEN_SETTINGS, win32.L("Open Settings File..."));
+    }
+    if (global.config.theme_name) |name| {
+        const gpa = global.gpa.allocator();
+        window.active_theme_name = gpa.dupe(u8, name) catch null;
     }
     tab_mgmt.newTab(window);
     return 0;
@@ -40,6 +50,10 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
 pub fn onDestroy(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     if (global.window) |*window| {
         tab_mgmt.destroyAllTabs(window);
+        if (window.active_theme_name) |s| {
+            global.gpa.allocator().free(s);
+            window.active_theme_name = null;
+        }
     } else {
         win32.PostQuitMessage(0);
     }

@@ -6,4 +6,4 @@
 - [x]运行时性能审计优化
 - [x]换名字为`Mostty`
 - [x]接入 ghostty-vt 的 write_pty 回调，把 CSI c / DECRQM 等终端查询的响应写回 PTY（当前缺失会让 nvim/fzf 等依赖查询的工具行为异常）
-- []更多可配置项
+- [x]在标题栏右键系统菜单上添加一个`Theme`子菜单，列出所有可用的theme，点击菜单项则切换到该theme，但这个切换只是当前session热切换，程序下次启动时仍从配置文件中读取theme

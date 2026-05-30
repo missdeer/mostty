@@ -1,5 +1,11 @@
 const Config = @This();
 
+// Used when the user's config has no `theme = X` line (or no config at all).
+// Resolved via the normal theme search path, so users can drop a same-named
+// override into %LOCALAPPDATA%/mostty/themes to customize without editing
+// the binary.
+pub const default_theme_name = "Ghostty Default Style Dark";
+
 pub const Launcher = struct {
     label: []const u8,
     command_line: []const u8,
@@ -94,6 +100,32 @@ pub const ThemeColors = struct {
     }
 };
 
+// Per-key record of color values the user explicitly set in the config (vs
+// inherited from a `theme = X` file). Replayed on top of a freshly-loaded
+// theme when the user hot-switches themes through the system-menu submenu,
+// so config-explicit overrides keep winning — matching parse-time layering.
+pub const ColorOverrides = struct {
+    foreground: ?u24 = null,
+    background: ?u24 = null,
+    cursor_color: ?u24 = null,
+    cursor_text: ?u24 = null,
+    selection_background: ?u24 = null,
+    selection_foreground: ?u24 = null,
+    palette: [256]?vt.color.RGB = @splat(null),
+
+    pub fn applyTo(self: ColorOverrides, theme: *ThemeColors) void {
+        if (self.foreground) |c| theme.foreground = c;
+        if (self.background) |c| theme.background = c;
+        if (self.cursor_color) |c| theme.cursor_color = c;
+        if (self.cursor_text) |c| theme.cursor_text = c;
+        if (self.selection_background) |c| theme.selection_background = c;
+        if (self.selection_foreground) |c| theme.selection_foreground = c;
+        for (self.palette, 0..) |maybe, i| {
+            if (maybe) |rgb| theme.palette[i] = rgb;
+        }
+    }
+};
+
 // Updates a DynamicRGB's default while preserving a real OSC override. vt's
 // reset() sets override = old default, so "override == old default" (or null)
 // means the app hasn't truly overridden the color and it should follow the new
@@ -121,6 +153,14 @@ font_size_pt: ?f32 = null,
 font_codepoint_maps: []const CodepointMap = &.{},
 launchers: []const Launcher = &.{},
 theme: ThemeColors = .{},
+// Resolved name from the last `theme = X` line in the config (with Ghostty's
+// `light:/dark:` variant already picked). Arena-owned; null when the config
+// has no `theme` key. Used by the system-menu submenu for check-mark display
+// and to drive `active_theme_name` on hot-reload.
+theme_name: ?[]const u8 = null,
+// Color keys explicitly set by the user's config (not by the theme file).
+// Replayed when the menu hot-switches the theme so user overrides stick.
+color_overrides: ColorOverrides = .{},
 // Default cell background alpha (0..1). Anything <1 lets the DWM blur-behind
 // show through under non-themed cells; cells with an explicit `bg_color_*`
 // stay opaque so highlighted regions remain readable.
@@ -139,7 +179,7 @@ pub fn defaultPath(gpa: std.mem.Allocator) ?[]const u8 {
 pub fn loadDefault(gpa: std.mem.Allocator) Config {
     const path = defaultPath(gpa) orelse {
         std.log.info("config: LOCALAPPDATA unavailable; using defaults", .{});
-        return .{};
+        return parse(gpa, "", "<defaults>");
     };
     defer gpa.free(path);
 
@@ -154,10 +194,10 @@ pub const ReloadError = error{ReadFailed};
 // missing file still yields defaults (the user deleting the config legitimately
 // means "all defaults").
 pub fn loadDefaultChecked(gpa: std.mem.Allocator) ReloadError!Config {
-    const path = defaultPath(gpa) orelse return .{};
+    const path = defaultPath(gpa) orelse return parse(gpa, "", "<defaults>");
     defer gpa.free(path);
     const bytes = std.fs.cwd().readFileAlloc(gpa, path, 64 * 1024) catch |err| switch (err) {
-        error.FileNotFound => return .{},
+        error.FileNotFound => return parse(gpa, "", path),
         else => return error.ReadFailed,
     };
     defer gpa.free(bytes);
@@ -168,11 +208,11 @@ pub fn loadPath(gpa: std.mem.Allocator, path: []const u8) Config {
     const bytes = std.fs.cwd().readFileAlloc(gpa, path, 64 * 1024) catch |err| switch (err) {
         error.FileNotFound => {
             std.log.info("config: '{s}' not found; using defaults", .{path});
-            return .{};
+            return parse(gpa, "", path);
         },
         else => {
             std.log.warn("config: read '{s}' failed: {s}; using defaults", .{ path, @errorName(err) });
-            return .{};
+            return parse(gpa, "", path);
         },
     };
     defer gpa.free(bytes);
@@ -199,6 +239,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
     var theme: ThemeColors = .{};
+    var overrides: ColorOverrides = .{};
+    var theme_name: ?[]const u8 = null;
 
     // Strip UTF-8 BOM if present (Notepad and other Windows editors add one).
     const input = if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) source[3..] else source;
@@ -215,8 +257,20 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             const key = std.mem.trim(u8, line[0..eq], " \t");
             if (!std.mem.eql(u8, key, "theme")) continue;
             const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
+            const resolved = resolveThemeName(value, systemPrefersDark());
+            if (resolved.len != 0) {
+                theme_name = a.dupe(u8, resolved) catch oom();
+            }
             applyThemeFile(gpa, &theme, value);
         }
+    }
+
+    // Fall back to the bundled default theme when the config has no `theme = X`
+    // line, so a missing or theme-less config still gets a curated palette
+    // instead of the hard-coded ThemeColors defaults.
+    if (theme_name == null) {
+        theme_name = a.dupe(u8, default_theme_name) catch oom();
+        applyThemeFile(gpa, &theme, default_theme_name);
     }
 
     // Phase 2: everything else. Color keys overwrite the theme baseline.
@@ -235,7 +289,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
 
         if (std.mem.eql(u8, key, "theme")) {
             // Handled in phase 1.
-        } else if (applyColorKey(&theme, key, value)) {
+        } else if (applyColorKey(&theme, &overrides, key, value)) {
             // Recognized color key (palette/background/foreground/cursor-*/selection-*).
         } else if (isKnownUnsupportedKey(key)) {
             // Known Ghostty key with no mostty equivalent: ignore silently so
@@ -319,6 +373,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .font_codepoint_maps = codepoint_maps_slice,
         .launchers = launchers_slice,
         .theme = theme,
+        .theme_name = theme_name,
+        .color_overrides = overrides,
         .background_opacity = background_opacity,
         .arena = arena,
     };
@@ -435,36 +491,50 @@ fn u24ToRgb(c: u24) vt.color.RGB {
 // Applies one color key to `theme`. Returns true if `key` was a recognized
 // color key (even when the value was malformed — it still belongs to the color
 // namespace and must not fall through to the unknown-key warning).
-fn applyColorKey(theme: *ThemeColors, key: []const u8, value: []const u8) bool {
+// When `overrides` is non-null, also records the value there so a later
+// theme hot-switch can replay it on top of a freshly-loaded theme.
+fn applyColorKey(theme: *ThemeColors, overrides: ?*ColorOverrides, key: []const u8, value: []const u8) bool {
     if (std.mem.eql(u8, key, "palette")) {
-        // value is `N=#hex`.
         const eq = std.mem.indexOfScalar(u8, value, '=') orelse return true;
         const idx = std.fmt.parseInt(u8, std.mem.trim(u8, value[0..eq], " \t"), 10) catch return true;
         const rgb = parseHex(std.mem.trim(u8, value[eq + 1 ..], " \t")) orelse return true;
         theme.palette[idx] = u24ToRgb(rgb);
+        if (overrides) |o| o.palette[idx] = u24ToRgb(rgb);
         return true;
     }
-    const dst: *?u24 = if (std.mem.eql(u8, key, "cursor-color"))
-        &theme.cursor_color
+    const Slot = struct {
+        theme_dst: *?u24,
+        override_dst: ?*?u24,
+    };
+    const slot: Slot = if (std.mem.eql(u8, key, "cursor-color"))
+        .{ .theme_dst = &theme.cursor_color, .override_dst = if (overrides) |o| &o.cursor_color else null }
     else if (std.mem.eql(u8, key, "cursor-text"))
-        &theme.cursor_text
+        .{ .theme_dst = &theme.cursor_text, .override_dst = if (overrides) |o| &o.cursor_text else null }
     else if (std.mem.eql(u8, key, "selection-background"))
-        &theme.selection_background
+        .{ .theme_dst = &theme.selection_background, .override_dst = if (overrides) |o| &o.selection_background else null }
     else if (std.mem.eql(u8, key, "selection-foreground"))
-        &theme.selection_foreground
+        .{ .theme_dst = &theme.selection_foreground, .override_dst = if (overrides) |o| &o.selection_foreground else null }
     else {
-        // foreground/background are non-optional u24.
         if (std.mem.eql(u8, key, "foreground")) {
-            if (parseHex(value)) |c| theme.foreground = c;
+            if (parseHex(value)) |c| {
+                theme.foreground = c;
+                if (overrides) |o| o.foreground = c;
+            }
             return true;
         }
         if (std.mem.eql(u8, key, "background")) {
-            if (parseHex(value)) |c| theme.background = c;
+            if (parseHex(value)) |c| {
+                theme.background = c;
+                if (overrides) |o| o.background = c;
+            }
             return true;
         }
         return false;
     };
-    if (parseHex(value)) |c| dst.* = c;
+    if (parseHex(value)) |c| {
+        slot.theme_dst.* = c;
+        if (slot.override_dst) |dst| dst.* = c;
+    }
     return true;
 }
 
@@ -507,6 +577,13 @@ fn applyThemeFile(gpa: std.mem.Allocator, theme: *ThemeColors, value: []const u8
     };
     defer gpa.free(bytes);
 
+    parseThemeFileBytes(theme, bytes);
+}
+
+// Pure parser: folds a theme file's color keys into `theme`. Strips UTF-8 BOM,
+// skips empty/non-`key=value` lines, ignores `theme = ...` (no recursion), and
+// silently ignores non-color keys. No I/O.
+fn parseThemeFileBytes(theme: *ThemeColors, bytes: []const u8) void {
     const input = if (std.mem.startsWith(u8, bytes, "\xEF\xBB\xBF")) bytes[3..] else bytes;
     var it = std.mem.splitScalar(u8, input, '\n');
     while (it.next()) |raw_line| {
@@ -514,10 +591,95 @@ fn applyThemeFile(gpa: std.mem.Allocator, theme: *ThemeColors, value: []const u8
         if (line.len == 0) continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
         const key = std.mem.trim(u8, line[0..eq], " \t");
-        if (std.mem.eql(u8, key, "theme")) continue; // no recursion
+        if (std.mem.eql(u8, key, "theme")) continue;
         const v = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        _ = applyColorKey(theme, key, v); // ignore non-color keys silently in theme files
+        _ = applyColorKey(theme, null, key, v);
     }
+}
+
+// Resolves `name` (a single theme file basename or absolute path; no
+// `light:/dark:` syntax here — caller handles that) and folds its color keys
+// into a fresh ThemeColors baseline. Returns null when the file cannot be
+// found or read.
+pub fn loadThemeColorsByName(gpa: std.mem.Allocator, name: []const u8) ?ThemeColors {
+    if (name.len == 0) return null;
+    const path: []const u8 = if (std.fs.path.isAbsolute(name))
+        gpa.dupe(u8, name) catch oom()
+    else
+        findThemeFile(gpa, name) orelse {
+            std.log.warn("theme '{s}' not found in %LOCALAPPDATA%/mostty/themes or <exe>/themes", .{name});
+            return null;
+        };
+    defer gpa.free(path);
+
+    const bytes = std.fs.cwd().readFileAlloc(gpa, path, 64 * 1024) catch |err| {
+        std.log.warn("theme read '{s}' failed: {s}", .{ path, @errorName(err) });
+        return null;
+    };
+    defer gpa.free(bytes);
+
+    var theme: ThemeColors = .{};
+    parseThemeFileBytes(&theme, bytes);
+    return theme;
+}
+
+// Lists every theme file basename under both search dirs (LOCALAPPDATA first,
+// then exeDir). De-duplicates by basename (LOCALAPPDATA wins, matching
+// findThemeFile precedence) and sorts case-insensitively. Returns a gpa-owned
+// outer slice plus gpa-owned name strings — caller frees each name and the
+// outer slice.
+pub fn listThemeNames(gpa: std.mem.Allocator) [][]u8 {
+    var names: std.ArrayListUnmanaged([]u8) = .empty;
+    defer names.deinit(gpa);
+
+    if (std.process.getEnvVarOwned(gpa, "LOCALAPPDATA")) |lad| {
+        defer gpa.free(lad);
+        const dir = std.fs.path.join(gpa, &.{ lad, "mostty", "themes" }) catch oom();
+        defer gpa.free(dir);
+        appendThemesFromDir(gpa, dir, &names);
+    } else |_| {}
+
+    if (exeDir(gpa)) |d| {
+        defer gpa.free(d);
+        const dir = std.fs.path.join(gpa, &.{ d, "themes" }) catch oom();
+        defer gpa.free(dir);
+        appendThemesFromDir(gpa, dir, &names);
+    }
+
+    std.mem.sort([]u8, names.items, {}, lessThanIgnoreCase);
+    return names.toOwnedSlice(gpa) catch oom();
+}
+
+fn appendThemesFromDir(gpa: std.mem.Allocator, path: []const u8, out: *std.ArrayListUnmanaged([]u8)) void {
+    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        if (!std.unicode.utf8ValidateSlice(entry.name)) continue;
+        var dup_seen = false;
+        for (out.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, entry.name)) {
+                dup_seen = true;
+                break;
+            }
+        }
+        if (dup_seen) continue;
+        const owned = gpa.dupe(u8, entry.name) catch oom();
+        out.append(gpa, owned) catch oom();
+    }
+}
+
+fn lessThanIgnoreCase(_: void, a: []u8, b: []u8) bool {
+    const n = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const ca = std.ascii.toLower(a[i]);
+        const cb = std.ascii.toLower(b[i]);
+        if (ca != cb) return ca < cb;
+    }
+    return a.len < b.len;
 }
 
 // Extracts the effective theme name from a `theme` value. For Ghostty's variant
