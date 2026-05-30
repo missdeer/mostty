@@ -4,28 +4,9 @@
     .version = "0.0.1",
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
-        .x11 = .{
-            .url = "git+https://github.com/marler8997/zigx#ef92153f8ef9f310acd4b895ff9b2c985a0fd5e4",
-            .hash = "x11-0.0.0-yWuw5gv9DABex7yOAi8Q31sN6xIkcUR6B7SklKWZU0Ep",
-            .lazy = true,
-        },
-        .wayland = .{
-            .url = "git+https://github.com/marler8997/wayland-zig#70c2eeb1375ff7cd2d5a75df3bf25eb963136465",
-            .hash = "wayland-0.0.0-nl2rub5KAQArdw4pakt8cxUqAgRdWbGDUp5vidVZJwAe",
-            .lazy = true,
-        },
-        .appicon = .{
-            .url = "git+https://github.com/marler8997/appicon#3c202ade6ac6d248c7ab28eccb92c43d14494e6d",
-            .hash = "appicon-0.0.1-Q2lBVnl6AABte6iTEcMK7B3oihqQXBnprpaXXPCOOhTP",
-        },
         .win32 = .{
             .url = "git+https://github.com/marlersoft/zigwin32#fd6ebce3ebfe48f291069c0ddc518b2cc83be450",
             .hash = "zigwin32-25.0.28-preview-AAAAALYs5QNcI6U4YMngK-zET_wKAM10AWdbIcWEUaYV",
-            .lazy = true,
-        },
-        .TrueType = .{
-            .url = "git+https://codeberg.org/andrewrk/TrueType#8b5dbf3a3bfbb84190377385f5e609c8788a5450",
-            .hash = "TrueType-0.0.0-Ne-mWLVxAQAvMshfhjrJh3GbRHBLSNtF-zXZ0Zt_bHGP",
             .lazy = true,
         },
         .ghostty = .{

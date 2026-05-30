@@ -63,14 +63,14 @@ Default to surfacing uncertainty, not hiding it.
 
 # Build & run
 
-Requires Zig `0.15.2`. Dependencies are declared in `build.zig.zon` and most are marked `lazy = true` — they're only fetched for the platform that needs them (x11/wayland/TrueType on Linux, win32 on Windows).
+Requires Zig `0.15.2`. Windows-only. Dependencies are declared in `build.zig.zon`; `win32` is marked `lazy = true`.
 
 - `zig build` — build the `mostty` executable into `zig-out/bin/`.
 - `zig build run -- [args]` — build and run; everything after `--` is forwarded as cmdline args (see `src/Cmdline.zig`: `--ttf <path>`, `--font-size <float>`).
 - `zig build test` — run the unit test step (compiles the same root file as the exe; there are very few tests today).
 - `zig build -Doptimize=ReleaseSmall` — what the README's "less than 2 MB" Windows binary refers to.
 
-There is no separate lint step. Cross-compile with `-Dtarget=...` as usual; the build script picks the platform entry point and resource files automatically.
+There is no separate lint step. The Windows build requires the MSVC ABI (`build.zig` defaults to it and fails fast on Windows-GNU).
 
 ## Build Command for Developer
 
@@ -80,21 +80,13 @@ There is no separate lint step. Cross-compile with `-Dtarget=...` as usual; the 
 
 # Architecture
 
-Mostty is a terminal emulator that wraps `libghostty-vt` (the VT parser/state machine from Ghostty, imported as the `vt` module) and provides its own windowing + rendering layer per platform. There is **no shared backend abstraction across OSes** — the entry point is chosen at build time:
+Mostty is a Windows-only terminal emulator that wraps `libghostty-vt` (the VT parser/state machine from Ghostty, imported as the `vt` module) and provides its own windowing + rendering layer:
 
-| Target  | Entry point             | Window/IO                                                                  | Rendering             |
-| ------- | ----------------------- | -------------------------------------------------------------------------- | --------------------- |
-| Windows | `src/mosttywindows.zig`   | Win32 message loop + ConPTY per tab                                        | D3D11 + DirectWrite   |
-| Linux   | `src/mostty.zig`          | X11 or Wayland selected at startup from `XDG_SESSION_TYPE`; `poll(2)` loop | X11 RENDER / Wayland  |
+| Target  | Entry point             | Window/IO                            | Rendering             |
+| ------- | ----------------------- | ------------------------------------ | --------------------- |
+| Windows | `src/mosttywindows.zig` | Win32 message loop + ConPTY per tab  | D3D11 + DirectWrite   |
 
-`build.zig` switches on `target.result.os.tag` to pick the root source file, the Win32 manifest/resource, and which dependencies to import. Linux build is `single_threaded = true`; Windows is multi-threaded because each tab has a dedicated `std.Thread` reading from its ConPTY.
-
-## Linux side (`src/mostty.zig`, `src/x11.zig`, `src/wayland.zig`)
-
-- A single `Backend` struct holds an `IoPinned` (pinned IO buffers — pointers into these are kept by the X11/Wayland source readers, so the struct **must not move** after init) plus a tagged-union `Specific` for the X11 or Wayland state.
-- Backend dispatch uses Zig's `inline else` on the union so each platform's `drain`/`render`/`setTitle` methods are called without a vtable.
-- The main loop is one `poll(2)` on `[backend_fd, pty_master_fd]`. Damage is batched: after marking damage, the loop defers the actual `render` until either the FDs go idle or `render_deadline_ns` (8 ms, ~120 fps) has elapsed. Don't render synchronously on every PTY chunk — it tanks throughput.
-- `os/linux.zig` opens `/dev/ptmx` and forks the shell directly (no `posix_openpt`/`forkpty` wrappers). The font path comes from running `fc-match` as a subprocess (`src/posix/fontconfig.zig`) when `--ttf` isn't given.
+The build is multi-threaded because each tab has a dedicated `std.Thread` reading from its ConPTY.
 
 ## Windows side (`src/mosttywindows.zig`, `src/win32/d3d11.zig`)
 
@@ -107,9 +99,8 @@ Mostty is a terminal emulator that wraps `libghostty-vt` (the VT parser/state ma
 
 ## Shared
 
-- `Cmdline.zig` is used by both entry points.
-- `vt` (libghostty-vt) drives terminal state. Mostty wires its own `Stream` handler (`TitleHandler` on Linux, `VtHandler` on Windows) on top of `vt.ReadonlyHandler` to intercept `window_title` actions; everything else falls through to the readonly handler.
-- `TERM` is forced to `xterm-256color` (see `mostty.setTermEnv` on Linux; Windows sets the child env directly when spawning the ConPTY).
+- `vt` (libghostty-vt) drives terminal state. Mostty wires its own `Stream` handler (`VtHandler`) on top of `vt.ReadonlyHandler` to intercept `window_title` actions; everything else falls through to the readonly handler.
+- `TERM` is forced to `xterm-256color` (Windows sets the child env directly when spawning the ConPTY).
 
 ## Temp Dir
 
