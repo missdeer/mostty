@@ -42,13 +42,12 @@ float4 UnpackRgba(uint packed)
     return unpacked;
 }
 
-// Gamma 2.2 decode. Must stay in lock-step with DirectWrite's
-// CreateCustomRenderingParams gamma so the encode applied by D2D when
-// rendering white-on-black ClearType cancels when decoded here. This is
-// intentionally not the cheaper c*c approximation: the same function is also
-// used for fg/bg colors before the sRGB RTV encode, and c*c visibly shifts
-// mid-tone terminal palette colors.
-float3 to_linear(float3 c) { return pow(max(c, 0.0), 2.2); }
+// Fast gamma decode approximation. This avoids per-pixel pow() while staying
+// much closer to DirectWrite's gamma 2.2 output than the older c*c path.
+float3 to_linear(float3 c) {
+    c = saturate(c);
+    return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878);
+}
 
 float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     // Background gradient (per-pixel sin dither was removed — its
@@ -86,6 +85,14 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     Cell cell = cells[cell_index];
     float4 bg = UnpackRgba(cell.bg);
     float4 fg = UnpackRgba(cell.fg);
+    float3 linear_bg = to_linear(bg.rgb);
+    bool invisible = (cell.attrs & (1u << 6)) != 0;
+
+    if (invisible) {
+        // Skip glyph sampling entirely; render bg as-is with its alpha so the
+        // translucent default cell still lets DWM blur through.
+        return float4(linear_bg * bg.a, bg.a);
+    }
 
     uint2 glyph_cell_pos = uint2(
         cell.glyph_index % cells_per_row,
@@ -95,22 +102,7 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     uint2 texture_coord = glyph_cell_pos * cell_size + cell_pixel;
     float4 glyph_texel = glyph_texture.Load(int3(texture_coord, 0));
 
-    // Linear-space blending. The sRGB-flavor RTV re-encodes on store.
-    // Atlas RGB is gamma-encoded ClearType mask intensity; pow(2.2) decode
-    // pairs with CreateCustomRenderingParams(gamma=2.2) to recover linear
-    // per-subpixel coverage.
-    float3 linear_fg = to_linear(fg.rgb);
-    float3 linear_bg = to_linear(bg.rgb);
-    float3 cov = to_linear(glyph_texel.rgb) * fg.a;
     bool color_glyph = (cell.attrs & (1u << 5)) != 0;
-    bool invisible = (cell.attrs & (1u << 6)) != 0;
-
-    if (invisible) {
-        // Skip glyph entirely; render bg as-is with its alpha so the
-        // translucent default cell still lets DWM blur through.
-        return float4(linear_bg * bg.a, bg.a);
-    }
-
     if (color_glyph) {
         // Atlas was rendered into a PREMULTIPLIED D2D RT but D2D stored the
         // premultiplied value in sRGB-encoded space, so we must un-premultiply
@@ -126,6 +118,12 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         float3 out_rgb = src_rgb + linear_bg * bg.a * (1.0 - src_a);
         return float4(out_rgb, out_a);
     }
+
+    // Linear-space blending. The sRGB-flavor RTV re-encodes on store.
+    // Atlas RGB is gamma-encoded ClearType mask intensity; the same decode
+    // approximates DirectWrite's gamma 2.2 mask back to linear coverage.
+    float3 linear_fg = to_linear(fg.rgb);
+    float3 cov = to_linear(glyph_texel.rgb) * fg.a;
 
     uint underline = cell.attrs & 7;
     bool strikethrough = (cell.attrs & (1u << 3)) != 0;
