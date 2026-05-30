@@ -24,7 +24,7 @@ This fork adds several Windows-side enhancements on top of upstream:
 
 - Configurable startup launchers per tab, including right-click `+` launcher selection and SSH hosts integrated into the launcher menu.
 - Confirmation prompts before closing a tab or the window to reduce accidental session loss.
-- User-configurable font family/size on Windows via `%LOCALAPPDATA%\mostty\config`.
+- User configuration via `%LOCALAPPDATA%\mostty\config`: font family/size, colors and Ghostty-compatible themes (with live light/dark switching), and per-tab launchers. See [Configuration](configurations.md).
 - Rendering improvements for wide-glyph clipping, tile-design handling, ambiguous-width symbol alignment/readability, and CRLF tolerance in the octant glyph parser.
 - Drag-and-drop from Explorer: dropped files are pasted as space-separated, double-quoted paths into the active tab (works under elevation via UIPI message filters).
 - IME composition and candidate windows track the caret cell instead of opening at the screen corner; the position re-pins if PTY output scrolls mid-composition.
@@ -43,30 +43,11 @@ This fork adds several Windows-side enhancements on top of upstream:
 
 Tab teardown sets an atomic `reader_stop` and calls `CancelIoEx` so the reader thread exits cleanly whether it was blocked in `ReadFile` or mid-`SendMessage`, and the main loop waits on all child process handles via `MsgWaitForMultipleObjectsEx` so an exiting shell posts a close instead of killing the process.
 
-Custom shells / startup programs are declared in `%LOCALAPPDATA%\mostty\config` (see Font configuration below for file format). Each `launcher` line is `label | command-line | working-directory` — the first `|` and the last `|` are the field separators, so the middle (command-line) segment can contain literal `|` (e.g. `cmd /c "dir | findstr foo"`). The third segment is optional; an empty working directory inherits mostty's. A failed launcher (bad path, missing exe) logs an error and skips the new tab rather than crashing mostty. Example:
-
-```
-launcher = cmd | C:\Windows\System32\cmd.exe |
-launcher = Git Bash | "C:\Program Files\Git\bin\bash.exe" -i | C:\Users\Fan
-launcher = PowerShell | powershell.exe -NoLogo |
-```
+Custom shells / startup programs are declared as `launcher` lines in `%LOCALAPPDATA%\mostty\config` — see [Configuration](configurations.md). A failed launcher (bad path, missing exe) logs an error and skips the new tab rather than crashing mostty.
 
 **Font configuration.** Defaults: primary family **Consolas @ 13pt** with a minimal hardcoded fallback chain (`Segoe UI Emoji`) attached via a custom `IDWriteFontFallback`. Cell size is measured from `IDWriteFontFace` design metrics rather than a text layout of U+2588 — some monospace fonts (Rec Mono Casual included) report a wider full-block glyph than their ASCII advance, which used to stretch every letter horizontally. Sizes are configured in points and converted pt → DIPs → physical pixels (the previous DIP-direct path rendered "13pt" at ~75% of intended size). If the configured primary isn't installed, mostty falls back through Cascadia Mono → Consolas → Courier New for cell-size measurement before erroring out.
 
-The user can override the defaults via `%LOCALAPPDATA%\mostty\config` (one `key=value` per line, missing file → defaults). Font-related keys:
-
-- `font-family` — accepts a comma-separated list and/or repeated keys; values are accumulated in order. The first entry becomes the DirectWrite primary; the rest are prepended to the hardcoded fallback chain.
-- `font-size` — single positive float, in points.
-
-The same file also accepts `launcher` lines (see Tabs above).
-
-Example:
-
-```
-font-family=Cascadia Mono, JetBrains Mono
-font-family=Microsoft YaHei
-font-size=14
-```
+Font family and size (and colors, themes, and launchers) are overridable via `%LOCALAPPDATA%\mostty\config` — see [Configuration](configurations.md) for all keys and the file format.
 
 The child shell is spawned with an isolated per-process Unicode environment block (`TERM`/`COLORTERM`/`LANG`/`LC_ALL` applied, `NO_COLOR` stripped, sorted case-insensitively as Win32 requires) instead of mutating mostty's own process env, which removes a race across concurrent `CreateProcessW` calls.
 

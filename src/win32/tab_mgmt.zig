@@ -175,6 +175,7 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         .cols = cell_count.col,
         .rows = cell_count.row,
     }) catch |e| std.debug.panic("Terminal.init: {}", .{e});
+    global.config.theme.applyToNewTerminal(tab.term);
 
     tab.vt_stream = .initAlloc(
         global.gpa.allocator(),

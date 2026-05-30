@@ -53,6 +53,16 @@ pub fn build(b: *std.Build) void {
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
 
+    // Ship the bundled themes next to the exe so a config's `theme = <name>`
+    // resolves via the <exeDir>/themes/<name> lookup. exe installs to bin/, so
+    // exeDir is zig-out/bin and the themes must land in zig-out/bin/themes.
+    const install_themes = b.addInstallDirectory(.{
+        .source_dir = b.path("themes"),
+        .install_dir = .bin,
+        .install_subdir = "themes",
+    });
+    b.getInstallStep().dependOn(&install_themes.step);
+
     const run = b.addRunArtifact(exe);
     run.step.dependOn(&install.step);
     if (b.args) |a| run.addArgs(a);

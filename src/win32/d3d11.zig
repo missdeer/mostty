@@ -54,8 +54,10 @@ pub const TabBarCell = struct {
     }
 };
 
-const default_fg: u24 = 0xc8c4d0;
-const default_bg: u24 = 0x2a2a2a;
+// Used only when the terminal's dynamic fg/bg colors are unset (which normally
+// never happens — tab creation seeds term.colors from the active theme).
+const fallback_fg: u24 = 0xc8c4d0;
+const fallback_bg: u24 = 0x2a2a2a;
 
 // D3D11 core
 device: *win32.ID3D11Device,
@@ -607,6 +609,9 @@ pub fn render(
     resizing: bool,
     mouse_in_scrollbar: bool,
     selection_fade: f32,
+    cursor_text: ?u24,
+    selection_bg: ?u24,
+    selection_fg: ?u24,
 ) void {
     const sz = win32.getClientSize(hwnd);
     const client_w: u32 = @intCast(sz.cx);
@@ -721,10 +726,16 @@ pub fn render(
     // Build cell buffer from terminal state
     const cell_count = shader_col * shader_row;
     const blank_glyph = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single });
+
+    // Effective default fg/bg come from the terminal's dynamic colors (seeded
+    // from the theme at tab creation, overridable live by OSC 10/11), falling
+    // back to the module constants only if somehow unset.
+    const eff_fg: u24 = if (term.colors.foreground.get()) |c| rgbToU24(c) else fallback_fg;
+    const eff_bg: u24 = if (term.colors.background.get()) |c| rgbToU24(c) else fallback_bg;
     const bg_rgba: Rgba8 = .{
-        .r = @intCast((default_bg >> 16) & 0xFF),
-        .g = @intCast((default_bg >> 8) & 0xFF),
-        .b = @intCast(default_bg & 0xFF),
+        .r = @intCast((eff_bg >> 16) & 0xFF),
+        .g = @intCast((eff_bg >> 8) & 0xFF),
+        .b = @intCast(eff_bg & 0xFF),
         .a = 0,
     };
 
@@ -827,8 +838,8 @@ pub fn render(
             // left one.
             const cursor_visible = screen.viewportIsBottom() and term.modes.get(.cursor_visible);
             const cursor_on_row = cursor_visible and screen.cursor.y == screen_row;
-            const cursor_bg_rgba = Rgba8.fromU24(default_fg);
-            const cursor_fg_rgba = Rgba8.fromU24(default_bg);
+            const cursor_bg_rgba = Rgba8.fromU24(if (term.colors.cursor.get()) |c| rgbToU24(c) else eff_fg);
+            const cursor_fg_rgba = Rgba8.fromU24(cursor_text orelse eff_bg);
 
             var col: u32 = 0;
             for (page_cells) |cell| {
@@ -844,42 +855,59 @@ pub fn render(
                 };
                 const codepoint: u21 = if (raw_cp == 0) ' ' else raw_cp;
 
-                var cell_fg: u24 = default_fg;
-                var cell_bg: u24 = default_bg;
+                var cell_fg: u24 = eff_fg;
+                var cell_bg: u24 = eff_bg;
+                // Whether this cell shows the default background and should get
+                // the window blur-alpha. Tracked as a flag (not bg-value
+                // equality) so a cell explicitly painted with the theme's bg
+                // color stays opaque, and inverse video stays opaque too.
+                var is_default_bg = true;
 
                 if (cell.style_id != 0) {
                     const style = page.styles.get(page.memory, cell.style_id).*;
-                    cell_fg = resolveColor(style.fg_color, palette, default_fg);
-                    cell_bg = resolveColor(style.bg_color, palette, default_bg);
+                    cell_fg = resolveColor(style.fg_color, palette, eff_fg);
+                    cell_bg = resolveColor(style.bg_color, palette, eff_bg);
                     if (style.flags.inverse) {
                         const tmp = cell_fg;
                         cell_fg = cell_bg;
                         cell_bg = tmp;
+                        is_default_bg = false;
+                    } else {
+                        is_default_bg = switch (style.bg_color) {
+                            .none => true,
+                            else => false,
+                        };
                     }
                 }
 
                 switch (cell.content_tag) {
-                    .bg_color_palette => cell_bg = rgbToU24(palette[cell.content.color_palette]),
+                    .bg_color_palette => {
+                        cell_bg = rgbToU24(palette[cell.content.color_palette]);
+                        is_default_bg = false;
+                    },
                     .bg_color_rgb => {
                         const rgb = cell.content.color_rgb;
                         cell_bg = @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
+                        is_default_bg = false;
                     },
                     else => {},
                 }
 
-                var bg = if (cell_bg == default_bg) bg_rgba else Rgba8.fromU24(cell_bg);
+                var bg = if (is_default_bg) bg_rgba else Rgba8.fromU24(cell_bg);
                 var fg = Rgba8.fromU24(cell_fg);
 
                 // Highlight selected cells (with fade)
                 if (sel_row_range) |r| {
                     if (col >= r.sx and col <= r.ex) {
                         const orig_bg = bg;
-                        var sel_bg = fg;
-                        sel_bg.a = 255;
-                        var sel_fg = orig_bg;
-                        sel_fg.a = 255;
-                        bg = lerpRgba8(orig_bg, sel_bg, selection_fade);
-                        fg = lerpRgba8(fg, sel_fg, selection_fade);
+                        // Theme selection colors when provided, else invert the
+                        // cell (selection bg := cell fg, selection text := cell bg).
+                        var target_bg = if (selection_bg) |s| Rgba8.fromU24(s) else fg;
+                        target_bg.a = 255;
+                        var target_fg = if (selection_fg) |s| Rgba8.fromU24(s) else orig_bg;
+                        target_fg.a = 255;
+                        bg = lerpRgba8(orig_bg, target_bg, selection_fade);
+                        fg = lerpRgba8(fg, target_fg, selection_fade);
                     }
                 }
 

@@ -16,6 +16,7 @@ pub fn renderWindow(window: *Window) void {
     const total_cols = cell_count.col;
     if (total_cols > row_buf.len) return;
     tab_bar.buildTabBarRow(window, total_cols, row_buf[0..total_cols]);
+    const theme = &global.config.theme;
     global.renderer.render(
         window.hwnd,
         window.active().term,
@@ -23,6 +24,9 @@ pub fn renderWindow(window: *Window) void {
         window.resizing,
         window.mouse_in_scrollbar,
         if (window.mouse_capture == .selecting) 1.0 else window.selection_fade,
+        theme.cursor_text,
+        theme.selection_background,
+        theme.selection_foreground,
     );
 }
 

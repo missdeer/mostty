@@ -44,6 +44,28 @@ pub fn onAppConfigChanged(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?w
     return 0;
 }
 
+// Windows broadcasts WM_SETTINGCHANGE for many settings; lParam names which one.
+// "ImmersiveColorSet" signals a light/dark (or accent) change. Re-arm the same
+// debounced reload so a `theme = light:..,dark:..` config re-picks its variant
+// for the new OS mode — reloadConfig re-parses, which re-reads systemPrefersDark().
+pub fn onSettingChange(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
+    if (lparamEqlAscii(lparam, "ImmersiveColorSet")) {
+        _ = win32.SetTimer(hwnd, types.TIMER_CONFIG_RELOAD, types.CONFIG_RELOAD_DEBOUNCE_MS, null);
+    }
+    return null; // let DefWindowProcW also run
+}
+
+// True if the WM_SETTINGCHANGE lParam (a wide, NUL-terminated string under the
+// W message loop) equals the given ASCII name.
+fn lparamEqlAscii(lparam: win32.LPARAM, ascii: []const u8) bool {
+    if (lparam == 0) return false;
+    const ptr: [*:0]const u16 = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    for (ascii, 0..) |c, i| {
+        if (ptr[i] != c) return false;
+    }
+    return ptr[ascii.len] == 0;
+}
+
 // Re-reads the config and applies it. Launchers are read live from
 // global.config so they take effect by the swap alone; font changes require
 // rebuilding renderer state, reflowing every tab's grid to the new cell size,
@@ -66,6 +88,8 @@ fn reloadConfig(hwnd: win32.HWND) void {
     config_reload_retries = 0;
 
     const font_changed = !fontConfigEql(&global.config, &new_cfg);
+    // Must be computed before the move below, otherwise global.config == new_cfg.
+    const theme_changed = !std.meta.eql(global.config.theme, new_cfg.theme);
     if (font_changed) {
         // Leak the previous UTF-16 family list: the renderer still holds
         // pointers into it until updateFont republishes. New list lives for
@@ -93,6 +117,15 @@ fn reloadConfig(hwnd: win32.HWND) void {
                     std.debug.panic("Terminal.resize: {}", .{e});
                 var resize_err: Error = undefined;
                 tab.child_process.resize(&resize_err, cell_count) catch std.debug.panic("{f}", .{resize_err});
+            }
+            window.requestRender();
+        }
+    }
+
+    if (theme_changed) {
+        if (global.window) |*window| {
+            for (window.tabs.items) |tab| {
+                global.config.theme.rebaseTerminal(tab.term);
             }
             window.requestRender();
         }
