@@ -113,6 +113,22 @@ pub fn reserve(self: *GlyphIndexCache, allocator: std.mem.Allocator, key: Key) e
     return .{ .newly_reserved = .{ .index = save_front, .replaced = replaced } };
 }
 
+/// Force `index` to the LRU back, unconditionally — bypasses the per-frame
+/// dampening in `reserve`. Use when the caller is about to perform another
+/// `reserve` whose miss path could otherwise evict the just-hit slot.
+///
+/// Motivating case: `D3d11Renderer.generateWidePair` reserves wide_left then
+/// wide_right. If wide_left was already touched this frame, `reserve` skips
+/// moveToBack to amortize the linked-list rewrite (see the dampening comment
+/// in `reserve`). A subsequent wide_right miss would then evict the current
+/// `self.front`, which may now be wide_left's slot if intervening misses
+/// pushed it back toward the front. Calling `touch(left_index)` between the
+/// two reserves restores the LRU invariant that left is at back.
+pub fn touch(self: *GlyphIndexCache, index: u32) void {
+    self.nodes[index].touched_frame = self.frame;
+    self.moveToBack(index);
+}
+
 fn moveToBack(self: *GlyphIndexCache, index: u32) void {
     if (index == self.back) return;
 
@@ -131,4 +147,57 @@ fn moveToBack(self: *GlyphIndexCache, index: u32) void {
     node.prev = self.back;
     node.next = null;
     self.back = index;
+}
+
+// Pins the load-bearing invariant for D3d11Renderer.generateWidePair:
+// `touch(idx)` must promote `idx` to the LRU back even when the per-frame
+// dampening in `reserve` would have left it at the front.
+test "touch promotes a dampened slot past the next miss-eviction" {
+    const allocator = std.testing.allocator;
+    var cache = try GlyphIndexCache.init(allocator, 3);
+    defer cache.deinit(allocator);
+
+    cache.beginFrame();
+
+    const k_a: Key = .{ .codepoint = 'a', .half = .single, .style = .regular };
+    const k_b: Key = .{ .codepoint = 'b', .half = .single, .style = .regular };
+    const k_c: Key = .{ .codepoint = 'c', .half = .single, .style = .regular };
+    const k_d: Key = .{ .codepoint = 'd', .half = .single, .style = .regular };
+
+    const ra = try cache.reserve(allocator, k_a);
+    const idx_a = switch (ra) {
+        .newly_reserved => |r| r.index,
+        .already_reserved => unreachable,
+    };
+    _ = try cache.reserve(allocator, k_b);
+    _ = try cache.reserve(allocator, k_c);
+    // LRU order: a (front, victim), b, c (back).
+
+    // Hit a again in the same frame. Dampening skips moveToBack, so a stays
+    // at the front — the very situation generateWidePair triggers when a
+    // wide_left was already touched earlier in the frame.
+    const ra_dampened = try cache.reserve(allocator, k_a);
+    try std.testing.expectEqual(idx_a, switch (ra_dampened) {
+        .already_reserved => |idx| idx,
+        .newly_reserved => unreachable,
+    });
+
+    // Force-promote. Without this call, the next miss would evict a.
+    cache.touch(idx_a);
+
+    // Miss → evicts the current front. If touch worked, front is b, not a.
+    _ = try cache.reserve(allocator, k_d);
+
+    // a must survive (hit, same index).
+    const ra_after = try cache.reserve(allocator, k_a);
+    try std.testing.expectEqual(idx_a, switch (ra_after) {
+        .already_reserved => |idx| idx,
+        .newly_reserved => unreachable,
+    });
+    // b must have been the eviction victim.
+    const rb_after = try cache.reserve(allocator, k_b);
+    try std.testing.expect(switch (rb_after) {
+        .newly_reserved => true,
+        .already_reserved => false,
+    });
 }

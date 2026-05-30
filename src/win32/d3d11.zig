@@ -1,12 +1,33 @@
 const D3d11Renderer = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vt = @import("vt");
 const win32 = @import("win32").everything;
 const GlyphIndexCache = @import("GlyphIndexCache.zig");
 const sprite = @import("sprite.zig");
 
 const log = std.log.scoped(.d3d);
+
+// Debug-only counters for the row-upload diff. Used to evaluate whether
+// merging contiguous dirty rows into a single UpdateSubresource would pay
+// off — see uploadCellRow.
+//
+// rows_uploaded counts UpdateSubresource CALLS (i.e. the diff-vs-shadow
+// returned not-equal OR force_full was set). It is NOT the count of
+// "rows whose content actually changed": resize/recreate/scroll force_full
+// passes can re-upload byte-identical rows. Read it as "how many small
+// UpdateSubresource the driver had to absorb", which is the cost we'd
+// eliminate with a contiguous-range upload.
+//
+// The fields are added unconditionally (two u64 in the renderer struct is
+// negligible); `uploadCellRow` only bumps them under
+// `comptime debug_stats_enabled`, so release builds emit nothing.
+const debug_stats_enabled = builtin.mode == .Debug;
+const DebugStats = struct {
+    rows_uploaded: u64 = 0,
+    rows_skipped: u64 = 0,
+};
 
 // Shared types with the shader
 const shader = struct {
@@ -102,6 +123,8 @@ glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
 glyph_cache: ?GlyphIndexCache = null,
 glyph_cache_cell_size: ?CellXY = null,
 staging_texture: StagingTexture = .{},
+
+stats: DebugStats = .{},
 
 cell_size: win32.SIZE,
 cell_size_xy: CellXY,
@@ -1005,6 +1028,11 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
 }
 
 pub fn deinit(self: *D3d11Renderer) void {
+    if (comptime debug_stats_enabled) {
+        const total = self.stats.rows_uploaded + self.stats.rows_skipped;
+        const skip_pct: f64 = if (total == 0) 0.0 else @as(f64, @floatFromInt(self.stats.rows_skipped)) / @as(f64, @floatFromInt(total)) * 100.0;
+        log.info("uploadCellRow stats: uploaded={d} skipped={d} ({d:.1}% skipped)", .{ self.stats.rows_uploaded, self.stats.rows_skipped, skip_pct });
+    }
     self.staging_texture.release();
     if (self.glyph_cache) |*c| {
         c.deinit(self.glyph_cache_arena.allocator());
@@ -1359,15 +1387,18 @@ pub fn render(
                 const style_kind = self.effective_style[@intFromEnum(styleFromFlags(bold, italic))];
 
                 if (cell.wide == .wide) {
+                    // One DirectWrite render for both halves; see
+                    // generateWidePair.
+                    const pair = self.generateWidePair(glyph_cache, tex_cell_count, codepoint, style_kind);
                     scratch[col] = .{
-                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left, .style = style_kind }),
+                        .glyph_index = pair.left,
                         .background = bg,
                         .foreground = fg,
                     };
                     col += 1;
                     if (col < shader_col) {
                         scratch[col] = .{
-                            .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right, .style = style_kind }),
+                            .glyph_index = pair.right,
                             .background = bg,
                             .foreground = fg,
                         };
@@ -1376,8 +1407,18 @@ pub fn render(
                     continue;
                 }
 
+                // Space is ink-free, so its atlas slot is identical regardless
+                // of bold/italic — reuse the per-frame blank_glyph instead of
+                // hashing the cache for every interior space (prompt padding,
+                // alignment gaps, bg_color_* cells which already normalize to
+                // ' ' above). Trailing-blank and empty-row fills are handled
+                // by the @memset paths below.
+                const glyph_index = if (codepoint == ' ')
+                    blank_glyph
+                else
+                    self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single, .style = style_kind });
                 scratch[col] = .{
-                    .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single, .style = style_kind }),
+                    .glyph_index = glyph_index,
                     .background = bg,
                     .foreground = fg,
                 };
@@ -1573,248 +1614,332 @@ fn generateGlyph(
                 return reserved.index;
             }
 
-            // Render glyph to staging texture (2 cells wide to accommodate wide chars).
-            const staging_size: CellXY = .{ .x = cs.x * 2, .y = cs.y };
-            const staging = self.staging_texture.getOrCreate(self.device, self.d2d_factory, staging_size);
-
-            const codepoint = key.codepoint;
-            var utf8_buf: [4]u8 = undefined;
-            const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch 1;
-
-            var utf16_buf: [2]u16 = undefined;
-            const utf16_len = std.unicode.utf8ToUtf16Le(&utf16_buf, utf8_buf[0..utf8_len]) catch 0;
-
-            const target_width: f32 = @floatFromInt(
-                if (key.half != .single) cs.x * @as(u16, 2) else cs.x,
-            );
-            const cs_y_f: f32 = @floatFromInt(cs.y);
-
-            // Ambiguous EAW symbols (● ✶ ★ etc. outside the sprite range)
-            // render in a single cell with ink-bounds best-fit + center
-            // alignment + center-anchored uniform scale. This produces round
-            // (not squashed) symbols of consistent size within a row,
-            // matching WezTerm's per-cell layout where every ● looks the
-            // same regardless of what surrounds it. Each symbol stays inside
-            // its own cell so adjacent letters / underscores / other symbols
-            // remain fully visible.
-            const is_ambiguous_symbol = sprite.isAmbiguousOverflow(key.codepoint);
-
-            // IDWriteTextLayout lets us measure the rendered ink before drawing.
-            // Style index picks bold / italic / bold-italic text formats; in
-            // Step 2.1 these still share the regular family and differ only by
-            // synthetic weight/oblique applied by DirectWrite.
-            const text_format = self.text_formats[@intFromEnum(key.style)];
-            var layout: *win32.IDWriteTextLayout = undefined;
-            {
-                const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
-                    @ptrCast(utf16_buf[0..utf16_len].ptr),
-                    @intCast(utf16_len),
-                    text_format,
-                    target_width,
-                    cs_y_f,
-                    &layout,
-                );
-                if (hr < 0) fatalHr("CreateTextLayout", hr);
-            }
-            defer _ = layout.IUnknown.Release();
-
-            // For ambiguous symbols, center the glyph in its single cell so
-            // the center-anchored scale transform expands uniformly around
-            // the cell centre. Alignment must be set BEFORE measuring so the
-            // overhang values reflect the centered layout.
-            if (is_ambiguous_symbol) {
-                const ahr = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
-                if (ahr < 0) fatalHr("SetTextAlignment", ahr);
-                const pahr = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                if (pahr < 0) fatalHr("SetParagraphAlignment", pahr);
-            }
-
-            var m: win32.DWRITE_TEXT_METRICS = undefined;
-            {
-                const hr = layout.GetMetrics(&m);
-                if (hr < 0) fatalHr("GetMetrics", hr);
-            }
-            var oh: win32.DWRITE_OVERHANG_METRICS = undefined;
-            {
-                const hr = layout.GetOverhangMetrics(&oh);
-                if (hr < 0) fatalHr("GetOverhangMetrics", hr);
-            }
-
-            // Two scale policies share the rendering setup below:
-            //
-            //   * Non-ambiguous (CJK real wide, Latin, fallback narrow glyphs
-            //     in a single cell): only scale DOWN when natural advance
-            //     exceeds the target cell width. fit_width captures advance +
-            //     right ink overhang so CLIP doesn't chop overhanging strokes.
-            //
-            //   * Ambiguous symbols (●✶★ etc.): ink-box best-fit within the
-            //     single cell, allow scale > 1 to enlarge narrow naturals so
-            //     the glyph fills the cell instead of sitting tiny and
-            //     left-aligned. Cap at SCALE_CAP = 2.0 so a 1-pixel glyph
-            //     can't blow up into a giant blur.
-            const SCALE_CAP: f32 = 2.0;
-            const content_right = m.left + @max(m.width, m.widthIncludingTrailingWhitespace);
-            const overhang_right = m.layoutWidth + @max(0.0, oh.right);
-            const fit_width = @max(content_right, overhang_right);
-
-            // Ink bounds via raw (signed) overhangs against the layout box;
-            // negative overhang = ink inset from box edge. Same formula works
-            // for LEFT and CENTER alignment because overhangs adjust to the
-            // text's position within the box.
-            const ink_w = m.layoutWidth + oh.left + oh.right;
-            const ink_h = m.layoutHeight + oh.top + oh.bottom;
-            const ink_ok = ink_w > 0 and ink_h > 0 and std.math.isFinite(ink_w) and std.math.isFinite(ink_h);
-
-            const raw_scale: f32 = if (is_ambiguous_symbol) blk: {
-                if (!ink_ok) break :blk 1.0;
-                const sw = target_width / ink_w;
-                const sh = cs_y_f / ink_h;
-                break :blk @min(@min(sw, sh), SCALE_CAP);
-            } else if (fit_width > target_width and fit_width > 0)
-                target_width / fit_width
-            else
-                1.0;
-            // Snap near-unity to 1.0 to skip a no-op transform.
-            const need_scale = @abs(raw_scale - 1.0) > 0.001;
-            const scale: f32 = if (need_scale) raw_scale else 1.0;
-
-            if (need_scale and !is_ambiguous_symbol) {
-                // Non-ambiguous scale-down path: expand the layout box so the
-                // CLIP boundary == fit_width pre-scale, becoming target_width
-                // post-scale. Ambiguous-symbol path leaves the layout box at
-                // the original target_width because center alignment + center
-                // anchor handle positioning without box expansion.
-                const hr = layout.SetMaxWidth(fit_width);
-                if (hr < 0) fatalHr("SetMaxWidth", hr);
-            }
-
-            // Invariant: every render starts from identity transform & CLEARTYPE.
-            // The staging RT is reused across cache misses, so leaking state
-            // between calls would corrupt subsequent glyphs.
-            const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
-                .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0,
-            } } };
-            staging.render_target.SetTransform(&identity);
-            staging.render_target.SetTextRenderingParams(self.rendering_params);
-            staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
-            staging.render_target.BeginDraw();
-            {
-                // Opaque black background; rendering white-on-black through
-                // ClearType yields per-subpixel coverage as the stored RGB
-                // (white·cov + black·(1-cov) = cov). The shader decodes via
-                // `c*c` (gamma 2.0) to undo D2D's gamma encode. Grayscale
-                // fills R=G=B equally, so the same decode still produces
-                // uniform coverage.
-                const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
-                staging.render_target.Clear(&color);
-            }
-
-            if (need_scale) {
-                // ClearType subpixel hinting assumes 1:1 horizontal mapping;
-                // any fractional scale would produce colored fringes. Grayscale
-                // antialiasing has no subpixel directionality.
-                staging.render_target.SetTextAntialiasMode(.GRAYSCALE);
-
-                // Three anchor strategies, chosen by glyph context:
-                //   ambiguous symbol  → center anchor (cell centre stays fixed
-                //     so round shapes like ● stay visually centered)
-                //   single, non-ambiguous → horizontal-only (m22 = 1, dy = 0)
-                //     preserves vertical fill so non-sprite tile-design glyphs
-                //     (rare math / line-drawing chars outside the sprite face)
-                //     still touch the top and bottom of the cell.
-                //   wide, non-ambiguous → uniform + baseline anchor (CJK /
-                //     emoji) so the scaled glyph shares a baseline with
-                //     un-scaled Latin in adjacent cells.
-                const scale_mat: win32.D2D_MATRIX_3X2_F = if (is_ambiguous_symbol) blk: {
-                    const cx = target_width / 2.0;
-                    const cy = cs_y_f / 2.0;
-                    break :blk .{ .Anonymous = .{ .Anonymous1 = .{
-                        .m11 = scale,
-                        .m12 = 0,
-                        .m21 = 0,
-                        .m22 = scale,
-                        .dx = cx * (1.0 - scale),
-                        .dy = cy * (1.0 - scale),
-                    } } };
-                } else if (key.half == .single) .{
-                    .Anonymous = .{ .Anonymous1 = .{
-                        .m11 = scale,
-                        .m12 = 0,
-                        .m21 = 0,
-                        .m22 = 1,
-                        .dx = 0,
-                        .dy = 0,
-                    } },
-                } else blk: {
-                    var lm: [1]win32.DWRITE_LINE_METRICS = undefined;
-                    var line_count: u32 = 0;
-                    const lhr = layout.GetLineMetrics(&lm, 1, &line_count);
-                    if (lhr < 0) fatalHr("GetLineMetrics", lhr);
-                    const baseline: f32 = if (line_count >= 1) lm[0].baseline else 0;
-                    break :blk .{ .Anonymous = .{ .Anonymous1 = .{
-                        .m11 = scale,
-                        .m12 = 0,
-                        .m21 = 0,
-                        .m22 = scale,
-                        .dx = 0,
-                        .dy = baseline * (1.0 - scale),
-                    } } };
-                };
-                staging.render_target.SetTransform(&scale_mat);
-            }
-
-            // CLIP boundary semantics:
-            //   non-ambiguous → CLIP at the (expanded) layout box, which the
-            //                   scale-down transform shrinks back to target_w.
-            //   ambiguous     → no CLIP. With scale > 1 + center alignment
-            //                   the scaled ink may briefly extend past the
-            //                   layout box; the staging texture acts as the
-            //                   natural drawing bound.
-            const draw_options: win32.D2D1_DRAW_TEXT_OPTIONS = if (is_ambiguous_symbol)
-                .{} // no options
-            else
-                win32.D2D1_DRAW_TEXT_OPTIONS_CLIP;
-            staging.render_target.DrawTextLayout(
-                .{ .x = 0, .y = 0 },
-                layout,
-                &staging.white_brush.ID2D1Brush,
-                draw_options,
-            );
-
-            // Reset before EndDraw so the next cache-miss starts clean.
-            staging.render_target.SetTransform(&identity);
-            if (need_scale) staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
-
-            var tag1: u64 = undefined;
-            var tag2: u64 = undefined;
-            const ehr = staging.render_target.EndDraw(&tag1, &tag2);
-            if (ehr < 0) fatalHr("EndDraw", ehr);
-
-            // Copy the appropriate portion from staging to atlas
+            const staging = self.renderGlyphToStaging(key.codepoint, key.style, key.half != .single);
             const src_left: u32 = if (key.half == .wide_right) cs.x else 0;
-            const box: win32.D3D11_BOX = .{
-                .left = src_left,
-                .top = 0,
-                .front = 0,
-                .right = src_left + cs.x,
-                .bottom = cs.y,
-                .back = 1,
-            };
-            self.context.CopySubresourceRegion(
-                &self.glyph_texture.obj.?.ID3D11Resource,
-                0,
-                coord.x,
-                coord.y,
-                0,
-                &staging.texture.ID3D11Resource,
-                0,
-                &box,
-            );
-
+            self.copyStagingHalfToAtlas(staging, src_left, coord);
             return reserved.index;
         },
         .already_reserved => |index| return index,
     }
+}
+
+// Reserve and populate both halves of a wide glyph using a single DirectWrite
+// render. Calling generateGlyph separately for wide_left / wide_right would
+// run CreateTextLayout + DrawTextLayout twice with identical staging output —
+// only the half copied out differs. One render + up-to-two copies cuts the
+// first-paint cost for CJK / emoji when either half is uncached.
+//
+// Sprite codepoints fall back to per-half generateGlyph: the sprite path has
+// its own scratch-buffer layout, and folding both halves there is left to a
+// separate change to keep this one minimal.
+fn generateWidePair(
+    self: *D3d11Renderer,
+    cache: *GlyphIndexCache,
+    tex_cell_count: CellXY,
+    codepoint: u21,
+    style: GlyphIndexCache.Style,
+) struct { left: u32, right: u32 } {
+    if (sprite.hasCodepoint(codepoint)) {
+        return .{
+            .left = self.generateGlyph(cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left, .style = style }),
+            .right = self.generateGlyph(cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right, .style = style }),
+        };
+    }
+
+    const cs = self.cell_size_xy;
+    const arena = self.glyph_cache_arena.allocator();
+    // Reserve left first. The unconditional `cache.touch(left_index)` below
+    // is load-bearing: `reserve`'s per-frame dampening can skip moveToBack
+    // for a hit whose slot was already promoted earlier this frame, so left
+    // may sit near the LRU front. Without the touch, the upcoming right
+    // reserve's miss path would evict `self.front` and could clobber left's
+    // own slot, leaving left_index pointing at right's pixels.
+    const left_res = cache.reserve(arena, .{ .codepoint = codepoint, .half = .wide_left, .style = style }) catch oom(error.OutOfMemory);
+    const left_index = switch (left_res) {
+        .newly_reserved => |r| r.index,
+        .already_reserved => |idx| idx,
+    };
+    const left_miss = switch (left_res) {
+        .newly_reserved => true,
+        .already_reserved => false,
+    };
+    cache.touch(left_index);
+
+    const right_res = cache.reserve(arena, .{ .codepoint = codepoint, .half = .wide_right, .style = style }) catch oom(error.OutOfMemory);
+    const right_index = switch (right_res) {
+        .newly_reserved => |r| r.index,
+        .already_reserved => |idx| idx,
+    };
+    const right_miss = switch (right_res) {
+        .newly_reserved => true,
+        .already_reserved => false,
+    };
+
+    if (left_miss or right_miss) {
+        const staging = self.renderGlyphToStaging(codepoint, style, true);
+        if (left_miss) {
+            const pos = cellPosFromIndex(left_index, tex_cell_count.x);
+            self.copyStagingHalfToAtlas(staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+        }
+        if (right_miss) {
+            const pos = cellPosFromIndex(right_index, tex_cell_count.x);
+            self.copyStagingHalfToAtlas(staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+        }
+    }
+
+    return .{ .left = left_index, .right = right_index };
+}
+
+// Render `codepoint` into the staging texture. The staging is always 2 cells
+// wide; single glyphs occupy [0, cs.x), wide glyphs occupy the full width.
+// Returns the staging so the caller can copy the half(ves) it needs.
+fn renderGlyphToStaging(
+    self: *D3d11Renderer,
+    codepoint: u21,
+    style: GlyphIndexCache.Style,
+    is_wide: bool,
+) *StagingTexture.Cached {
+    const cs = self.cell_size_xy;
+    const staging_size: CellXY = .{ .x = cs.x * 2, .y = cs.y };
+    const staging = self.staging_texture.getOrCreate(self.device, self.d2d_factory, staging_size);
+
+    var utf8_buf: [4]u8 = undefined;
+    const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch 1;
+
+    var utf16_buf: [2]u16 = undefined;
+    const utf16_len = std.unicode.utf8ToUtf16Le(&utf16_buf, utf8_buf[0..utf8_len]) catch 0;
+
+    const target_width: f32 = @floatFromInt(
+        if (is_wide) cs.x * @as(u16, 2) else cs.x,
+    );
+    const cs_y_f: f32 = @floatFromInt(cs.y);
+
+    // Ambiguous EAW symbols (● ✶ ★ etc. outside the sprite range) render in
+    // a single cell with ink-bounds best-fit + center alignment + center-
+    // anchored uniform scale. This produces round (not squashed) symbols of
+    // consistent size within a row, matching WezTerm's per-cell layout where
+    // every ● looks the same regardless of what surrounds it.
+    const is_ambiguous_symbol = sprite.isAmbiguousOverflow(codepoint);
+
+    // IDWriteTextLayout lets us measure the rendered ink before drawing.
+    // Style index picks bold / italic / bold-italic text formats; these
+    // share the regular family today and differ only by synthetic
+    // weight/oblique applied by DirectWrite.
+    const text_format = self.text_formats[@intFromEnum(style)];
+    var layout: *win32.IDWriteTextLayout = undefined;
+    {
+        const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
+            @ptrCast(utf16_buf[0..utf16_len].ptr),
+            @intCast(utf16_len),
+            text_format,
+            target_width,
+            cs_y_f,
+            &layout,
+        );
+        if (hr < 0) fatalHr("CreateTextLayout", hr);
+    }
+    defer _ = layout.IUnknown.Release();
+
+    // For ambiguous symbols, center the glyph in its single cell so the
+    // center-anchored scale transform expands uniformly around the cell
+    // centre. Alignment must be set BEFORE measuring so the overhang values
+    // reflect the centered layout.
+    if (is_ambiguous_symbol) {
+        const ahr = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
+        if (ahr < 0) fatalHr("SetTextAlignment", ahr);
+        const pahr = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (pahr < 0) fatalHr("SetParagraphAlignment", pahr);
+    }
+
+    var m: win32.DWRITE_TEXT_METRICS = undefined;
+    {
+        const hr = layout.GetMetrics(&m);
+        if (hr < 0) fatalHr("GetMetrics", hr);
+    }
+    var oh: win32.DWRITE_OVERHANG_METRICS = undefined;
+    {
+        const hr = layout.GetOverhangMetrics(&oh);
+        if (hr < 0) fatalHr("GetOverhangMetrics", hr);
+    }
+
+    // Two scale policies share the rendering setup below:
+    //
+    //   * Non-ambiguous (CJK real wide, Latin, fallback narrow glyphs
+    //     in a single cell): only scale DOWN when natural advance
+    //     exceeds the target cell width. fit_width captures advance +
+    //     right ink overhang so CLIP doesn't chop overhanging strokes.
+    //
+    //   * Ambiguous symbols (●✶★ etc.): ink-box best-fit within the
+    //     single cell, allow scale > 1 to enlarge narrow naturals so
+    //     the glyph fills the cell instead of sitting tiny and
+    //     left-aligned. Cap at SCALE_CAP = 2.0 so a 1-pixel glyph
+    //     can't blow up into a giant blur.
+    const SCALE_CAP: f32 = 2.0;
+    const content_right = m.left + @max(m.width, m.widthIncludingTrailingWhitespace);
+    const overhang_right = m.layoutWidth + @max(0.0, oh.right);
+    const fit_width = @max(content_right, overhang_right);
+
+    // Ink bounds via raw (signed) overhangs against the layout box;
+    // negative overhang = ink inset from box edge. Same formula works
+    // for LEFT and CENTER alignment because overhangs adjust to the
+    // text's position within the box.
+    const ink_w = m.layoutWidth + oh.left + oh.right;
+    const ink_h = m.layoutHeight + oh.top + oh.bottom;
+    const ink_ok = ink_w > 0 and ink_h > 0 and std.math.isFinite(ink_w) and std.math.isFinite(ink_h);
+
+    const raw_scale: f32 = if (is_ambiguous_symbol) blk: {
+        if (!ink_ok) break :blk 1.0;
+        const sw = target_width / ink_w;
+        const sh = cs_y_f / ink_h;
+        break :blk @min(@min(sw, sh), SCALE_CAP);
+    } else if (fit_width > target_width and fit_width > 0)
+        target_width / fit_width
+    else
+        1.0;
+    // Snap near-unity to 1.0 to skip a no-op transform.
+    const need_scale = @abs(raw_scale - 1.0) > 0.001;
+    const scale: f32 = if (need_scale) raw_scale else 1.0;
+
+    if (need_scale and !is_ambiguous_symbol) {
+        // Non-ambiguous scale-down path: expand the layout box so the
+        // CLIP boundary == fit_width pre-scale, becoming target_width
+        // post-scale. Ambiguous-symbol path leaves the layout box at
+        // the original target_width because center alignment + center
+        // anchor handle positioning without box expansion.
+        const hr = layout.SetMaxWidth(fit_width);
+        if (hr < 0) fatalHr("SetMaxWidth", hr);
+    }
+
+    // Invariant: every render starts from identity transform & CLEARTYPE.
+    // The staging RT is reused across cache misses, so leaking state
+    // between calls would corrupt subsequent glyphs.
+    const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
+        .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0,
+    } } };
+    staging.render_target.SetTransform(&identity);
+    staging.render_target.SetTextRenderingParams(self.rendering_params);
+    staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
+    staging.render_target.BeginDraw();
+    {
+        // Opaque black background; rendering white-on-black through
+        // ClearType yields per-subpixel coverage as the stored RGB
+        // (white·cov + black·(1-cov) = cov). The shader decodes via
+        // `c*c` (gamma 2.0) to undo D2D's gamma encode. Grayscale
+        // fills R=G=B equally, so the same decode still produces
+        // uniform coverage.
+        const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
+        staging.render_target.Clear(&color);
+    }
+
+    if (need_scale) {
+        // ClearType subpixel hinting assumes 1:1 horizontal mapping;
+        // any fractional scale would produce colored fringes. Grayscale
+        // antialiasing has no subpixel directionality.
+        staging.render_target.SetTextAntialiasMode(.GRAYSCALE);
+
+        // Three anchor strategies, chosen by glyph context:
+        //   ambiguous symbol  → center anchor (cell centre stays fixed
+        //     so round shapes like ● stay visually centered)
+        //   single, non-ambiguous → horizontal-only (m22 = 1, dy = 0)
+        //     preserves vertical fill so non-sprite tile-design glyphs
+        //     (rare math / line-drawing chars outside the sprite face)
+        //     still touch the top and bottom of the cell.
+        //   wide, non-ambiguous → uniform + baseline anchor (CJK /
+        //     emoji) so the scaled glyph shares a baseline with
+        //     un-scaled Latin in adjacent cells.
+        const scale_mat: win32.D2D_MATRIX_3X2_F = if (is_ambiguous_symbol) blk: {
+            const cx = target_width / 2.0;
+            const cy = cs_y_f / 2.0;
+            break :blk .{ .Anonymous = .{ .Anonymous1 = .{
+                .m11 = scale,
+                .m12 = 0,
+                .m21 = 0,
+                .m22 = scale,
+                .dx = cx * (1.0 - scale),
+                .dy = cy * (1.0 - scale),
+            } } };
+        } else if (!is_wide) .{
+            .Anonymous = .{ .Anonymous1 = .{
+                .m11 = scale,
+                .m12 = 0,
+                .m21 = 0,
+                .m22 = 1,
+                .dx = 0,
+                .dy = 0,
+            } },
+        } else blk: {
+            var lm: [1]win32.DWRITE_LINE_METRICS = undefined;
+            var line_count: u32 = 0;
+            const lhr = layout.GetLineMetrics(&lm, 1, &line_count);
+            if (lhr < 0) fatalHr("GetLineMetrics", lhr);
+            const baseline: f32 = if (line_count >= 1) lm[0].baseline else 0;
+            break :blk .{ .Anonymous = .{ .Anonymous1 = .{
+                .m11 = scale,
+                .m12 = 0,
+                .m21 = 0,
+                .m22 = scale,
+                .dx = 0,
+                .dy = baseline * (1.0 - scale),
+            } } };
+        };
+        staging.render_target.SetTransform(&scale_mat);
+    }
+
+    // CLIP boundary semantics:
+    //   non-ambiguous → CLIP at the (expanded) layout box, which the
+    //                   scale-down transform shrinks back to target_w.
+    //   ambiguous     → no CLIP. With scale > 1 + center alignment
+    //                   the scaled ink may briefly extend past the
+    //                   layout box; the staging texture acts as the
+    //                   natural drawing bound.
+    const draw_options: win32.D2D1_DRAW_TEXT_OPTIONS = if (is_ambiguous_symbol)
+        .{} // no options
+    else
+        win32.D2D1_DRAW_TEXT_OPTIONS_CLIP;
+    staging.render_target.DrawTextLayout(
+        .{ .x = 0, .y = 0 },
+        layout,
+        &staging.white_brush.ID2D1Brush,
+        draw_options,
+    );
+
+    // Reset before EndDraw so the next cache-miss starts clean.
+    staging.render_target.SetTransform(&identity);
+    if (need_scale) staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
+
+    var tag1: u64 = undefined;
+    var tag2: u64 = undefined;
+    const ehr = staging.render_target.EndDraw(&tag1, &tag2);
+    if (ehr < 0) fatalHr("EndDraw", ehr);
+
+    return staging;
+}
+
+fn copyStagingHalfToAtlas(
+    self: *D3d11Renderer,
+    staging: *StagingTexture.Cached,
+    src_left: u32,
+    dst_coord: CellXY,
+) void {
+    const cs = self.cell_size_xy;
+    const box: win32.D3D11_BOX = .{
+        .left = src_left,
+        .top = 0,
+        .front = 0,
+        .right = src_left + cs.x,
+        .bottom = cs.y,
+        .back = 1,
+    };
+    self.context.CopySubresourceRegion(
+        &self.glyph_texture.obj.?.ID3D11Resource,
+        0,
+        dst_coord.x,
+        dst_coord.y,
+        0,
+        &staging.texture.ID3D11Resource,
+        0,
+        &box,
+    );
 }
 
 // Render a sprite (Block Elements / Box Drawing / Braille / Powerline /
@@ -2302,7 +2427,11 @@ fn uploadCellRow(
         u8,
         std.mem.sliceAsBytes(shadow_row),
         std.mem.sliceAsBytes(scratch),
-    )) return;
+    )) {
+        if (comptime debug_stats_enabled) self.stats.rows_skipped += 1;
+        return;
+    }
+    if (comptime debug_stats_enabled) self.stats.rows_uploaded += 1;
     const cell_bytes: u32 = @sizeOf(shader.Cell);
     const box: win32.D3D11_BOX = .{
         .left = row_start_cell * cell_bytes,
