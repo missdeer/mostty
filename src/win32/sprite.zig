@@ -6,8 +6,8 @@
 //! The drawing code lives under `src/vendor/ghostty-sprite/` and is invoked
 //! via the comptime range table built below. We rasterize into an alpha-8
 //! z2d surface, then gamma-encode the alpha and replicate it across BGRA so
-//! the existing shader's ClearType-coverage decode (`c*c`, gamma 2.0) treats
-//! sprites as uniform grayscale coverage.
+//! the shader's ClearType-coverage decode (`pow(c, 2.2)`) treats sprites as
+//! uniform grayscale coverage.
 
 const std = @import("std");
 const sprite_font = @import("../vendor/ghostty-sprite/font/main.zig");
@@ -168,7 +168,7 @@ fn getDrawFn(cp: u21) ?*const DrawFn {
 
 /// Render the sprite for `cp` into `out_bgra` (length must be at least
 /// `cell_w * cell_h * 4`, BGRA8 row-major). Returns false if `cp` is not in
-/// the sprite range. The alpha is gamma-2.0 encoded and replicated into B,
+/// the sprite range. The alpha is gamma-2.2 encoded and replicated into B,
 /// G, R; A is set to 255/opaque to match the DirectWrite-path atlas
 /// contract (the d3d11 shader does not sample the atlas alpha channel).
 ///
@@ -210,10 +210,10 @@ pub fn render(
         const dst_row = y * cell_w * 4;
         var x: u32 = 0;
         while (x < cell_w) : (x += 1) {
-            // Gamma-encode linear coverage so the shader's `c*c` (gamma
-            // 2.0) decode recovers the original linear value. Must stay
-            // in lock-step with terminal.hlsl's `to_linear` exponent and
-            // DirectWrite's CreateCustom RenderingParams gamma.
+            // Gamma-encode linear coverage so the shader's pow(c, 2.2)
+            // decode recovers the original linear value. Must stay in
+            // lock-step with terminal.hlsl's to_linear exponent and
+            // DirectWrite's CreateCustomRenderingParams gamma.
             const encoded = gamma_lut[buf[src_row + x]];
             const dst = dst_row + x * 4;
             out_bgra[dst + 0] = encoded; // B
@@ -226,15 +226,14 @@ pub fn render(
     return true;
 }
 
-// sqrt(c/255)*255, comptime-baked. Inverse of the shader's `c*c` (gamma 2.0)
-// decode. Replaces a per-pixel sqrt that ran ~30-50 cycles; LUT lookup is
-// ~5 cycles. Endpoints 0/255 are exact by construction.
+// pow(c/255, 1/2.2)*255, comptime-baked. Inverse of terminal.hlsl's
+// to_linear (gamma 2.2) decode. Endpoints 0/255 are exact by construction.
 const gamma_lut: [256]u8 = blk: {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(2_000_000);
     var lut: [256]u8 = undefined;
     for (&lut, 0..) |*slot, i| {
         const lf: f32 = @as(f32, @floatFromInt(i)) / 255.0;
-        const ef = @sqrt(lf);
+        const ef = std.math.pow(f32, lf, 1.0 / 2.2);
         slot.* = @intFromFloat(@round(ef * 255.0));
     }
     break :blk lut;

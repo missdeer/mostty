@@ -27,6 +27,7 @@ pub fn renderWindow(window: *Window) void {
         theme.cursor_text,
         theme.selection_background,
         theme.selection_foreground,
+        global.config.background_opacity,
     );
 }
 

@@ -1,0 +1,353 @@
+//! Raw D3D11 / DXGI / Direct2D resource types and pure GPU-geometry helpers.
+//!
+//! Pure data plus self-contained method-style structs that only know their
+//! own D3D resources (no renderer back-reference). Shared shader contract
+//! (`shader.Cell`, `cell_attr_*`, `Rgba8`) lives here so every module that
+//! builds cells agrees on the same byte layout.
+
+const std = @import("std");
+const win32 = @import("win32").everything;
+const com = @import("com.zig");
+
+const log = std.log.scoped(.d3d);
+
+pub const CellXY = struct {
+    x: u16,
+    y: u16,
+    pub fn eql(a: CellXY, b: CellXY) bool {
+        return a.x == b.x and a.y == b.y;
+    }
+};
+
+pub const Rgba8 = packed struct(u32) {
+    a: u8,
+    b: u8,
+    g: u8,
+    r: u8,
+    pub fn fromU24(c: u24) Rgba8 {
+        return .{
+            .r = @intCast((c >> 16) & 0xFF),
+            .g = @intCast((c >> 8) & 0xFF),
+            .b = @intCast(c & 0xFF),
+            .a = 255,
+        };
+    }
+};
+
+/// One cell's worth of tab-bar content, laid out by the caller and
+/// rendered into the reserved top row by `render`.
+pub const TabBarCell = struct {
+    codepoint: u21,
+    bg: Rgba8,
+    fg: Rgba8,
+    pub fn rgba(c: u24) Rgba8 {
+        return Rgba8.fromU24(c);
+    }
+};
+
+// Used only when the terminal's dynamic fg/bg colors are unset (which normally
+// never happens — tab creation seeds term.colors from the active theme).
+pub const fallback_fg: u24 = 0xc8c4d0;
+pub const fallback_bg: u24 = 0x2a2a2a;
+
+pub const cell_attr_underline_mask: u32 = 0x7;
+pub const cell_attr_strikethrough: u32 = 1 << 3;
+pub const cell_attr_overline: u32 = 1 << 4;
+pub const cell_attr_color_glyph: u32 = 1 << 5;
+pub const cell_attr_invisible: u32 = 1 << 6;
+
+// Shared types with the shader
+pub const shader = struct {
+    pub const GridConfig = extern struct {
+        cell_size: [2]u32,
+        col_count: u32,
+        row_count: u32,
+        scrollbar_y: f32,
+        scrollbar_height: f32,
+        scrollbar_x: f32,
+        scrollbar_width: f32,
+        cells_per_row: u32,
+        _pad: [3]u32 = .{ 0, 0, 0 },
+    };
+    pub const Cell = extern struct {
+        glyph_index: u32,
+        background: Rgba8,
+        foreground: Rgba8,
+        attrs: u32,
+    };
+};
+
+pub const scrollbar_logical_width: u16 = 14;
+
+pub fn scrollbarWidth(dpi: u32) u16 {
+    return @intFromFloat(@round(@as(f32, @floatFromInt(scrollbar_logical_width)) * @as(f32, @floatFromInt(dpi)) / 96.0));
+}
+
+pub fn compileShaderBlob(
+    source: []const u8,
+    entry: [*:0]const u8,
+    target: [*:0]const u8,
+) *win32.ID3DBlob {
+    var blob: *win32.ID3DBlob = undefined;
+    var error_blob: ?*win32.ID3DBlob = null;
+    const hr = win32.D3DCompile(
+        source.ptr,
+        source.len,
+        "terminal.hlsl",
+        null,
+        null,
+        entry,
+        target,
+        0,
+        0,
+        @ptrCast(&blob),
+        @ptrCast(&error_blob),
+    );
+    if (error_blob) |err| {
+        defer _ = err.IUnknown.Release();
+        if (err.GetBufferPointer()) |buf_ptr| {
+            const ptr: [*]const u8 = @ptrCast(buf_ptr);
+            const str = ptr[0..err.GetBufferSize()];
+            log.err("shader error:\n{s}", .{str});
+        }
+    }
+    if (hr < 0) com.fatalHr("D3DCompile", hr);
+    return blob;
+}
+
+pub fn getTextureMaxCellCount(cell_size: CellXY) CellXY {
+    // Cap the atlas to 4096² (≈64 MiB at BGRA8). At typical cell sizes this
+    // holds ~75k glyphs, far above any realistic terminal session. Each
+    // dimension is clamped to ≥2 because GlyphIndexCache requires at least
+    // two nodes (head + tail) for its circular-list bookkeeping.
+    const max_dim: u32 = 4096;
+    const cx: u32 = @max(2, @divTrunc(max_dim, @as(u32, cell_size.x)));
+    const cy: u32 = @max(2, @divTrunc(max_dim, @as(u32, cell_size.y)));
+    return .{ .x = @intCast(cx), .y = @intCast(cy) };
+}
+
+pub fn cellPosFromIndex(index: u32, column_count: u16) CellXY {
+    return .{
+        .x = @intCast(index % column_count),
+        .y = @intCast(@divTrunc(index, column_count)),
+    };
+}
+
+pub const AtlasFrame = struct {
+    cache: *@import("../GlyphIndexCache.zig"),
+    tex_cell_count: CellXY,
+};
+
+pub const ShaderCells = struct {
+    count: u32 = 0,
+    cell_buf: *win32.ID3D11Buffer = undefined,
+    cell_view: *win32.ID3D11ShaderResourceView = undefined,
+
+    /// Returns true when the underlying buffer was (re)created, signaling
+    /// the caller that the CPU shadow must be reseeded by a forced full
+    /// upload this frame.
+    pub fn updateCount(self: *ShaderCells, device: *win32.ID3D11Device, count: u32) bool {
+        if (count == self.count) return false;
+        self.release();
+        if (count > 0) {
+            const buf_desc: win32.D3D11_BUFFER_DESC = .{
+                .ByteWidth = count * @sizeOf(shader.Cell),
+                // DEFAULT + UpdateSubresource: row-level partial writes,
+                // unchanged rows skipped via shadow diff. Previously DYNAMIC
+                // + Map(WRITE_DISCARD) forced full-buffer rewrite per frame.
+                .Usage = .DEFAULT,
+                .BindFlags = .{ .SHADER_RESOURCE = 1 },
+                .CPUAccessFlags = .{},
+                .MiscFlags = .{ .BUFFER_STRUCTURED = 1 },
+                .StructureByteStride = @sizeOf(shader.Cell),
+            };
+            const hr = device.CreateBuffer(&buf_desc, null, &self.cell_buf);
+            if (hr < 0) com.fatalHr("CreateCellBuffer", hr);
+
+            const view_desc: win32.D3D11_SHADER_RESOURCE_VIEW_DESC = .{
+                .Format = .UNKNOWN,
+                .ViewDimension = ._SRV_DIMENSION_BUFFER,
+                .Anonymous = .{
+                    .Buffer = .{
+                        .Anonymous1 = .{ .FirstElement = 0 },
+                        .Anonymous2 = .{ .NumElements = count },
+                    },
+                },
+            };
+            const hr2 = device.CreateShaderResourceView(
+                &self.cell_buf.ID3D11Resource,
+                &view_desc,
+                &self.cell_view,
+            );
+            if (hr2 < 0) com.fatalHr("CreateCellView", hr2);
+        }
+        self.count = count;
+        return true;
+    }
+
+    pub fn release(self: *ShaderCells) void {
+        if (self.count != 0) {
+            _ = self.cell_view.IUnknown.Release();
+            _ = self.cell_buf.IUnknown.Release();
+            self.count = 0;
+        }
+    }
+};
+
+pub const GlyphTexture = struct {
+    size: ?CellXY = null,
+    obj: ?*win32.ID3D11Texture2D = null,
+    view: ?*win32.ID3D11ShaderResourceView = null,
+
+    pub fn updateSize(self: *GlyphTexture, device: *win32.ID3D11Device, size: CellXY) bool {
+        if (self.size) |s| {
+            if (s.eql(size)) return true;
+            self.release();
+        }
+
+        const desc: win32.D3D11_TEXTURE2D_DESC = .{
+            .Width = size.x,
+            .Height = size.y,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = .B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = .DEFAULT,
+            .BindFlags = .{ .SHADER_RESOURCE = 1 },
+            .CPUAccessFlags = .{},
+            .MiscFlags = .{},
+        };
+        var obj: *win32.ID3D11Texture2D = undefined;
+        const hr = device.CreateTexture2D(&desc, null, &obj);
+        if (hr < 0) com.fatalHr("CreateGlyphTexture", hr);
+        self.obj = obj;
+
+        var view: *win32.ID3D11ShaderResourceView = undefined;
+        const hr2 = device.CreateShaderResourceView(&obj.ID3D11Resource, null, &view);
+        if (hr2 < 0) com.fatalHr("CreateGlyphView", hr2);
+        self.view = view;
+
+        self.size = size;
+        return false;
+    }
+
+    pub fn release(self: *GlyphTexture) void {
+        if (self.view) |v| _ = v.IUnknown.Release();
+        if (self.obj) |o| _ = o.IUnknown.Release();
+        self.view = null;
+        self.obj = null;
+        self.size = null;
+    }
+};
+
+pub const StagingTexture = struct {
+    pub const Kind = enum { mask, color };
+
+    pub const Cached = struct {
+        size: CellXY,
+        texture: *win32.ID3D11Texture2D,
+        render_target: *win32.ID2D1RenderTarget,
+        white_brush: *win32.ID2D1SolidColorBrush,
+    };
+    mask_cached: ?Cached = null,
+    color_cached: ?Cached = null,
+
+    pub fn getOrCreate(
+        self: *StagingTexture,
+        device: *win32.ID3D11Device,
+        d2d_factory: *win32.ID2D1Factory,
+        size: CellXY,
+        kind: Kind,
+    ) *Cached {
+        const cached = switch (kind) {
+            .mask => &self.mask_cached,
+            .color => &self.color_cached,
+        };
+        if (cached.*) |*c| {
+            if (c.size.eql(size)) return c;
+            releaseCached(cached);
+        }
+
+        var texture: *win32.ID3D11Texture2D = undefined;
+        {
+            const desc: win32.D3D11_TEXTURE2D_DESC = .{
+                .Width = size.x,
+                .Height = size.y,
+                .MipLevels = 1,
+                .ArraySize = 1,
+                .Format = .B8G8R8A8_UNORM,
+                .SampleDesc = .{ .Count = 1, .Quality = 0 },
+                .Usage = .DEFAULT,
+                .BindFlags = .{ .RENDER_TARGET = 1 },
+                .CPUAccessFlags = .{},
+                .MiscFlags = .{},
+            };
+            const hr = device.CreateTexture2D(&desc, null, &texture);
+            if (hr < 0) com.fatalHr("CreateStagingTexture", hr);
+        }
+
+        const dxgi_surface = com.queryInterface(texture, win32.IDXGISurface);
+        defer _ = dxgi_surface.IUnknown.Release();
+
+        var render_target: *win32.ID2D1RenderTarget = undefined;
+        {
+            // Mask staging uses IGNORE alpha: D2D treats the surface as
+            // opaque so it emits ClearType (it falls back to grayscale on
+            // alpha-aware targets). Color glyph staging uses premultiplied
+            // alpha so emoji bitmaps keep transparency for shader blending.
+            // Pin DPI to 96 so IDWriteTextLayout's DIP-based maxWidth/maxHeight
+            // map 1:1 to staging-texture pixels (cell metrics are in pixels).
+            const alpha_mode: win32.D2D1_ALPHA_MODE = switch (kind) {
+                .mask => .IGNORE,
+                .color => .PREMULTIPLIED,
+            };
+            const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
+                .type = .DEFAULT,
+                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = alpha_mode },
+                .dpiX = 96.0,
+                .dpiY = 96.0,
+                .usage = .{},
+                .minLevel = .DEFAULT,
+            };
+            const hr = d2d_factory.CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &render_target);
+            if (hr < 0) com.fatalHr("CreateDxgiSurfaceRenderTarget", hr);
+        }
+
+        // Set pixel unit mode
+        const dc = com.queryInterface(render_target, win32.ID2D1DeviceContext);
+        defer _ = dc.IUnknown.Release();
+        dc.SetUnitMode(win32.D2D1_UNIT_MODE_PIXELS);
+
+        var white_brush: *win32.ID2D1SolidColorBrush = undefined;
+        {
+            const hr = render_target.CreateSolidColorBrush(
+                &.{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
+                null,
+                &white_brush,
+            );
+            if (hr < 0) com.fatalHr("CreateBrush", hr);
+        }
+
+        cached.* = .{
+            .size = size,
+            .texture = texture,
+            .render_target = render_target,
+            .white_brush = white_brush,
+        };
+        return &cached.*.?;
+    }
+
+    pub fn release(self: *StagingTexture) void {
+        releaseCached(&self.mask_cached);
+        releaseCached(&self.color_cached);
+    }
+
+    fn releaseCached(cached: *?Cached) void {
+        if (cached.*) |*c| {
+            _ = c.white_brush.IUnknown.Release();
+            _ = c.render_target.IUnknown.Release();
+            _ = c.texture.IUnknown.Release();
+            cached.* = null;
+        }
+    }
+};

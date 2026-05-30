@@ -5,9 +5,34 @@ const builtin = @import("builtin");
 const vt = @import("vt");
 const win32 = @import("win32").everything;
 const GlyphIndexCache = @import("GlyphIndexCache.zig");
-const sprite = @import("sprite.zig");
+const types = @import("types.zig");
+
+const com = @import("d3d11/com.zig");
+const gpu = @import("d3d11/gpu.zig");
+const color = @import("d3d11/color.zig");
+const emoji = @import("d3d11/emoji.zig");
+const font_mod = @import("d3d11/font.zig");
+const glyph_mod = @import("d3d11/glyph.zig");
 
 const log = std.log.scoped(.d3d);
+
+// Re-exports for external callers (state/render/tab_bar/tab_mgmt depend on
+// these). New code inside the renderer should prefer the module-qualified
+// names (`gpu.TabBarCell`, `font_mod.FontConfig`, etc.).
+pub const TabBarCell = gpu.TabBarCell;
+pub const FontConfig = font_mod.FontConfig;
+pub const scrollbarWidth = gpu.scrollbarWidth;
+pub const default_primary_font_family = font_mod.default_primary_font_family;
+pub const default_font_size_pt = font_mod.default_font_size_pt;
+
+const Rgba8 = gpu.Rgba8;
+const CellXY = gpu.CellXY;
+const shader = gpu.shader;
+const ShaderCells = gpu.ShaderCells;
+const GlyphTexture = gpu.GlyphTexture;
+const StagingTexture = gpu.StagingTexture;
+const fatalHr = com.fatalHr;
+const oom = com.oom;
 
 // Debug-only counters for the row-upload diff. Used to evaluate whether
 // merging contiguous dirty rows into a single UpdateSubresource would pay
@@ -28,57 +53,6 @@ const DebugStats = struct {
     rows_uploaded: u64 = 0,
     rows_skipped: u64 = 0,
 };
-
-// Shared types with the shader
-const shader = struct {
-    const GridConfig = extern struct {
-        cell_size: [2]u32,
-        col_count: u32,
-        row_count: u32,
-        scrollbar_y: f32,
-        scrollbar_height: f32,
-        scrollbar_x: f32,
-        scrollbar_width: f32,
-        cells_per_row: u32,
-        _pad: [3]u32 = .{ 0, 0, 0 },
-    };
-    const Cell = extern struct {
-        glyph_index: u32,
-        background: Rgba8,
-        foreground: Rgba8,
-    };
-};
-
-const Rgba8 = packed struct(u32) {
-    a: u8,
-    b: u8,
-    g: u8,
-    r: u8,
-    fn fromU24(c: u24) Rgba8 {
-        return .{
-            .r = @intCast((c >> 16) & 0xFF),
-            .g = @intCast((c >> 8) & 0xFF),
-            .b = @intCast(c & 0xFF),
-            .a = 255,
-        };
-    }
-};
-
-/// One cell's worth of tab-bar content, laid out by the caller and
-/// rendered into the reserved top row by `render`.
-pub const TabBarCell = struct {
-    codepoint: u21,
-    bg: Rgba8,
-    fg: Rgba8,
-    pub fn rgba(c: u24) Rgba8 {
-        return Rgba8.fromU24(c);
-    }
-};
-
-// Used only when the terminal's dynamic fg/bg colors are unset (which normally
-// never happens — tab creation seeds term.colors from the active theme).
-const fallback_fg: u24 = 0xc8c4d0;
-const fallback_bg: u24 = 0x2a2a2a;
 
 // D3D11 core
 device: *win32.ID3D11Device,
@@ -149,642 +123,10 @@ effective_style: [4]GlyphIndexCache.Style,
 effective_user_fallbacks: []const [*:0]const u16,
 effective_codepoint_maps: []const FontConfig.CodepointMapEntry,
 
-pub const FontConfig = struct {
-    pub const StyleSpec = union(enum) {
-        default,
-        disabled,
-        named: [*:0]const u16, // UTF-16 face name, caller-owned (same lifetime as families)
-    };
-
-    pub const CodepointMapEntry = struct {
-        /// Inclusive range. `first == last` for a single-codepoint mapping.
-        first: u32,
-        last: u32,
-        /// UTF-16 null-terminated family name. Caller-owned, same lifetime
-        /// contract as `families` (renderer holds the pointer until next
-        /// updateFont).
-        family: [*:0]const u16,
-    };
-
-    /// First entry becomes the primary family; the rest are inserted at the
-    /// front of the fallback chain. Empty -> use built-in defaults.
-    families: []const [*:0]const u16 = &.{},
-    /// Per-style primary family overrides. `null` -> inherit the regular
-    /// primary (single-family-everywhere is the common case). The
-    /// per-style fallback chain prepends THIS family in front of the regular
-    /// chain, so user fallbacks still kick in for glyphs the style-specific
-    /// family lacks (matches Ghostty's permissive behavior).
-    family_bold: ?[*:0]const u16 = null,
-    family_italic: ?[*:0]const u16 = null,
-    family_bold_italic: ?[*:0]const u16 = null,
-    /// When false for a style, AND the corresponding family lacks a real face
-    /// matching that style, the renderer falls back to the regular text format
-    /// for those cells (no DirectWrite synthesis). True (the default) lets
-    /// DirectWrite synthesize via DWRITE_FONT_WEIGHT / DWRITE_FONT_STYLE.
-    /// Known limitation: only the PRIMARY family of the style is checked;
-    /// fallback faces inside the chain may still be synthesized per-glyph,
-    /// which would require a shaping-pipeline-aware audit out of scope here.
-    synthesize_bold: bool = true,
-    synthesize_italic: bool = true,
-    synthesize_bold_italic: bool = true,
-    /// `font-style*` per-slot face pin. Index order matches GlyphIndexCache.Style.
-    /// `.default` = use the style's natural weight/slant (NORMAL/NORMAL for
-    /// regular, BOLD/NORMAL for bold, etc.) with DirectWrite synthesis as
-    /// allowed by `synthesize_*`. `.disabled` = forbid using a real face for
-    /// this style, collapsing the slot to regular when synthesis is off.
-    /// `.named` = look up the named face in the chosen family (en-us name
-    /// match, case-insensitive) and use its real weight/style/stretch.
-    style_specs: [4]StyleSpec = .{ .default, .default, .default, .default },
-    /// Font size in points. Null -> use built-in default.
-    font_size_pt: ?f32 = null,
-    /// Per-range forced font assignments. Applied at the head of the
-    /// DirectWrite fallback chain (before the global family mapping), so for
-    /// codepoints NOT covered by the preferred family the user-mapped family
-    /// is picked first. They do NOT override the preferred family itself —
-    /// DirectWrite consults the preferred family before any fallback, so if
-    /// the primary covers the codepoint its glyph wins. Typical use is
-    /// mapping emoji / icon ranges that the primary monospace font lacks.
-    /// Overlapping user ranges resolve in declaration order (earlier wins).
-    codepoint_maps: []const CodepointMapEntry = &.{},
-};
-
-const scrollbar_logical_width: u16 = 14;
-
-pub fn scrollbarWidth(dpi: u32) u16 {
-    return @intFromFloat(@round(@as(f32, @floatFromInt(scrollbar_logical_width)) * @as(f32, @floatFromInt(dpi)) / 96.0));
-}
-
-fn measureCellSize(
-    dwrite_factory: *win32.IDWriteFactory,
-    dpi: u32,
-    primary: [*:0]const u16,
-    font_size_pt_val: f32,
-) win32.SIZE {
-    // Query the primary font face's canonical design metrics rather than
-    // measuring a specific glyph via text layout. Some monospace fonts (e.g.
-    // Rec Mono Casual) have a U+2588 advance that's wider than their ASCII
-    // letters, which previously made cells too wide and stretched every letter
-    // horizontally. Using designUnitsPerEm + advanceWidth from the font face
-    // gives the true monospace advance, independent of which glyph we sample.
-    var system_collection: *win32.IDWriteFontCollection = undefined;
-    {
-        const hr = dwrite_factory.GetSystemFontCollection(&system_collection, 0);
-        if (hr < 0) fatalHr("GetSystemFontCollection", hr);
-    }
-    defer _ = system_collection.IUnknown.Release();
-
-    var family_index: u32 = 0;
-    var family_exists: win32.BOOL = 0;
-    {
-        const hr = system_collection.FindFamilyName(primary, &family_index, &family_exists);
-        if (hr < 0) fatalHr("FindFamilyName", hr);
-    }
-    if (family_exists == 0) {
-        std.log.warn("primary font family not installed; trying fallback monospace", .{});
-        for (&measurement_fallbacks) |candidate| {
-            const hr = system_collection.FindFamilyName(candidate, &family_index, &family_exists);
-            if (hr >= 0 and family_exists != 0) break;
-        }
-        if (family_exists == 0) fatalHr("FindFamilyName (no monospace family found)", -1);
-    }
-
-    var family: *win32.IDWriteFontFamily = undefined;
-    {
-        const hr = system_collection.GetFontFamily(family_index, &family);
-        if (hr < 0) fatalHr("GetFontFamily", hr);
-    }
-    defer _ = family.IUnknown.Release();
-
-    var font: *win32.IDWriteFont = undefined;
-    {
-        const hr = family.GetFirstMatchingFont(.NORMAL, .NORMAL, .NORMAL, &font);
-        if (hr < 0) fatalHr("GetFirstMatchingFont", hr);
-    }
-    defer _ = font.IUnknown.Release();
-
-    var face: *win32.IDWriteFontFace = undefined;
-    {
-        const hr = font.CreateFontFace(&face);
-        if (hr < 0) fatalHr("CreateFontFace", hr);
-    }
-    defer _ = face.IUnknown.Release();
-
-    var font_metrics: win32.DWRITE_FONT_METRICS = undefined;
-    face.GetMetrics(&font_metrics);
-
-    // Sample 'M' for the advance (any ASCII letter works in a monospace font).
-    const codepoint: u32 = 'M';
-    var glyph_index: [1:0]u16 = .{0};
-    {
-        const hr = face.GetGlyphIndices(@ptrCast(&codepoint), 1, &glyph_index);
-        if (hr < 0) fatalHr("GetGlyphIndices", hr);
-    }
-    var glyph_metrics: win32.DWRITE_GLYPH_METRICS = undefined;
-    {
-        const hr = face.GetDesignGlyphMetrics(&glyph_index, 1, @ptrCast(&glyph_metrics), 0);
-        if (hr < 0) fatalHr("GetDesignGlyphMetrics", hr);
-    }
-
-    const font_size_dips = fontSizeDips(dpi, font_size_pt_val);
-    const units_per_em: f32 = @floatFromInt(font_metrics.designUnitsPerEm);
-    const design_to_dips = font_size_dips / units_per_em;
-
-    const advance_dips = @as(f32, @floatFromInt(glyph_metrics.advanceWidth)) * design_to_dips;
-    const ascent_dips = @as(f32, @floatFromInt(font_metrics.ascent)) * design_to_dips;
-    const descent_dips = @as(f32, @floatFromInt(font_metrics.descent)) * design_to_dips;
-    const line_gap_dips = @as(f32, @floatFromInt(font_metrics.lineGap)) * design_to_dips;
-    const line_height_dips = ascent_dips + descent_dips + line_gap_dips;
-
-    return .{
-        .cx = @intFromFloat(@round(advance_dips)),
-        .cy = @intFromFloat(@round(line_height_dips)),
-    };
-}
-
-// Font configuration (mirrors WezTerm config). Primary family, then ordered
-// fallbacks: CJK -> Nerd Font icons -> Emoji. Missing families on the system
-// are silently skipped by DirectWrite when resolving glyphs.
-pub const default_primary_font_family: [*:0]const u16 = win32.L("Consolas");
-pub const default_font_size_pt: f32 = 13.0;
-
-// Computes the font size to pass to CreateTextFormat. CreateTextFormat
-// nominally takes DIPs (1/96 inch), and our config is in points (1/72 inch),
-// so we convert pt -> DIPs (x 96/72) then apply DPI scaling for the monitor.
-// Note: the staging render target runs in D2D1_UNIT_MODE_PIXELS, which makes
-// the value we return coincide with physical pixels for our specific draw
-// path. The name "Dips" reflects the API contract, not the eventual unit.
-fn fontSizeDips(dpi: u32, font_size_pt_val: f32) f32 {
-    return win32.scaleDpi(f32, font_size_pt_val * 96.0 / 72.0, dpi);
-}
-
-// Fallback families used by measureCellSize when the primary isn't installed.
-// Picked to be common Windows monospace fonts so a sensible cell size is found
-// even on minimal installs.
-const measurement_fallbacks = blk: {
-    @setEvalBranchQuota(4000);
-    break :blk [_][*:0]const u16{
-        win32.L("Cascadia Mono"),
-        win32.L("Consolas"),
-        win32.L("Courier New"),
-    };
-};
-
-const font_fallback_families = [_][*:0]const u16{
-    win32.L("Segoe UI Emoji"),
-};
-
-fn createTextFormat(
-    dwrite_factory: *win32.IDWriteFactory,
-    dpi: u32,
-    font_fallback: *win32.IDWriteFontFallback,
-    primary: [*:0]const u16,
-    font_size_pt_val: f32,
-    weight: win32.DWRITE_FONT_WEIGHT,
-    slant: win32.DWRITE_FONT_STYLE,
-    stretch: win32.DWRITE_FONT_STRETCH,
-) *win32.IDWriteTextFormat {
-    var text_format: *win32.IDWriteTextFormat = undefined;
-    const hr = dwrite_factory.CreateTextFormat(
-        primary,
-        null,
-        weight,
-        slant,
-        stretch,
-        fontSizeDips(dpi, font_size_pt_val),
-        win32.L(""),
-        &text_format,
-    );
-    if (hr < 0) fatalHr("CreateTextFormat", hr);
-
-    // Attach our custom fallback chain so CJK / Nerd Font / Emoji glyphs render.
-    const text_format1 = queryInterface(text_format, win32.IDWriteTextFormat1);
-    defer _ = text_format1.IUnknown.Release();
-    const sfhr = text_format1.SetFontFallback(font_fallback);
-    if (sfhr < 0) fatalHr("SetFontFallback", sfhr);
-
-    // Single-glyph layouts must never wrap; we measure & scale to fit instead.
-    const wwhr = text_format.SetWordWrapping(win32.DWRITE_WORD_WRAPPING_NO_WRAP);
-    if (wwhr < 0) fatalHr("SetWordWrapping", wwhr);
-
-    return text_format;
-}
-
-// Resolved face attributes used to drive CreateTextFormat for a named-face
-// style spec. When a `font-style*` name doesn't match any face in the family,
-// we keep the slot's natural attributes and emit a warning.
-const FaceAttrs = struct {
-    weight: win32.DWRITE_FONT_WEIGHT,
-    slant: win32.DWRITE_FONT_STYLE,
-    stretch: win32.DWRITE_FONT_STRETCH,
-};
-
-// Looks up a named face within `family` (system collection only). Match is
-// case-insensitive against the en-us face name. Returns the face's real
-// weight/slant/stretch on success, or null when family/face is missing.
-// Known limitation: localized face names beyond en-us aren't matched — users
-// running a non-English DirectWrite locale should still see their face
-// surface under its en-us name (the canonical key the OS exposes).
-fn resolveNamedFace(
-    factory: *win32.IDWriteFactory,
-    family: [*:0]const u16,
-    name: [*:0]const u16,
-) ?FaceAttrs {
-    var collection: *win32.IDWriteFontCollection = undefined;
-    if (factory.GetSystemFontCollection(&collection, 0) < 0) return null;
-    defer _ = collection.IUnknown.Release();
-
-    var idx: u32 = 0;
-    var exists: win32.BOOL = 0;
-    if (collection.FindFamilyName(family, &idx, &exists) < 0 or exists == 0) return null;
-
-    var fam: *win32.IDWriteFontFamily = undefined;
-    if (collection.GetFontFamily(idx, &fam) < 0) return null;
-    defer _ = fam.IUnknown.Release();
-
-    const wanted = std.mem.span(name);
-    const count = fam.IDWriteFontList.GetFontCount();
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        var font: *win32.IDWriteFont = undefined;
-        if (fam.IDWriteFontList.GetFont(i, &font) < 0) continue;
-        defer _ = font.IUnknown.Release();
-        // Skip simulated faces so a name like "Bold" doesn't bind to a
-        // simulated bold of a regular file — defeats the purpose of pinning.
-        if (!std.meta.eql(font.GetSimulations(), win32.DWRITE_FONT_SIMULATIONS_NONE)) continue;
-
-        var names: *win32.IDWriteLocalizedStrings = undefined;
-        if (font.GetFaceNames(&names) < 0) continue;
-        defer _ = names.IUnknown.Release();
-
-        // Look up the en-us index; fall through to index 0 if absent.
-        var en_idx: u32 = 0;
-        var en_found: win32.BOOL = 0;
-        _ = names.FindLocaleName(win32.L("en-us"), &en_idx, &en_found);
-        const which: u32 = if (en_found != 0) en_idx else 0;
-
-        var len: u32 = 0;
-        if (names.GetStringLength(which, &len) < 0 or len == 0) continue;
-        var buf: [128:0]u16 = undefined;
-        if (len + 1 > buf.len) continue;
-        if (names.GetString(which, &buf, len + 1) < 0) continue;
-
-        if (utf16EqlIgnoreAsciiCase(buf[0..len], wanted)) {
-            return .{
-                .weight = font.GetWeight(),
-                .slant = font.GetStyle(),
-                .stretch = font.GetStretch(),
-            };
-        }
-    }
-    return null;
-}
-
-// Case-insensitive only in the ASCII range; non-ASCII codepoints must match
-// exactly (no Unicode case folding — that would need ICU/uucode). Common
-// English face names ("Bold", "SemiBold", "Heavy") fold case correctly;
-// non-ASCII face names still match when the user spells them exactly as
-// stored in the en-us face name table.
-fn utf16EqlIgnoreAsciiCase(a: []const u16, b: []const u16) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (x > 0x7F or y > 0x7F) {
-            if (x != y) return false;
-        } else if (std.ascii.toLower(@intCast(x)) != std.ascii.toLower(@intCast(y))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// True if `family` (in the system font collection) has at least one font
-// matching the requested weight/style criteria — i.e. a "real" face exists,
-// no DirectWrite synthesis needed. Returns false if the family isn't
-// installed at all (the renderer's existing measurement-fallback machinery
-// will pick a different family at draw time anyway).
-//
-// Both axes are matched STRICTLY:
-//   - When `match_bold` is true:  weight >= BOLD (700) required; else < BOLD.
-//   - When `match_italic` is true: slant != NORMAL required; else == NORMAL.
-// Both flags must match within a single font for `bold_italic`. The strict
-// negative match matters: without `weight < BOLD` on the italic-only slot, a
-// bold-italic face would be accepted as satisfying the "italic" slot — and
-// likewise a bold-italic face would falsely satisfy the "bold" (upright) slot.
-fn familyHasRealFace(
-    factory: *win32.IDWriteFactory,
-    family: [*:0]const u16,
-    match_bold: bool,
-    match_italic: bool,
-) bool {
-    var collection: *win32.IDWriteFontCollection = undefined;
-    if (factory.GetSystemFontCollection(&collection, 0) < 0) return false;
-    defer _ = collection.IUnknown.Release();
-
-    var idx: u32 = 0;
-    var exists: win32.BOOL = 0;
-    if (collection.FindFamilyName(family, &idx, &exists) < 0 or exists == 0) return false;
-
-    var fam: *win32.IDWriteFontFamily = undefined;
-    if (collection.GetFontFamily(idx, &fam) < 0) return false;
-    defer _ = fam.IUnknown.Release();
-
-    const count = fam.IDWriteFontList.GetFontCount();
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        var font: *win32.IDWriteFont = undefined;
-        if (fam.IDWriteFontList.GetFont(i, &font) < 0) continue;
-        defer _ = font.IUnknown.Release();
-        // Faces with DirectWrite simulations applied don't count as real:
-        // a simulated bold face from a regular file is exactly what we're
-        // trying to suppress.
-        if (!std.meta.eql(font.GetSimulations(), win32.DWRITE_FONT_SIMULATIONS_NONE)) continue;
-        const is_bold = @intFromEnum(font.GetWeight()) >= @intFromEnum(win32.DWRITE_FONT_WEIGHT_BOLD);
-        const is_italic = font.GetStyle() != .NORMAL;
-        if (is_bold == match_bold and is_italic == match_italic) return true;
-    }
-    return false;
-}
-
-// Map each requested style to its effective slot. A style slot collapses to
-// .regular when:
-//   - `font-style*` for the slot is `.disabled` (explicit user opt-out), OR
-//   - `font-style*` is `.named` and the named face doesn't exist (no usable
-//     real face was found, and synthesis is suppressed), OR
-//   - synthesis is disabled AND the family has no real face matching the
-//     slot's natural weight/slant criteria.
-// `.named` with a successful resolution is treated as "real face exists"
-// regardless of synthesize_X — the user explicitly pinned the face.
-fn computeEffectiveStyle(
-    factory: *win32.IDWriteFactory,
-    regular_primary: [*:0]const u16,
-    style_primaries: [3]?[*:0]const u16,
-    synthesize: [3]bool,
-    style_specs: [4]FontConfig.StyleSpec,
-) [4]GlyphIndexCache.Style {
-    var out: [4]GlyphIndexCache.Style = .{ .regular, .bold, .italic, .bold_italic };
-    const slots = [_]struct { match_bold: bool, match_italic: bool, slot: usize }{
-        .{ .match_bold = true, .match_italic = false, .slot = 1 },
-        .{ .match_bold = false, .match_italic = true, .slot = 2 },
-        .{ .match_bold = true, .match_italic = true, .slot = 3 },
-    };
-    for (slots, 0..) |s, ai| {
-        const spec = style_specs[s.slot];
-        // Explicit user opt-out always collapses, regardless of synthesis policy.
-        if (spec == .disabled) {
-            out[s.slot] = .regular;
-            continue;
-        }
-        // `.named`: trust the user's pin — if the name resolved at format-build
-        // time, the slot has a real face. We don't re-probe here.
-        if (spec == .named) {
-            const fam = style_primaries[ai] orelse regular_primary;
-            if (resolveNamedFace(factory, fam, spec.named) == null) {
-                // Name didn't match anything real. Treat like "no real face":
-                // if user also forbids synthesis we MUST collapse, otherwise
-                // keep the slot (DirectWrite will synthesize from natural).
-                if (!synthesize[ai]) out[s.slot] = .regular;
-            }
-            continue;
-        }
-        // `.default`: legacy Step 2.3 rule.
-        if (synthesize[ai]) continue;
-        const fam = style_primaries[ai] orelse regular_primary;
-        if (!familyHasRealFace(factory, fam, s.match_bold, s.match_italic)) {
-            out[s.slot] = .regular;
-        }
-    }
-    return out;
-}
-
-// Builds the four (regular, bold, italic, bold-italic) (text_format,
-// fallback) pairs. Index MUST match GlyphIndexCache.Style ordinals.
-// `style_primaries` carries optional per-style family overrides
-// (font-family-bold/italic/bold-italic); when null the slot inherits the
-// regular primary AND uses DirectWrite's synthetic bold/oblique for weight.
-// `style_specs` overrides the natural weight/slant when the user pinned a
-// specific face via `font-style*`.
-fn createTextFormatSet(
-    factory: *win32.IDWriteFactory2,
-    dpi: u32,
-    regular_primary: [*:0]const u16,
-    style_primaries: [3]?[*:0]const u16, // bold, italic, bold-italic (indexes 1..3)
-    style_specs: [4]FontConfig.StyleSpec,
-    user_fallbacks: []const [*:0]const u16,
-    codepoint_maps: []const FontConfig.CodepointMapEntry,
-    font_size_pt_val: f32,
-) struct { formats: [4]*win32.IDWriteTextFormat, fallbacks: [4]*win32.IDWriteFontFallback } {
-    const Slot = struct {
-        primary: [*:0]const u16,
-        style_primary: ?[*:0]const u16,
-        weight: win32.DWRITE_FONT_WEIGHT,
-        slant: win32.DWRITE_FONT_STYLE,
-        stretch: win32.DWRITE_FONT_STRETCH,
-    };
-    var slots: [4]Slot = .{
-        .{ .primary = regular_primary, .style_primary = null, .weight = .NORMAL, .slant = .NORMAL, .stretch = .NORMAL },
-        .{ .primary = style_primaries[0] orelse regular_primary, .style_primary = style_primaries[0], .weight = .BOLD, .slant = .NORMAL, .stretch = .NORMAL },
-        .{ .primary = style_primaries[1] orelse regular_primary, .style_primary = style_primaries[1], .weight = .NORMAL, .slant = .ITALIC, .stretch = .NORMAL },
-        .{ .primary = style_primaries[2] orelse regular_primary, .style_primary = style_primaries[2], .weight = .BOLD, .slant = .ITALIC, .stretch = .NORMAL },
-    };
-
-    // Apply `font-style*` pins: a named face shifts the slot's CreateTextFormat
-    // attributes to the face's real weight/slant/stretch (no synthesis).
-    // `.disabled` is a no-op here — collapsing to regular happens later via
-    // computeEffectiveStyle's "no real face" path. Missing names warn once.
-    for (style_specs, 0..) |spec, i| {
-        switch (spec) {
-            .default, .disabled => {},
-            .named => |name| {
-                if (resolveNamedFace(&factory.IDWriteFactory, slots[i].primary, name)) |attrs| {
-                    slots[i].weight = attrs.weight;
-                    slots[i].slant = attrs.slant;
-                    slots[i].stretch = attrs.stretch;
-                } else {
-                    std.log.warn("font-style: face not found in family; keeping natural attributes", .{});
-                }
-            },
-        }
-    }
-
-    var formats: [4]*win32.IDWriteTextFormat = undefined;
-    var fallbacks: [4]*win32.IDWriteFontFallback = undefined;
-    for (slots, 0..) |s, i| {
-        fallbacks[i] = buildFontFallback(factory, regular_primary, s.style_primary, user_fallbacks, codepoint_maps);
-        formats[i] = createTextFormat(&factory.IDWriteFactory, dpi, fallbacks[i], s.primary, font_size_pt_val, s.weight, s.slant, s.stretch);
-    }
-    return .{ .formats = formats, .fallbacks = fallbacks };
-}
-
-fn releaseTextFormatSet(
-    formats: *[4]*win32.IDWriteTextFormat,
-    fallbacks: *[4]*win32.IDWriteFontFallback,
-) void {
-    for (formats) |tf| _ = tf.IUnknown.Release();
-    for (fallbacks) |fb| _ = fb.IUnknown.Release();
-}
-
-// Custom rendering parameters so the atlas is reproducible across machines
-// and aligns with the shader's gamma 2.0 (`c*c`) decode of the ClearType
-// mask. `enhanced_contrast=0` removes D2D's non-invertible contrast curve
-// so the stored mask is a predictable function of coverage; `RGB` stripe
-// and `NATURAL_SYMMETRIC` rendering mode pick the standard subpixel
-// layout and the best horizontal subpixel positioning (experimental —
-// can fall back to `NATURAL` if vertical edges look soft on a given
-// monitor). Gamma here MUST match the shader's `to_linear` exponent
-// (currently 2.0) or text will look washed out / over-saturated.
-fn buildRenderingParams(factory: *win32.IDWriteFactory) *win32.IDWriteRenderingParams {
-    var params: *win32.IDWriteRenderingParams = undefined;
-    const hr = factory.CreateCustomRenderingParams(
-        2.0,
-        0.0,
-        1.0,
-        win32.DWRITE_PIXEL_GEOMETRY_RGB,
-        win32.DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-        &params,
-    );
-    if (hr < 0) fatalHr("CreateCustomRenderingParams", hr);
-    return params;
-}
-
-// Hard cap on user-supplied fallback families. Anything beyond is ignored;
-// the chain is already long once you include the hardcoded CJK/icon/emoji
-// fonts, and DirectWrite walks it linearly.
-const max_user_fallbacks: usize = 32;
-
-// Fallback object composition order (this is the order DirectWrite walks
-// AFTER it has already failed to find the codepoint in the text format's
-// preferred family — the preferred family is consulted before any fallback):
-//   1. codepoint-map entries (range-specific)
-//   2. style_primary (when set; e.g. font-family-bold)
-//   3. regular_primary (the global primary family — keeps visual cohesion
-//      when style-family is partial; matches Ghostty's permissive behavior)
-//   4. user_fallbacks (font-family entries 2..N)
-//   5. font_fallback_families (built-in: Emoji)
-//   6. system fallback (CJK, etc.)
-//
-// `style_primary == null` means "this style inherits the regular primary",
-// and step 2 is skipped — step 3 alone provides it.
-fn buildFontFallback(
-    factory: *win32.IDWriteFactory2,
-    regular_primary: [*:0]const u16,
-    style_primary: ?[*:0]const u16,
-    user_fallbacks: []const [*:0]const u16,
-    codepoint_maps: []const FontConfig.CodepointMapEntry,
-) *win32.IDWriteFontFallback {
-    var builder: *win32.IDWriteFontFallbackBuilder = undefined;
-    {
-        const hr = factory.CreateFontFallbackBuilder(&builder);
-        if (hr < 0) fatalHr("CreateFontFallbackBuilder", hr);
-    }
-    defer _ = builder.IUnknown.Release();
-
-    // Per-range forced mappings go in FIRST so within the FALLBACK lookup
-    // they win over the global mapping below for the codepoints they cover.
-    // Note: this only matters when DirectWrite has already decided the
-    // preferred family doesn't cover the codepoint — the preferred family is
-    // consulted before any fallback object, so codepoint-map is fallback-only,
-    // not an override of the primary. Overlapping user ranges resolve in
-    // declaration order (earlier wins) — same first-match rule.
-    for (codepoint_maps) |entry| {
-        const range = win32.DWRITE_UNICODE_RANGE{ .first = entry.first, .last = entry.last };
-        const family_ptr: ?*const u16 = @ptrCast(entry.family);
-        var family_arr = [_]?*const u16{family_ptr};
-        const hr = builder.AddMapping(
-            @ptrCast(&range),
-            1,
-            &family_arr,
-            1,
-            null,
-            null,
-            null,
-            1.0,
-        );
-        if (hr < 0) fatalHr("AddMapping(codepoint-map)", hr);
-    }
-
-    // AddMapping takes a prioritized list of family names for a single Unicode
-    // range, in order. Calling it once per family with the full range would
-    // make only the first family ever match (DirectWrite picks the first
-    // mapping whose range contains the codepoint, then walks its family list).
-    // Layout: [style_primary?, regular_primary, user_fallbacks..., builtin...]
-    const reserved_head: usize = 2; // style_primary + regular_primary slots
-    var family_ptrs: [reserved_head + max_user_fallbacks + font_fallback_families.len]?*const u16 = undefined;
-    var n: usize = 0;
-    if (style_primary) |sp| {
-        // Best-effort alias dedup: skip the slot only when the caller forwarded
-        // the SAME pointer for both, which is how an unset style winds up here.
-        // A user writing the same family TWICE (e.g. `font-family-bold = X`
-        // matching the regular `font-family = X`) yields distinct allocations
-        // and would NOT dedup — that's acceptable; DirectWrite just walks the
-        // family twice. String compare would be more thorough but not worth
-        // the cost for this corner.
-        if (@intFromPtr(sp) != @intFromPtr(regular_primary)) {
-            family_ptrs[n] = @ptrCast(sp);
-            n += 1;
-        }
-    }
-    family_ptrs[n] = @ptrCast(regular_primary);
-    n += 1;
-
-    const user_n = @min(user_fallbacks.len, max_user_fallbacks);
-    if (user_fallbacks.len > max_user_fallbacks) {
-        std.log.warn("config: dropping {d} extra font-family fallback(s) past cap {d}", .{
-            user_fallbacks.len - max_user_fallbacks,
-            max_user_fallbacks,
-        });
-    }
-    for (user_fallbacks[0..user_n]) |family| {
-        family_ptrs[n] = @ptrCast(family);
-        n += 1;
-    }
-    for (font_fallback_families) |family| {
-        family_ptrs[n] = @ptrCast(family);
-        n += 1;
-    }
-    const full_range = win32.DWRITE_UNICODE_RANGE{ .first = 0, .last = 0x10FFFF };
-    {
-        const hr = builder.AddMapping(
-            @ptrCast(&full_range),
-            1,
-            &family_ptrs,
-            @intCast(n),
-            null,
-            null,
-            null,
-            1.0,
-        );
-        if (hr < 0) fatalHr("AddMapping", hr);
-    }
-
-    // Chain the system fallback so codepoints not covered above still resolve.
-    {
-        var system_fallback: *win32.IDWriteFontFallback = undefined;
-        const hr = factory.GetSystemFontFallback(&system_fallback);
-        if (hr < 0) fatalHr("GetSystemFontFallback", hr);
-        defer _ = system_fallback.IUnknown.Release();
-        const ahr = builder.AddMappings(system_fallback);
-        if (ahr < 0) fatalHr("AddMappings", ahr);
-    }
-
-    var fallback: *win32.IDWriteFontFallback = undefined;
-    {
-        const hr = builder.CreateFontFallback(&fallback);
-        if (hr < 0) fatalHr("CreateFontFallback", hr);
-    }
-    return fallback;
-}
-
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.cell_size;
-    return measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
+    return font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
 }
-
-const CellXY = struct {
-    x: u16,
-    y: u16,
-    fn eql(a: CellXY, b: CellXY) bool {
-        return a.x == b.x and a.y == b.y;
-    }
-};
 
 pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
     const effective_primary: [*:0]const u16 = if (font_config.families.len > 0)
@@ -820,7 +162,7 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
     // Compile shaders
     const shader_source = @embedFile("terminal.hlsl");
 
-    const vs_blob = compileShaderBlob(shader_source, "VertexMain", "vs_5_0");
+    const vs_blob = gpu.compileShaderBlob(shader_source, "VertexMain", "vs_5_0");
     defer _ = vs_blob.IUnknown.Release();
     var vertex_shader: *win32.ID3D11VertexShader = undefined;
     {
@@ -833,7 +175,7 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         if (hr < 0) fatalHr("CreateVertexShader", hr);
     }
 
-    const ps_blob = compileShaderBlob(shader_source, "PixelMain", "ps_5_0");
+    const ps_blob = gpu.compileShaderBlob(shader_source, "PixelMain", "ps_5_0");
     defer _ = ps_blob.IUnknown.Release();
     var pixel_shader: *win32.ID3D11PixelShader = undefined;
     {
@@ -872,11 +214,11 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         if (hr < 0) fatalHr("DWriteCreateFactory", hr);
     }
 
-    const rendering_params = buildRenderingParams(&dwrite_factory.IDWriteFactory);
+    const rendering_params = font_mod.buildRenderingParams(&dwrite_factory.IDWriteFactory);
     const style_primaries: [3]?[*:0]const u16 = .{ font_config.family_bold, font_config.family_italic, font_config.family_bold_italic };
     const synthesize: [3]bool = .{ font_config.synthesize_bold, font_config.synthesize_italic, font_config.synthesize_bold_italic };
-    const effective_style = computeEffectiveStyle(&dwrite_factory.IDWriteFactory, effective_primary, style_primaries, synthesize, font_config.style_specs);
-    const set = createTextFormatSet(
+    const effective_style = font_mod.computeEffectiveStyle(&dwrite_factory.IDWriteFactory, effective_primary, style_primaries, synthesize, font_config.style_specs);
+    const set = font_mod.createTextFormatSet(
         dwrite_factory,
         dpi,
         effective_primary,
@@ -887,7 +229,7 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         effective_font_size_pt,
     );
 
-    const cell_size = measureCellSize(&dwrite_factory.IDWriteFactory, dpi, effective_primary, effective_font_size_pt);
+    const cell_size = font_mod.measureCellSize(&dwrite_factory.IDWriteFactory, dpi, effective_primary, effective_font_size_pt);
     const cell_size_xy: CellXY = .{
         .x = @intCast(cell_size.cx),
         .y = @intCast(cell_size.cy),
@@ -939,8 +281,8 @@ pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     // size-in-DIPs so they must be rebuilt; we rebuild fallbacks too to keep
     // init/updateDpi/updateFont sharing one codepath (cost: a few micro-
     // allocations on a rare event).
-    releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
-    const set = createTextFormatSet(
+    font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    const set = font_mod.createTextFormatSet(
         self.dwrite_factory,
         dpi,
         self.effective_primary,
@@ -954,7 +296,7 @@ pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     self.font_fallbacks = set.fallbacks;
     self.dpi = dpi;
 
-    const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
+    const new_cs = font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
     self.cell_size = new_cs;
     self.cell_size_xy = .{
         .x = @intCast(new_cs.cx),
@@ -986,11 +328,11 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
         &.{};
     const effective_font_size_pt: f32 = font_config.font_size_pt orelse default_font_size_pt;
 
-    releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
     const style_primaries: [3]?[*:0]const u16 = .{ font_config.family_bold, font_config.family_italic, font_config.family_bold_italic };
     const synthesize: [3]bool = .{ font_config.synthesize_bold, font_config.synthesize_italic, font_config.synthesize_bold_italic };
-    const effective_style = computeEffectiveStyle(&self.dwrite_factory.IDWriteFactory, effective_primary, style_primaries, synthesize, font_config.style_specs);
-    const set = createTextFormatSet(
+    const effective_style = font_mod.computeEffectiveStyle(&self.dwrite_factory.IDWriteFactory, effective_primary, style_primaries, synthesize, font_config.style_specs);
+    const set = font_mod.createTextFormatSet(
         self.dwrite_factory,
         self.dpi,
         effective_primary,
@@ -1011,7 +353,7 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
     self.effective_user_fallbacks = effective_user_fallbacks;
     self.effective_codepoint_maps = font_config.codepoint_maps;
 
-    const new_cs = measureCellSize(&self.dwrite_factory.IDWriteFactory, self.dpi, effective_primary, effective_font_size_pt);
+    const new_cs = font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, self.dpi, effective_primary, effective_font_size_pt);
     self.cell_size = new_cs;
     self.cell_size_xy = .{
         .x = @intCast(new_cs.cx),
@@ -1051,7 +393,7 @@ pub fn deinit(self: *D3d11Renderer) void {
     self.context.Flush();
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
-    releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
     _ = self.rendering_params.IUnknown.Release();
     _ = self.dwrite_factory.IUnknown.Release();
     _ = self.const_buf.IUnknown.Release();
@@ -1073,6 +415,7 @@ pub fn render(
     cursor_text: ?u24,
     selection_bg: ?u24,
     selection_fg: ?u24,
+    background_opacity: f32,
 ) void {
     const sz = win32.getClientSize(hwnd);
     const client_w: u32 = @intCast(sz.cx);
@@ -1131,7 +474,7 @@ pub fn render(
     // Hoist per-frame atlas setup out of the per-cell loop; the cache /
     // texture state is identical for every cell in a single frame.
     // Also produces `tex_cell_count` needed by the const-buffer below.
-    const atlas = self.setupGlyphAtlas();
+    const atlas = glyph_mod.setupGlyphAtlas(self);
     const glyph_cache = atlas.cache;
     const tex_cell_count = atlas.tex_cell_count;
 
@@ -1186,18 +529,24 @@ pub fn render(
 
     // Build cell buffer from terminal state
     const cell_count = shader_col * shader_row;
-    const blank_glyph = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single, .style = .regular });
+    const blank_glyph = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, ' ', &.{}, .single, .regular);
 
     // Effective default fg/bg come from the terminal's dynamic colors (seeded
     // from the theme at tab creation, overridable live by OSC 10/11), falling
     // back to the module constants only if somehow unset.
-    const eff_fg: u24 = if (term.colors.foreground.get()) |c| rgbToU24(c) else fallback_fg;
-    const eff_bg: u24 = if (term.colors.background.get()) |c| rgbToU24(c) else fallback_bg;
+    var eff_fg: u24 = if (term.colors.foreground.get()) |c| color.rgbToU24(c) else gpu.fallback_fg;
+    var eff_bg: u24 = if (term.colors.background.get()) |c| color.rgbToU24(c) else gpu.fallback_bg;
+    if (term.modes.get(.reverse_colors)) {
+        const tmp = eff_fg;
+        eff_fg = eff_bg;
+        eff_bg = tmp;
+    }
+    const opacity_byte: u8 = @intFromFloat(@round(std.math.clamp(background_opacity, 0.0, 1.0) * 255.0));
     const bg_rgba: Rgba8 = .{
         .r = @intCast((eff_bg >> 16) & 0xFF),
         .g = @intCast((eff_bg >> 8) & 0xFF),
         .b = @intCast(eff_bg & 0xFF),
-        .a = 0,
+        .a = opacity_byte,
     };
 
     const cells_recreated = self.shader_cells.updateCount(self.device, cell_count);
@@ -1218,7 +567,10 @@ pub fn render(
             .glyph_index = blank_glyph,
             .background = bg_rgba,
             .foreground = bg_rgba,
+            .attrs = 0,
         };
+        const blink_visible = @mod(@divFloor(std.time.milliTimestamp(), 500), 2) == 0;
+        var has_blink = false;
 
         // Tab bar in shader row 0.
         {
@@ -1227,9 +579,10 @@ pub fn render(
                 if (col < tab_bar.len) {
                     const tb = tab_bar[col];
                     scratch[col] = .{
-                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = tb.codepoint, .half = .single, .style = .regular }),
+                        .glyph_index = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, tb.codepoint, &.{}, .single, .regular),
                         .background = tb.bg,
                         .foreground = tb.fg,
+                        .attrs = 0,
                     };
                 } else {
                     scratch[col] = blank_cell;
@@ -1299,11 +652,11 @@ pub fn render(
             // left one.
             const cursor_visible = screen.viewportIsBottom() and term.modes.get(.cursor_visible);
             const cursor_on_row = cursor_visible and screen.cursor.y == screen_row;
-            const cursor_bg_rgba = Rgba8.fromU24(if (term.colors.cursor.get()) |c| rgbToU24(c) else eff_fg);
+            const cursor_bg_rgba = Rgba8.fromU24(if (term.colors.cursor.get()) |c| color.rgbToU24(c) else eff_fg);
             const cursor_fg_rgba = Rgba8.fromU24(cursor_text orelse eff_bg);
 
             var col: u32 = 0;
-            for (page_cells) |cell| {
+            for (page_cells, 0..) |cell, cell_i| {
                 if (col >= shader_col) break;
                 if (cell.wide == .spacer_tail) {
                     // Already written by the .wide cell handler
@@ -1315,6 +668,10 @@ pub fn render(
                     .bg_color_palette, .bg_color_rgb => ' ',
                 };
                 const codepoint: u21 = if (raw_cp == 0) ' ' else raw_cp;
+                const grapheme: []const u21 = if (cell.content_tag == .codepoint_grapheme)
+                    page.lookupGrapheme(&page_cells[cell_i]) orelse &.{}
+                else
+                    &.{};
 
                 var cell_fg: u24 = eff_fg;
                 var cell_bg: u24 = eff_bg;
@@ -1325,13 +682,25 @@ pub fn render(
                 var is_default_bg = true;
                 var bold = false;
                 var italic = false;
+                var faint = false;
+                var invisible = false;
+                var attrs: u32 = 0;
 
                 if (cell.style_id != 0) {
                     const style = page.styles.get(page.memory, cell.style_id).*;
-                    cell_fg = resolveColor(style.fg_color, palette, eff_fg);
-                    cell_bg = resolveColor(style.bg_color, palette, eff_bg);
+                    cell_fg = color.resolveColor(style.fg_color, palette, eff_fg);
+                    cell_bg = color.resolveColor(style.bg_color, palette, eff_bg);
                     bold = style.flags.bold;
                     italic = style.flags.italic;
+                    faint = style.flags.faint;
+                    invisible = style.flags.invisible;
+                    if (style.flags.blink) {
+                        has_blink = true;
+                        if (!blink_visible) invisible = true;
+                    }
+                    attrs |= @as(u32, @intFromEnum(style.flags.underline)) & gpu.cell_attr_underline_mask;
+                    if (style.flags.strikethrough) attrs |= gpu.cell_attr_strikethrough;
+                    if (style.flags.overline) attrs |= gpu.cell_attr_overline;
                     if (style.flags.inverse) {
                         const tmp = cell_fg;
                         cell_fg = cell_bg;
@@ -1347,7 +716,7 @@ pub fn render(
 
                 switch (cell.content_tag) {
                     .bg_color_palette => {
-                        cell_bg = rgbToU24(palette[cell.content.color_palette]);
+                        cell_bg = color.rgbToU24(palette[cell.content.color_palette]);
                         is_default_bg = false;
                     },
                     .bg_color_rgb => {
@@ -1357,9 +726,12 @@ pub fn render(
                     },
                     else => {},
                 }
+                if (emoji.isColorGlyphRun(codepoint, grapheme)) attrs |= gpu.cell_attr_color_glyph;
+                if (invisible) attrs |= gpu.cell_attr_invisible;
 
                 var bg = if (is_default_bg) bg_rgba else Rgba8.fromU24(cell_bg);
-                var fg = Rgba8.fromU24(cell_fg);
+                if (faint) cell_fg = color.dimColor(cell_fg);
+                var fg = if (invisible) bg else Rgba8.fromU24(cell_fg);
 
                 // Highlight selected cells (with fade)
                 if (sel_row_range) |r| {
@@ -1371,8 +743,8 @@ pub fn render(
                         target_bg.a = 255;
                         var target_fg = if (selection_fg) |s| Rgba8.fromU24(s) else orig_bg;
                         target_fg.a = 255;
-                        bg = lerpRgba8(orig_bg, target_bg, selection_fade);
-                        fg = lerpRgba8(fg, target_fg, selection_fade);
+                        bg = color.lerpRgba8(orig_bg, target_bg, selection_fade);
+                        fg = color.lerpRgba8(fg, target_fg, selection_fade);
                     }
                 }
 
@@ -1384,16 +756,17 @@ pub fn render(
                     fg = cursor_fg_rgba;
                 }
 
-                const style_kind = self.effective_style[@intFromEnum(styleFromFlags(bold, italic))];
+                const style_kind = self.effective_style[@intFromEnum(glyph_mod.styleFromFlags(bold, italic))];
 
                 if (cell.wide == .wide) {
                     // One DirectWrite render for both halves; see
                     // generateWidePair.
-                    const pair = self.generateWidePair(glyph_cache, tex_cell_count, codepoint, style_kind);
+                    const pair = glyph_mod.generateWidePair(self, glyph_cache, tex_cell_count, codepoint, grapheme, style_kind);
                     scratch[col] = .{
                         .glyph_index = pair.left,
                         .background = bg,
                         .foreground = fg,
+                        .attrs = attrs,
                     };
                     col += 1;
                     if (col < shader_col) {
@@ -1401,6 +774,7 @@ pub fn render(
                             .glyph_index = pair.right,
                             .background = bg,
                             .foreground = fg,
+                            .attrs = attrs,
                         };
                     }
                     col += 1;
@@ -1413,14 +787,15 @@ pub fn render(
                 // alignment gaps, bg_color_* cells which already normalize to
                 // ' ' above). Trailing-blank and empty-row fills are handled
                 // by the @memset paths below.
-                const glyph_index = if (codepoint == ' ')
+                const glyph_index = if (codepoint == ' ' and grapheme.len == 0)
                     blank_glyph
                 else
-                    self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = codepoint, .half = .single, .style = style_kind });
+                    glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, codepoint, grapheme, .single, style_kind);
                 scratch[col] = .{
                     .glyph_index = glyph_index,
                     .background = bg,
                     .foreground = fg,
+                    .attrs = attrs,
                 };
                 col += 1;
             }
@@ -1479,9 +854,10 @@ pub fn render(
                 var bx: u32 = box_x;
                 while (bx < box_x + box_w and bx < shader_col) : (bx += 1) {
                     scratch[bx] = .{
-                        .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ' ', .half = .single, .style = .regular }),
+                        .glyph_index = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, ' ', &.{}, .single, .regular),
                         .background = overlay_bg,
                         .foreground = overlay_fg,
+                        .attrs = 0,
                     };
                 }
                 // Text on the middle row only.
@@ -1490,15 +866,22 @@ pub fn render(
                         const tcol = tx + @as(u32, @intCast(i));
                         if (tcol < shader_col) {
                             scratch[tcol] = .{
-                                .glyph_index = self.generateGlyph(glyph_cache, tex_cell_count, .{ .codepoint = ch, .half = .single, .style = .regular }),
+                                .glyph_index = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, ch, &.{}, .single, .regular),
                                 .background = overlay_bg,
                                 .foreground = overlay_fg,
+                                .attrs = 0,
                             };
                         }
                     }
                 }
                 self.uploadCellRow(dst_row_offset, scratch, true);
             }
+        }
+
+        if (has_blink) {
+            _ = win32.SetTimer(hwnd, types.TIMER_TEXT_BLINK, 250, null);
+        } else {
+            _ = win32.KillTimer(hwnd, types.TIMER_TEXT_BLINK);
         }
     }
 
@@ -1533,469 +916,10 @@ pub fn render(
     }
 }
 
-// --- Glyph generation ---
-
-// Frame-invariant glyph atlas setup. Call once per render() so the
-// per-cell generateGlyph path does only the cache lookup + miss work.
-// Recreates the cache if the cell size changed or the atlas texture
-// was reallocated.
-const AtlasFrame = struct {
-    cache: *GlyphIndexCache,
-    tex_cell_count: CellXY,
-};
-
-fn setupGlyphAtlas(self: *D3d11Renderer) AtlasFrame {
-    const cs = self.cell_size_xy;
-    const tex_cell_count = getTextureMaxCellCount(cs);
-    const tex_total: u32 = @as(u32, tex_cell_count.x) * @as(u32, tex_cell_count.y);
-
-    const tex_pixel: CellXY = .{
-        .x = tex_cell_count.x * cs.x,
-        .y = tex_cell_count.y * cs.y,
-    };
-    const tex_retained = self.glyph_texture.updateSize(self.device, tex_pixel);
-
-    const cache_valid = if (self.glyph_cache_cell_size) |s| s.eql(cs) else false;
-    self.glyph_cache_cell_size = cs;
-
-    if (!tex_retained or !cache_valid) {
-        if (self.glyph_cache) |*c| {
-            c.deinit(self.glyph_cache_arena.allocator());
-            _ = self.glyph_cache_arena.reset(.retain_capacity);
-            self.glyph_cache = null;
-        }
-    }
-
-    if (self.glyph_cache == null) {
-        self.glyph_cache = GlyphIndexCache.init(
-            self.glyph_cache_arena.allocator(),
-            tex_total,
-        ) catch oom(error.OutOfMemory);
-    }
-
-    const cache = &self.glyph_cache.?;
-    cache.beginFrame();
-    return .{ .cache = cache, .tex_cell_count = tex_cell_count };
-}
-
-fn generateGlyph(
-    self: *D3d11Renderer,
-    cache: *GlyphIndexCache,
-    tex_cell_count: CellXY,
-    key: GlyphIndexCache.Key,
-) u32 {
-    const cs = self.cell_size_xy;
-
-    switch (cache.reserve(self.glyph_cache_arena.allocator(), key) catch oom(error.OutOfMemory)) {
-        .newly_reserved => |reserved| {
-            const pos = cellPosFromIndex(reserved.index, tex_cell_count.x);
-            const coord: CellXY = .{ .x = cs.x * pos.x, .y = cs.y * pos.y };
-
-            // Sprite fast path: tile-design codepoints (Block Elements, Box
-            // Drawing, Braille, Powerline, Geometric Shapes, Legacy Computing)
-            // are rendered procedurally by ghostty's sprite drawing code so
-            // they tile seamlessly regardless of the font's natural advance.
-            // Block elements out of a font would get squashed by the narrow-
-            // Latin cell width and break Claude Code's block-art logo.
-            //
-            // Render failures must NOT silently return — the reserved atlas
-            // slot would otherwise display stale pixels from the evicted
-            // glyph. OOM is fatal; any other error falls through to the
-            // DirectWrite path so we render *something* into the slot.
-            sprite_path: {
-                if (!sprite.hasCodepoint(key.codepoint)) break :sprite_path;
-                self.uploadSpriteToAtlas(key, coord) catch |err| switch (err) {
-                    error.OutOfMemory => oom(error.OutOfMemory),
-                    else => {
-                        std.log.warn("sprite render U+{X} failed ({s}); falling back to DirectWrite", .{ key.codepoint, @errorName(err) });
-                        break :sprite_path;
-                    },
-                };
-                return reserved.index;
-            }
-
-            const staging = self.renderGlyphToStaging(key.codepoint, key.style, key.half != .single);
-            const src_left: u32 = if (key.half == .wide_right) cs.x else 0;
-            self.copyStagingHalfToAtlas(staging, src_left, coord);
-            return reserved.index;
-        },
-        .already_reserved => |index| return index,
-    }
-}
-
-// Reserve and populate both halves of a wide glyph using a single DirectWrite
-// render. Calling generateGlyph separately for wide_left / wide_right would
-// run CreateTextLayout + DrawTextLayout twice with identical staging output —
-// only the half copied out differs. One render + up-to-two copies cuts the
-// first-paint cost for CJK / emoji when either half is uncached.
-//
-// Sprite codepoints fall back to per-half generateGlyph: the sprite path has
-// its own scratch-buffer layout, and folding both halves there is left to a
-// separate change to keep this one minimal.
-fn generateWidePair(
-    self: *D3d11Renderer,
-    cache: *GlyphIndexCache,
-    tex_cell_count: CellXY,
-    codepoint: u21,
-    style: GlyphIndexCache.Style,
-) struct { left: u32, right: u32 } {
-    if (sprite.hasCodepoint(codepoint)) {
-        return .{
-            .left = self.generateGlyph(cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_left, .style = style }),
-            .right = self.generateGlyph(cache, tex_cell_count, .{ .codepoint = codepoint, .half = .wide_right, .style = style }),
-        };
-    }
-
-    const cs = self.cell_size_xy;
-    const arena = self.glyph_cache_arena.allocator();
-    // Reserve left first. The unconditional `cache.touch(left_index)` below
-    // is load-bearing: `reserve`'s per-frame dampening can skip moveToBack
-    // for a hit whose slot was already promoted earlier this frame, so left
-    // may sit near the LRU front. Without the touch, the upcoming right
-    // reserve's miss path would evict `self.front` and could clobber left's
-    // own slot, leaving left_index pointing at right's pixels.
-    const left_res = cache.reserve(arena, .{ .codepoint = codepoint, .half = .wide_left, .style = style }) catch oom(error.OutOfMemory);
-    const left_index = switch (left_res) {
-        .newly_reserved => |r| r.index,
-        .already_reserved => |idx| idx,
-    };
-    const left_miss = switch (left_res) {
-        .newly_reserved => true,
-        .already_reserved => false,
-    };
-    cache.touch(left_index);
-
-    const right_res = cache.reserve(arena, .{ .codepoint = codepoint, .half = .wide_right, .style = style }) catch oom(error.OutOfMemory);
-    const right_index = switch (right_res) {
-        .newly_reserved => |r| r.index,
-        .already_reserved => |idx| idx,
-    };
-    const right_miss = switch (right_res) {
-        .newly_reserved => true,
-        .already_reserved => false,
-    };
-
-    if (left_miss or right_miss) {
-        const staging = self.renderGlyphToStaging(codepoint, style, true);
-        if (left_miss) {
-            const pos = cellPosFromIndex(left_index, tex_cell_count.x);
-            self.copyStagingHalfToAtlas(staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
-        }
-        if (right_miss) {
-            const pos = cellPosFromIndex(right_index, tex_cell_count.x);
-            self.copyStagingHalfToAtlas(staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
-        }
-    }
-
-    return .{ .left = left_index, .right = right_index };
-}
-
-// Render `codepoint` into the staging texture. The staging is always 2 cells
-// wide; single glyphs occupy [0, cs.x), wide glyphs occupy the full width.
-// Returns the staging so the caller can copy the half(ves) it needs.
-fn renderGlyphToStaging(
-    self: *D3d11Renderer,
-    codepoint: u21,
-    style: GlyphIndexCache.Style,
-    is_wide: bool,
-) *StagingTexture.Cached {
-    const cs = self.cell_size_xy;
-    const staging_size: CellXY = .{ .x = cs.x * 2, .y = cs.y };
-    const staging = self.staging_texture.getOrCreate(self.device, self.d2d_factory, staging_size);
-
-    var utf8_buf: [4]u8 = undefined;
-    const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch 1;
-
-    var utf16_buf: [2]u16 = undefined;
-    const utf16_len = std.unicode.utf8ToUtf16Le(&utf16_buf, utf8_buf[0..utf8_len]) catch 0;
-
-    const target_width: f32 = @floatFromInt(
-        if (is_wide) cs.x * @as(u16, 2) else cs.x,
-    );
-    const cs_y_f: f32 = @floatFromInt(cs.y);
-
-    // Ambiguous EAW symbols (● ✶ ★ etc. outside the sprite range) render in
-    // a single cell with ink-bounds best-fit + center alignment + center-
-    // anchored uniform scale. This produces round (not squashed) symbols of
-    // consistent size within a row, matching WezTerm's per-cell layout where
-    // every ● looks the same regardless of what surrounds it.
-    const is_ambiguous_symbol = sprite.isAmbiguousOverflow(codepoint);
-
-    // IDWriteTextLayout lets us measure the rendered ink before drawing.
-    // Style index picks bold / italic / bold-italic text formats; these
-    // share the regular family today and differ only by synthetic
-    // weight/oblique applied by DirectWrite.
-    const text_format = self.text_formats[@intFromEnum(style)];
-    var layout: *win32.IDWriteTextLayout = undefined;
-    {
-        const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
-            @ptrCast(utf16_buf[0..utf16_len].ptr),
-            @intCast(utf16_len),
-            text_format,
-            target_width,
-            cs_y_f,
-            &layout,
-        );
-        if (hr < 0) fatalHr("CreateTextLayout", hr);
-    }
-    defer _ = layout.IUnknown.Release();
-
-    // For ambiguous symbols, center the glyph in its single cell so the
-    // center-anchored scale transform expands uniformly around the cell
-    // centre. Alignment must be set BEFORE measuring so the overhang values
-    // reflect the centered layout.
-    if (is_ambiguous_symbol) {
-        const ahr = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
-        if (ahr < 0) fatalHr("SetTextAlignment", ahr);
-        const pahr = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        if (pahr < 0) fatalHr("SetParagraphAlignment", pahr);
-    }
-
-    var m: win32.DWRITE_TEXT_METRICS = undefined;
-    {
-        const hr = layout.GetMetrics(&m);
-        if (hr < 0) fatalHr("GetMetrics", hr);
-    }
-    var oh: win32.DWRITE_OVERHANG_METRICS = undefined;
-    {
-        const hr = layout.GetOverhangMetrics(&oh);
-        if (hr < 0) fatalHr("GetOverhangMetrics", hr);
-    }
-
-    // Two scale policies share the rendering setup below:
-    //
-    //   * Non-ambiguous (CJK real wide, Latin, fallback narrow glyphs
-    //     in a single cell): only scale DOWN when natural advance
-    //     exceeds the target cell width. fit_width captures advance +
-    //     right ink overhang so CLIP doesn't chop overhanging strokes.
-    //
-    //   * Ambiguous symbols (●✶★ etc.): ink-box best-fit within the
-    //     single cell, allow scale > 1 to enlarge narrow naturals so
-    //     the glyph fills the cell instead of sitting tiny and
-    //     left-aligned. Cap at SCALE_CAP = 2.0 so a 1-pixel glyph
-    //     can't blow up into a giant blur.
-    const SCALE_CAP: f32 = 2.0;
-    const content_right = m.left + @max(m.width, m.widthIncludingTrailingWhitespace);
-    const overhang_right = m.layoutWidth + @max(0.0, oh.right);
-    const fit_width = @max(content_right, overhang_right);
-
-    // Ink bounds via raw (signed) overhangs against the layout box;
-    // negative overhang = ink inset from box edge. Same formula works
-    // for LEFT and CENTER alignment because overhangs adjust to the
-    // text's position within the box.
-    const ink_w = m.layoutWidth + oh.left + oh.right;
-    const ink_h = m.layoutHeight + oh.top + oh.bottom;
-    const ink_ok = ink_w > 0 and ink_h > 0 and std.math.isFinite(ink_w) and std.math.isFinite(ink_h);
-
-    const raw_scale: f32 = if (is_ambiguous_symbol) blk: {
-        if (!ink_ok) break :blk 1.0;
-        const sw = target_width / ink_w;
-        const sh = cs_y_f / ink_h;
-        break :blk @min(@min(sw, sh), SCALE_CAP);
-    } else if (fit_width > target_width and fit_width > 0)
-        target_width / fit_width
-    else
-        1.0;
-    // Snap near-unity to 1.0 to skip a no-op transform.
-    const need_scale = @abs(raw_scale - 1.0) > 0.001;
-    const scale: f32 = if (need_scale) raw_scale else 1.0;
-
-    if (need_scale and !is_ambiguous_symbol) {
-        // Non-ambiguous scale-down path: expand the layout box so the
-        // CLIP boundary == fit_width pre-scale, becoming target_width
-        // post-scale. Ambiguous-symbol path leaves the layout box at
-        // the original target_width because center alignment + center
-        // anchor handle positioning without box expansion.
-        const hr = layout.SetMaxWidth(fit_width);
-        if (hr < 0) fatalHr("SetMaxWidth", hr);
-    }
-
-    // Invariant: every render starts from identity transform & CLEARTYPE.
-    // The staging RT is reused across cache misses, so leaking state
-    // between calls would corrupt subsequent glyphs.
-    const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
-        .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0,
-    } } };
-    staging.render_target.SetTransform(&identity);
-    staging.render_target.SetTextRenderingParams(self.rendering_params);
-    staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
-    staging.render_target.BeginDraw();
-    {
-        // Opaque black background; rendering white-on-black through
-        // ClearType yields per-subpixel coverage as the stored RGB
-        // (white·cov + black·(1-cov) = cov). The shader decodes via
-        // `c*c` (gamma 2.0) to undo D2D's gamma encode. Grayscale
-        // fills R=G=B equally, so the same decode still produces
-        // uniform coverage.
-        const color: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
-        staging.render_target.Clear(&color);
-    }
-
-    if (need_scale) {
-        // ClearType subpixel hinting assumes 1:1 horizontal mapping;
-        // any fractional scale would produce colored fringes. Grayscale
-        // antialiasing has no subpixel directionality.
-        staging.render_target.SetTextAntialiasMode(.GRAYSCALE);
-
-        // Three anchor strategies, chosen by glyph context:
-        //   ambiguous symbol  → center anchor (cell centre stays fixed
-        //     so round shapes like ● stay visually centered)
-        //   single, non-ambiguous → horizontal-only (m22 = 1, dy = 0)
-        //     preserves vertical fill so non-sprite tile-design glyphs
-        //     (rare math / line-drawing chars outside the sprite face)
-        //     still touch the top and bottom of the cell.
-        //   wide, non-ambiguous → uniform + baseline anchor (CJK /
-        //     emoji) so the scaled glyph shares a baseline with
-        //     un-scaled Latin in adjacent cells.
-        const scale_mat: win32.D2D_MATRIX_3X2_F = if (is_ambiguous_symbol) blk: {
-            const cx = target_width / 2.0;
-            const cy = cs_y_f / 2.0;
-            break :blk .{ .Anonymous = .{ .Anonymous1 = .{
-                .m11 = scale,
-                .m12 = 0,
-                .m21 = 0,
-                .m22 = scale,
-                .dx = cx * (1.0 - scale),
-                .dy = cy * (1.0 - scale),
-            } } };
-        } else if (!is_wide) .{
-            .Anonymous = .{ .Anonymous1 = .{
-                .m11 = scale,
-                .m12 = 0,
-                .m21 = 0,
-                .m22 = 1,
-                .dx = 0,
-                .dy = 0,
-            } },
-        } else blk: {
-            var lm: [1]win32.DWRITE_LINE_METRICS = undefined;
-            var line_count: u32 = 0;
-            const lhr = layout.GetLineMetrics(&lm, 1, &line_count);
-            if (lhr < 0) fatalHr("GetLineMetrics", lhr);
-            const baseline: f32 = if (line_count >= 1) lm[0].baseline else 0;
-            break :blk .{ .Anonymous = .{ .Anonymous1 = .{
-                .m11 = scale,
-                .m12 = 0,
-                .m21 = 0,
-                .m22 = scale,
-                .dx = 0,
-                .dy = baseline * (1.0 - scale),
-            } } };
-        };
-        staging.render_target.SetTransform(&scale_mat);
-    }
-
-    // CLIP boundary semantics:
-    //   non-ambiguous → CLIP at the (expanded) layout box, which the
-    //                   scale-down transform shrinks back to target_w.
-    //   ambiguous     → no CLIP. With scale > 1 + center alignment
-    //                   the scaled ink may briefly extend past the
-    //                   layout box; the staging texture acts as the
-    //                   natural drawing bound.
-    const draw_options: win32.D2D1_DRAW_TEXT_OPTIONS = if (is_ambiguous_symbol)
-        .{} // no options
-    else
-        win32.D2D1_DRAW_TEXT_OPTIONS_CLIP;
-    staging.render_target.DrawTextLayout(
-        .{ .x = 0, .y = 0 },
-        layout,
-        &staging.white_brush.ID2D1Brush,
-        draw_options,
-    );
-
-    // Reset before EndDraw so the next cache-miss starts clean.
-    staging.render_target.SetTransform(&identity);
-    if (need_scale) staging.render_target.SetTextAntialiasMode(.CLEARTYPE);
-
-    var tag1: u64 = undefined;
-    var tag2: u64 = undefined;
-    const ehr = staging.render_target.EndDraw(&tag1, &tag2);
-    if (ehr < 0) fatalHr("EndDraw", ehr);
-
-    return staging;
-}
-
-fn copyStagingHalfToAtlas(
-    self: *D3d11Renderer,
-    staging: *StagingTexture.Cached,
-    src_left: u32,
-    dst_coord: CellXY,
-) void {
-    const cs = self.cell_size_xy;
-    const box: win32.D3D11_BOX = .{
-        .left = src_left,
-        .top = 0,
-        .front = 0,
-        .right = src_left + cs.x,
-        .bottom = cs.y,
-        .back = 1,
-    };
-    self.context.CopySubresourceRegion(
-        &self.glyph_texture.obj.?.ID3D11Resource,
-        0,
-        dst_coord.x,
-        dst_coord.y,
-        0,
-        &staging.texture.ID3D11Resource,
-        0,
-        &box,
-    );
-}
-
-// Render a sprite (Block Elements / Box Drawing / Braille / Powerline /
-// Geometric Shapes / Legacy Computing) into a CPU BGRA buffer, then copy
-// the half indicated by `key.half` directly into the atlas slot at `coord`.
-//
-// Wide sprites are rasterized full-width (2*cs.x) once and the appropriate
-// half is uploaded; matches the same .wide_left / .wide_right split used by
-// the DirectWrite path.
-fn uploadSpriteToAtlas(self: *D3d11Renderer, key: GlyphIndexCache.Key, coord: CellXY) !void {
-    const cs = self.cell_size_xy;
-    const sprite_cell_w: u32 = if (key.half != .single) @as(u32, cs.x) * 2 else cs.x;
-    const sprite_cell_h: u32 = cs.y;
-
-    var scratch_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    defer scratch_arena.deinit();
-    const arena_alloc = scratch_arena.allocator();
-
-    const scratch = try arena_alloc.alloc(u8, sprite_cell_w * sprite_cell_h * 4);
-    const metrics = sprite.buildMetrics(sprite_cell_w, sprite_cell_h);
-    // Errors propagate so the dispatch site can fall back to DirectWrite for
-    // any non-OOM failure. hasCodepoint already gated entry, so a false
-    // return from render would mean ranges/dispatch disagree — unreachable.
-    const rendered = try sprite.render(arena_alloc, key.codepoint, sprite_cell_w, sprite_cell_h, metrics, scratch);
-    std.debug.assert(rendered);
-
-    // Pick the half-cell slice of the scratch buffer that corresponds to
-    // this atlas slot. The source row pitch stays sprite_cell_w*4 so
-    // UpdateSubresource walks the full row and only copies cs.x*4 bytes per
-    // row starting at the offset we pass via src pointer arithmetic.
-    const src_offset_x: u32 = if (key.half == .wide_right) cs.x else 0;
-    const src_row_pitch: u32 = sprite_cell_w * 4;
-    const src_ptr: [*]const u8 = scratch.ptr + (src_offset_x * 4);
-
-    const dst_box: win32.D3D11_BOX = .{
-        .left = coord.x,
-        .top = coord.y,
-        .front = 0,
-        .right = coord.x + cs.x,
-        .bottom = coord.y + cs.y,
-        .back = 1,
-    };
-    self.context.UpdateSubresource(
-        &self.glyph_texture.obj.?.ID3D11Resource,
-        0,
-        &dst_box,
-        @ptrCast(src_ptr),
-        src_row_pitch,
-        0,
-    );
-}
-
 // --- Swap chain ---
 
 fn initSwapChain(self: *D3d11Renderer, hwnd: win32.HWND, width: u32, height: u32) *win32.IDXGISwapChain2 {
-    const dxgi_device = queryInterface(self.device, win32.IDXGIDevice);
+    const dxgi_device = com.queryInterface(self.device, win32.IDXGIDevice);
     defer _ = dxgi_device.IUnknown.Release();
     var adapter: *win32.IDXGIAdapter = undefined;
     {
@@ -2111,297 +1035,6 @@ fn createRenderTargetView(
     return target_view;
 }
 
-// --- Internal types ---
-
-const ShaderCells = struct {
-    count: u32 = 0,
-    cell_buf: *win32.ID3D11Buffer = undefined,
-    cell_view: *win32.ID3D11ShaderResourceView = undefined,
-
-    /// Returns true when the underlying buffer was (re)created, signaling
-    /// the caller that the CPU shadow must be reseeded by a forced full
-    /// upload this frame.
-    fn updateCount(self: *ShaderCells, device: *win32.ID3D11Device, count: u32) bool {
-        if (count == self.count) return false;
-        self.release();
-        if (count > 0) {
-            const buf_desc: win32.D3D11_BUFFER_DESC = .{
-                .ByteWidth = count * @sizeOf(shader.Cell),
-                // DEFAULT + UpdateSubresource: row-level partial writes,
-                // unchanged rows skipped via shadow diff. Previously DYNAMIC
-                // + Map(WRITE_DISCARD) forced full-buffer rewrite per frame.
-                .Usage = .DEFAULT,
-                .BindFlags = .{ .SHADER_RESOURCE = 1 },
-                .CPUAccessFlags = .{},
-                .MiscFlags = .{ .BUFFER_STRUCTURED = 1 },
-                .StructureByteStride = @sizeOf(shader.Cell),
-            };
-            const hr = device.CreateBuffer(&buf_desc, null, &self.cell_buf);
-            if (hr < 0) fatalHr("CreateCellBuffer", hr);
-
-            const view_desc: win32.D3D11_SHADER_RESOURCE_VIEW_DESC = .{
-                .Format = .UNKNOWN,
-                .ViewDimension = ._SRV_DIMENSION_BUFFER,
-                .Anonymous = .{
-                    .Buffer = .{
-                        .Anonymous1 = .{ .FirstElement = 0 },
-                        .Anonymous2 = .{ .NumElements = count },
-                    },
-                },
-            };
-            const hr2 = device.CreateShaderResourceView(
-                &self.cell_buf.ID3D11Resource,
-                &view_desc,
-                &self.cell_view,
-            );
-            if (hr2 < 0) fatalHr("CreateCellView", hr2);
-        }
-        self.count = count;
-        return true;
-    }
-
-    fn release(self: *ShaderCells) void {
-        if (self.count != 0) {
-            _ = self.cell_view.IUnknown.Release();
-            _ = self.cell_buf.IUnknown.Release();
-            self.count = 0;
-        }
-    }
-};
-
-const GlyphTexture = struct {
-    size: ?CellXY = null,
-    obj: ?*win32.ID3D11Texture2D = null,
-    view: ?*win32.ID3D11ShaderResourceView = null,
-
-    fn updateSize(self: *GlyphTexture, device: *win32.ID3D11Device, size: CellXY) bool {
-        if (self.size) |s| {
-            if (s.eql(size)) return true;
-            self.release();
-        }
-
-        const desc: win32.D3D11_TEXTURE2D_DESC = .{
-            .Width = size.x,
-            .Height = size.y,
-            .MipLevels = 1,
-            .ArraySize = 1,
-            .Format = .B8G8R8A8_UNORM,
-            .SampleDesc = .{ .Count = 1, .Quality = 0 },
-            .Usage = .DEFAULT,
-            .BindFlags = .{ .SHADER_RESOURCE = 1 },
-            .CPUAccessFlags = .{},
-            .MiscFlags = .{},
-        };
-        var obj: *win32.ID3D11Texture2D = undefined;
-        const hr = device.CreateTexture2D(&desc, null, &obj);
-        if (hr < 0) fatalHr("CreateGlyphTexture", hr);
-        self.obj = obj;
-
-        var view: *win32.ID3D11ShaderResourceView = undefined;
-        const hr2 = device.CreateShaderResourceView(&obj.ID3D11Resource, null, &view);
-        if (hr2 < 0) fatalHr("CreateGlyphView", hr2);
-        self.view = view;
-
-        self.size = size;
-        return false;
-    }
-
-    fn release(self: *GlyphTexture) void {
-        if (self.view) |v| _ = v.IUnknown.Release();
-        if (self.obj) |o| _ = o.IUnknown.Release();
-        self.view = null;
-        self.obj = null;
-        self.size = null;
-    }
-};
-
-const StagingTexture = struct {
-    const Cached = struct {
-        size: CellXY,
-        texture: *win32.ID3D11Texture2D,
-        render_target: *win32.ID2D1RenderTarget,
-        white_brush: *win32.ID2D1SolidColorBrush,
-    };
-    cached: ?Cached = null,
-
-    fn getOrCreate(
-        self: *StagingTexture,
-        device: *win32.ID3D11Device,
-        d2d_factory: *win32.ID2D1Factory,
-        size: CellXY,
-    ) *Cached {
-        if (self.cached) |*c| {
-            if (c.size.eql(size)) return c;
-            self.release();
-        }
-
-        var texture: *win32.ID3D11Texture2D = undefined;
-        {
-            const desc: win32.D3D11_TEXTURE2D_DESC = .{
-                .Width = size.x,
-                .Height = size.y,
-                .MipLevels = 1,
-                .ArraySize = 1,
-                .Format = .B8G8R8A8_UNORM,
-                .SampleDesc = .{ .Count = 1, .Quality = 0 },
-                .Usage = .DEFAULT,
-                .BindFlags = .{ .RENDER_TARGET = 1 },
-                .CPUAccessFlags = .{},
-                .MiscFlags = .{},
-            };
-            const hr = device.CreateTexture2D(&desc, null, &texture);
-            if (hr < 0) fatalHr("CreateStagingTexture", hr);
-        }
-
-        const dxgi_surface = queryInterface(texture, win32.IDXGISurface);
-        defer _ = dxgi_surface.IUnknown.Release();
-
-        var render_target: *win32.ID2D1RenderTarget = undefined;
-        {
-            // IGNORE alpha mode: D2D treats the surface as opaque so it will
-            // emit ClearType (it falls back to grayscale on alpha-aware
-            // targets). The opaque-black clear below provides the contrast
-            // needed to extract per-channel coverage from the RGB values.
-            // Pin DPI to 96 so IDWriteTextLayout's DIP-based maxWidth/maxHeight
-            // map 1:1 to staging-texture pixels (cell metrics are in pixels).
-            const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
-                .type = .DEFAULT,
-                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
-                .dpiX = 96.0,
-                .dpiY = 96.0,
-                .usage = .{},
-                .minLevel = .DEFAULT,
-            };
-            const hr = d2d_factory.CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &render_target);
-            if (hr < 0) fatalHr("CreateDxgiSurfaceRenderTarget", hr);
-        }
-
-        // Set pixel unit mode
-        const dc = queryInterface(render_target, win32.ID2D1DeviceContext);
-        defer _ = dc.IUnknown.Release();
-        dc.SetUnitMode(win32.D2D1_UNIT_MODE_PIXELS);
-
-        var white_brush: *win32.ID2D1SolidColorBrush = undefined;
-        {
-            const hr = render_target.CreateSolidColorBrush(
-                &.{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
-                null,
-                &white_brush,
-            );
-            if (hr < 0) fatalHr("CreateBrush", hr);
-        }
-
-        self.cached = .{
-            .size = size,
-            .texture = texture,
-            .render_target = render_target,
-            .white_brush = white_brush,
-        };
-        return &self.cached.?;
-    }
-
-    fn release(self: *StagingTexture) void {
-        if (self.cached) |*c| {
-            _ = c.white_brush.IUnknown.Release();
-            _ = c.render_target.IUnknown.Release();
-            _ = c.texture.IUnknown.Release();
-            self.cached = null;
-        }
-    }
-};
-
-// --- Helpers ---
-
-fn compileShaderBlob(
-    source: []const u8,
-    entry: [*:0]const u8,
-    target: [*:0]const u8,
-) *win32.ID3DBlob {
-    var blob: *win32.ID3DBlob = undefined;
-    var error_blob: ?*win32.ID3DBlob = null;
-    const hr = win32.D3DCompile(
-        source.ptr,
-        source.len,
-        "terminal.hlsl",
-        null,
-        null,
-        entry,
-        target,
-        0,
-        0,
-        @ptrCast(&blob),
-        @ptrCast(&error_blob),
-    );
-    if (error_blob) |err| {
-        defer _ = err.IUnknown.Release();
-        if (err.GetBufferPointer()) |buf_ptr| {
-            const ptr: [*]const u8 = @ptrCast(buf_ptr);
-            const str = ptr[0..err.GetBufferSize()];
-            log.err("shader error:\n{s}", .{str});
-        }
-    }
-    if (hr < 0) fatalHr("D3DCompile", hr);
-    return blob;
-}
-
-fn getTextureMaxCellCount(cell_size: CellXY) CellXY {
-    // Cap the atlas to 4096² (≈64 MiB at BGRA8). At typical cell sizes this
-    // holds ~75k glyphs, far above any realistic terminal session. Each
-    // dimension is clamped to ≥2 because GlyphIndexCache requires at least
-    // two nodes (head + tail) for its circular-list bookkeeping.
-    const max_dim: u32 = 4096;
-    const cx: u32 = @max(2, @divTrunc(max_dim, @as(u32, cell_size.x)));
-    const cy: u32 = @max(2, @divTrunc(max_dim, @as(u32, cell_size.y)));
-    return .{ .x = @intCast(cx), .y = @intCast(cy) };
-}
-
-fn cellPosFromIndex(index: u32, column_count: u16) CellXY {
-    return .{
-        .x = @intCast(index % column_count),
-        .y = @intCast(@divTrunc(index, column_count)),
-    };
-}
-
-fn queryInterface(obj: anytype, comptime Interface: type) *Interface {
-    const iid_name = comptime blk: {
-        const name = @typeName(Interface);
-        const start = if (std.mem.lastIndexOfScalar(u8, name, '.')) |i| (i + 1) else 0;
-        break :blk "IID_" ++ name[start..];
-    };
-    const iid = @field(win32, iid_name);
-    var iface: *Interface = undefined;
-    const hr = obj.IUnknown.QueryInterface(iid, @ptrCast(&iface));
-    if (hr < 0) fatalHr("QueryInterface", hr);
-    return iface;
-}
-
-
-fn resolveColor(c: vt.Style.Color, palette: *const vt.color.Palette, default: u24) u24 {
-    return switch (c) {
-        .none => default,
-        .palette => |idx| rgbToU24(palette[idx]),
-        .rgb => |rgb| rgbToU24(rgb),
-    };
-}
-
-fn rgbToU24(rgb: vt.color.RGB) u24 {
-    return @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
-}
-
-// Ordinal MUST match GlyphIndexCache.Style. Kept here (not in
-// GlyphIndexCache) because flags->style is a renderer-layer mapping, while
-// the enum itself is a pure cache-key concern.
-fn styleFromFlags(bold: bool, italic: bool) GlyphIndexCache.Style {
-    if (bold and italic) return .bold_italic;
-    if (bold) return .bold;
-    if (italic) return .italic;
-    return .regular;
-}
-
-fn fatalHr(what: []const u8, hresult: win32.HRESULT) noreturn {
-    std.debug.panic("{s} failed, hresult=0x{x}", .{ what, @as(u32, @bitCast(hresult)) });
-}
-
 /// Grow `shadow_cells` to hold `count` entries. Returns true on grow so the
 /// caller forces a full upload that frame (newly-allocated tail is undefined
 /// and would otherwise alias a stale row's content). Shrinks are kept as-is:
@@ -2450,23 +1083,4 @@ fn uploadCellRow(
         0,
     );
     @memcpy(shadow_row, scratch);
-}
-
-fn lerpRgba8(a: Rgba8, b: Rgba8, t: f32) Rgba8 {
-    return .{
-        .r = lerpU8(a.r, b.r, t),
-        .g = lerpU8(a.g, b.g, t),
-        .b = lerpU8(a.b, b.b, t),
-        .a = lerpU8(a.a, b.a, t),
-    };
-}
-
-fn lerpU8(a: u8, b: u8, t: f32) u8 {
-    const af: f32 = @floatFromInt(a);
-    const bf: f32 = @floatFromInt(b);
-    return @intFromFloat(af + (bf - af) * t);
-}
-
-fn oom(e: error{OutOfMemory}) noreturn {
-    @panic(@errorName(e));
 }

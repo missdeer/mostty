@@ -9,10 +9,30 @@ pub const Half = enum(u2) { single, wide_left, wide_right };
 // with bold/italic as sparse syntax/prompt embellishments.
 pub const Style = enum(u2) { regular, bold, italic, bold_italic };
 
-pub const Key = packed struct(u25) {
-    codepoint: u21,
+pub const Key = struct {
+    hash_a: u64,
+    hash_b: u64,
+    len: u16,
     half: Half,
     style: Style,
+
+    pub fn init(first: u21, rest: []const u21, half: Half, style: Style) Key {
+        var h_a = std.hash.Wyhash.init(0);
+        h_a.update(std.mem.asBytes(&first));
+        h_a.update(std.mem.sliceAsBytes(rest));
+
+        var h_b = std.hash.Wyhash.init(0x9e3779b97f4a7c15);
+        h_b.update(std.mem.asBytes(&first));
+        h_b.update(std.mem.sliceAsBytes(rest));
+
+        return .{
+            .hash_a = h_a.final(),
+            .hash_b = h_b.final(),
+            .len = @intCast(1 + rest.len),
+            .half = half,
+            .style = style,
+        };
+    }
 };
 
 const Node = struct {
@@ -159,10 +179,10 @@ test "touch promotes a dampened slot past the next miss-eviction" {
 
     cache.beginFrame();
 
-    const k_a: Key = .{ .codepoint = 'a', .half = .single, .style = .regular };
-    const k_b: Key = .{ .codepoint = 'b', .half = .single, .style = .regular };
-    const k_c: Key = .{ .codepoint = 'c', .half = .single, .style = .regular };
-    const k_d: Key = .{ .codepoint = 'd', .half = .single, .style = .regular };
+    const k_a: Key = .init('a', &.{}, .single, .regular);
+    const k_b: Key = .init('b', &.{}, .single, .regular);
+    const k_c: Key = .init('c', &.{}, .single, .regular);
+    const k_d: Key = .init('d', &.{}, .single, .regular);
 
     const ra = try cache.reserve(allocator, k_a);
     const idx_a = switch (ra) {
@@ -197,6 +217,35 @@ test "touch promotes a dampened slot past the next miss-eviction" {
     // b must have been the eviction victim.
     const rb_after = try cache.reserve(allocator, k_b);
     try std.testing.expect(switch (rb_after) {
+        .newly_reserved => true,
+        .already_reserved => false,
+    });
+}
+
+test "grapheme keys include full codepoint sequence" {
+    const allocator = std.testing.allocator;
+    var cache = try GlyphIndexCache.init(allocator, 4);
+    defer cache.deinit(allocator);
+
+    cache.beginFrame();
+
+    const thumbs_up: Key = .init(0x1F44D, &.{}, .single, .regular);
+    const thumbs_up_medium_skin: Key = .init(0x1F44D, &.{0x1F3FD}, .single, .regular);
+    const family: Key = .init(0x1F468, &.{ 0x200D, 0x1F469, 0x200D, 0x1F467 }, .wide_left, .regular);
+
+    const a = try cache.reserve(allocator, thumbs_up);
+    const b = try cache.reserve(allocator, thumbs_up_medium_skin);
+    const c = try cache.reserve(allocator, family);
+
+    try std.testing.expect(switch (a) {
+        .newly_reserved => true,
+        .already_reserved => false,
+    });
+    try std.testing.expect(switch (b) {
+        .newly_reserved => true,
+        .already_reserved => false,
+    });
+    try std.testing.expect(switch (c) {
         .newly_reserved => true,
         .already_reserved => false,
     });

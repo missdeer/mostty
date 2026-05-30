@@ -174,6 +174,7 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
     tab.term.* = vt.Terminal.init(tab.term_arena.allocator(), .{
         .cols = cell_count.col,
         .rows = cell_count.row,
+        .default_modes = .{ .grapheme_cluster = true },
     }) catch |e| std.debug.panic("Terminal.init: {}", .{e});
     global.config.theme.applyToNewTerminal(tab.term);
 

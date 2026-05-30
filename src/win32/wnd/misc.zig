@@ -33,6 +33,10 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         _ = win32.KillTimer(hwnd, types.TIMER_CONFIG_RELOAD);
         reloadConfig(hwnd);
     }
+    if (wparam == types.TIMER_TEXT_BLINK) {
+        const window = global_mod.windowFromHwnd(hwnd);
+        window.requestRender();
+    }
     return 0;
 }
 

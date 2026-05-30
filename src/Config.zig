@@ -39,14 +39,35 @@ pub const FontStyle = union(enum) {
     named: []const u8,
 };
 
+const default_palette: [256]vt.color.RGB = palette: {
+    var p = vt.color.default;
+    p[0] = u24ToRgb(0x000000);
+    p[1] = u24ToRgb(0xff0000);
+    p[2] = u24ToRgb(0x00ff00);
+    p[3] = u24ToRgb(0xffff00);
+    p[4] = u24ToRgb(0x0000ff);
+    p[5] = u24ToRgb(0xff00ff);
+    p[6] = u24ToRgb(0x00ffff);
+    p[7] = u24ToRgb(0xc0c0c0);
+    p[8] = u24ToRgb(0x808080);
+    p[9] = u24ToRgb(0xff0000);
+    p[10] = u24ToRgb(0x00ff00);
+    p[11] = u24ToRgb(0xffff00);
+    p[12] = u24ToRgb(0x0000ff);
+    p[13] = u24ToRgb(0xff00ff);
+    p[14] = u24ToRgb(0x00ffff);
+    p[15] = u24ToRgb(0xffffff);
+    break :palette p;
+};
+
 // Resolved theme/color state. Pure value type (no arena-backed pointers) so it
 // survives the Config arena being freed on hot-reload, and can be copied into
-// the renderer / each tab's vt color state cheaply. `palette` defaults to the
-// standard xterm-256 table (vt.color.default already fills 0-15 named, 16-231
-// the 6x6x6 cube, 232-255 gray ramp), so themes that only set 0-15 keep a sane
-// extended palette instead of black.
+// the renderer / each tab's vt color state cheaply. The default palette keeps
+// vt's xterm 256-color cube/ramp for 16-255, but uses saturated ANSI 0-15 so
+// 4-bit SGR colors match common terminal compatibility screenshots. Themes and
+// explicit `palette = N=#RRGGBB` entries still override these values.
 pub const ThemeColors = struct {
-    palette: [256]vt.color.RGB = vt.color.default,
+    palette: [256]vt.color.RGB = default_palette,
     foreground: u24 = 0xc8c4d0,
     background: u24 = 0x2a2a2a,
     cursor_color: ?u24 = null,
@@ -100,6 +121,10 @@ font_size_pt: ?f32 = null,
 font_codepoint_maps: []const CodepointMap = &.{},
 launchers: []const Launcher = &.{},
 theme: ThemeColors = .{},
+// Default cell background alpha (0..1). Anything <1 lets the DWM blur-behind
+// show through under non-themed cells; cells with an explicit `bg_color_*`
+// stay opaque so highlighted regions remain readable.
+background_opacity: f32 = 0.94,
 
 arena: ?std.heap.ArenaAllocator = null,
 
@@ -170,6 +195,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var style_italic: FontStyle = .default;
     var style_bold_italic: FontStyle = .default;
     var font_size_pt: ?f32 = null;
+    var background_opacity: f32 = 0.94;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
     var theme: ThemeColors = .{};
@@ -251,6 +277,16 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             font_size_pt = n;
+        } else if (std.mem.eql(u8, key, "background-opacity")) {
+            const n = std.fmt.parseFloat(f32, value) catch {
+                std.log.warn("config: {s}:{}: invalid background-opacity '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+            if (!(n >= 0.0 and n <= 1.0)) {
+                std.log.warn("config: {s}:{}: background-opacity must be in [0,1] (got {d})", .{ source_name, line_no, n });
+                continue;
+            }
+            background_opacity = n;
         } else if (std.mem.eql(u8, key, "font-codepoint-map")) {
             parseCodepointMap(a, value, &codepoint_maps) catch {
                 std.log.warn("config: {s}:{}: invalid font-codepoint-map '{s}'", .{ source_name, line_no, value });
@@ -283,6 +319,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .font_codepoint_maps = codepoint_maps_slice,
         .launchers = launchers_slice,
         .theme = theme,
+        .background_opacity = background_opacity,
         .arena = arena,
     };
 }
