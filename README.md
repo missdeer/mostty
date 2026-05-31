@@ -1,6 +1,6 @@
 <h1>
 <p align="center">
-  <img width="256" height="206" alt="CuteMostty" src="src/mostty.png" />
+  <img width="256" height="256" alt="CuteMostty" src="src/mostty.png" />
   <br>Mostty
 </p>
 </h1>
