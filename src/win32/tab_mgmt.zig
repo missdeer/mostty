@@ -7,6 +7,7 @@ const cp_mod = @import("child_process.zig");
 const err_mod = @import("error.zig");
 const global_mod = @import("global.zig");
 const state = @import("state.zig");
+const tooltip = @import("tooltip.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 const vt_stream_mod = @import("vt_stream.zig");
@@ -39,6 +40,7 @@ fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
     const n = @min(title.len, tab.title_buf.len);
     @memcpy(tab.title_buf[0..n], title[0..n]);
     tab.title_len = n;
+    tooltip.refreshIfShowing(window, tab);
     window.requestRender();
 }
 
@@ -251,6 +253,7 @@ pub fn destroyTab(window: *Window, tab: *Tab) void {
     // destroyTab once findById returns null, and the eventual free can't
     // be observed via findIndexById from a re-entrant message.
     tab.closing = true;
+    tooltip.hide(window);
     const removed_idx_opt = window.findIndexById(tab.id);
     if (removed_idx_opt) |idx| {
         _ = window.tabs.orderedRemove(idx);

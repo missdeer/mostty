@@ -3,6 +3,7 @@ const win32 = @import("win32").everything;
 
 const global_mod = @import("../global.zig");
 const tab_mgmt = @import("../tab_mgmt.zig");
+const tooltip = @import("../tooltip.zig");
 const types = @import("../types.zig");
 
 const TabId = types.TabId;
@@ -26,6 +27,7 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
         const gpa = global.gpa.allocator();
         window.active_theme_name = gpa.dupe(u8, name) catch null;
     }
+    tooltip.create(window);
     tab_mgmt.newTab(window);
     return 0;
 }
@@ -49,6 +51,7 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
 
 pub fn onDestroy(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     if (global.window) |*window| {
+        tooltip.destroy(window);
         tab_mgmt.destroyAllTabs(window);
         if (window.active_theme_name) |s| {
             global.gpa.allocator().free(s);

@@ -52,6 +52,20 @@ pub const Window = struct {
     scrollbar_drag_offset: f32 = 0,
     resizing: bool = false,
     tab_bar_hover: ?TabHit = null,
+    // Native Win32 tooltip control for tab-bar hover; null if creation failed.
+    // Owned by this Window — destroyed in WM_DESTROY.
+    tooltip_hwnd: ?win32.HWND = null,
+    // Whether the tooltip is currently in the activated/visible state. Tracked
+    // separately so we only send TTM_TRACKACTIVATE on transitions.
+    tooltip_active: bool = false,
+    // Tab id the tooltip currently displays text for; null if no text set yet
+    // or the displayed tab was closed. Used to skip redundant text updates as
+    // the mouse moves inside the same tab cell.
+    tooltip_tab_id: ?TabId = null,
+    // Persistent UTF-16 backing for the tooltip text. Its address is passed
+    // to the tooltip control via TTM_UPDATETIPTEXTW, so the buffer must live
+    // for the tooltip's lifetime.
+    tooltip_text_buf: [512]u16 = undefined,
     // True while a close-confirmation MessageBox is up. The modal pumps
     // messages, so a second WM_CLOSE (e.g. Alt+F4 hammering) or another
     // tab-bar 'x' click could otherwise stack a nested dialog.

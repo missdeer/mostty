@@ -10,6 +10,7 @@ const paste = @import("../paste.zig");
 const state = @import("../state.zig");
 const tab_bar = @import("../tab_bar.zig");
 const tab_mgmt = @import("../tab_mgmt.zig");
+const tooltip = @import("../tooltip.zig");
 const types = @import("../types.zig");
 const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
@@ -179,6 +180,7 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
 
     // Tab bar gets first dibs on a fresh click.
     if (mouse_y < cs.cy) {
+        tooltip.hide(window);
         const cell_count = window_geom.computeGridCellCount(hwnd, cs);
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
         switch (hit) {
@@ -322,6 +324,7 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
 
     // Capture in progress takes priority over tab-bar hover.
     if (window.mouse_capture != .none) {
+        tooltip.hide(window);
         const grid_mouse_y = mouse_y - cs.cy;
         switch (window.mouse_capture) {
             .none => {},
@@ -366,11 +369,21 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
             window.mouse_in_scrollbar = false;
             window.requestRender();
         }
+        if (tooltip.hitTabIndex(hit)) |idx| {
+            if (idx < window.tabs.items.len) {
+                tooltip.showForTab(window, window.tabs.items[idx], mouse_x, mouse_y);
+            } else {
+                tooltip.hide(window);
+            }
+        } else {
+            tooltip.hide(window);
+        }
         return 0;
     } else if (window.tab_bar_hover != null) {
         window.tab_bar_hover = null;
         window.requestRender();
     }
+    tooltip.hide(window);
 
     if (reportMotion(window, hwnd, mouse_x, mouse_y, true)) return 0;
 
@@ -380,6 +393,14 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
         window.requestRender();
     }
     return 0;
+}
+
+// Hide the tab-bar tooltip when this window loses focus (Alt+Tab, popup menu
+// activation, another app coming to front). Without this the tracking tooltip
+// stays visible on top of whatever the user just switched to.
+pub fn onKillFocus(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    tooltip.hide(global_mod.windowFromHwnd(hwnd));
+    return null;
 }
 
 pub fn onMouseLeave(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
@@ -393,6 +414,7 @@ pub fn onMouseLeave(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.L
         window.tab_bar_hover = null;
         window.requestRender();
     }
+    tooltip.hide(window);
     return 0;
 }
 
@@ -402,6 +424,7 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.cell_size;
     if (mouse_y < cs.cy) {
+        tooltip.hide(window);
         const cell_count = window_geom.computeGridCellCount(hwnd, cs);
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
         if (hit == .new_tab) {

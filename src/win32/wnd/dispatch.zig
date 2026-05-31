@@ -32,6 +32,11 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = win32.WM_MOUSEWHEEL, .handler = &mouse.onMouseWheel },
     .{ .msg = win32.WM_MOUSEMOVE, .handler = &mouse.onMouseMove },
     .{ .msg = win32.WM_MOUSELEAVE, .handler = &mouse.onMouseLeave },
+    // Menu activation (system menu, theme submenu, launcher) and other
+    // mode-cancel events don't fire WM_KILLFOCUS; route them through the
+    // same hide handler so the tracking tooltip doesn't get stuck.
+    .{ .msg = win32.WM_KILLFOCUS, .handler = &mouse.onKillFocus },
+    .{ .msg = win32.WM_CANCELMODE, .handler = &mouse.onKillFocus },
     .{ .msg = win32.WM_RBUTTONDOWN, .handler = &mouse.onRButtonDown },
     .{ .msg = win32.WM_RBUTTONUP, .handler = &mouse.onRButtonUp },
     // keyboard
