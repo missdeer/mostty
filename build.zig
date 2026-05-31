@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
 
     const main = b.path("src/mosttywindows.zig");
     const exe = b.addExecutable(.{
-        .name = "mostty",
+        .name = "Mostty",
         .root_module = b.createModule(.{
             .root_source_file = main,
             .target = target,

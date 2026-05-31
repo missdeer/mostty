@@ -1,12 +1,12 @@
-# mostty Configuration
+# Mostty Configuration
 
-mostty is configured through a single plain-text config file. There are no
+Mostty is configured through a single plain-text config file. There are no
 working command-line options today; everything below lives in the config file.
 
 ## File location
 
 ```
-%LOCALAPPDATA%\mostty\config
+%LOCALAPPDATA%\Mostty\config
 ```
 
 The file has no extension. You can open (and create) it from the window's system
@@ -19,7 +19,7 @@ file and its parent folder if missing.
 - UTF-8. A leading UTF-8 BOM (added by some Windows editors) is tolerated.
 - There is **no comment syntax**. A line without `=` is reported as a warning
   and skipped, so do not use `#`/`//` comment lines.
-- Unknown keys produce a warning. A small set of Ghostty keys that mostty has no
+- Unknown keys produce a warning. A small set of Ghostty keys that Mostty has no
   feature for is accepted-and-ignored silently (so a ported Ghostty config does
   not spam warnings): `split-*`, `search-*`, `window-titlebar-*`,
   `unfocused-split-fill`, `palette-generate`, `palette-harmonious`, `config-file`,
@@ -83,7 +83,7 @@ font for CJK / icons / emoji.
 
 ### `font-style` / `font-style-bold` / `font-style-italic` / `font-style-bold-italic`
 
-Pin a specific named face within the chosen family. mostty looks up the face
+Pin a specific named face within the chosen family. Mostty looks up the face
 by its **en-us** face name (case-insensitive), reads its real weight / slant /
 stretch, and uses those instead of DirectWrite's synthetic defaults.
 
@@ -102,7 +102,7 @@ text format instead.
 font-style-italic = false
 ```
 
-If the named face doesn't exist in the family, mostty warns and keeps the
+If the named face doesn't exist in the family, Mostty warns and keeps the
 slot's natural attributes (synthesizing per `font-synthetic-style`).
 
 Known limitation: only the en-us face name table is matched. Localized face
@@ -128,7 +128,7 @@ them into the regular atlas slots, so no redundant rasterization).
 
 Known limitation: only the PRIMARY family of each slot is checked. Fallback
 faces inside the chain may still be per-glyph synthesized by DirectWrite —
-mitigating that would require a shaping pipeline mostty does not have.
+mitigating that would require a shaping pipeline Mostty does not have.
 
 ### `font-codepoint-map`
 
@@ -168,7 +168,7 @@ theme = C:\Users\me\my-theme
 theme = light:Rose Pine Dawn, dark:Rose Pine
 ```
 
-**Variant selection.** With the `light:`/`dark:` form, mostty picks the variant
+**Variant selection.** With the `light:`/`dark:` form, Mostty picks the variant
 that matches the current Windows *Apps* light/dark mode
 (`HKCU\…\Themes\Personalize\AppsUseLightTheme`) and **automatically re-selects**
 when you toggle Windows light/dark mode at runtime. If only one of the two is
@@ -176,9 +176,9 @@ given, that one is used.
 
 **Theme search order** (a bare name, not an absolute path):
 
-1. `%LOCALAPPDATA%\mostty\themes\<name>` — your overrides.
+1. `%LOCALAPPDATA%\Mostty\themes\<name>` — your overrides.
 2. `<exe directory>\themes\<name>` — the bundled themes shipped next to
-   `mostty.exe` (installed by `zig build`).
+   `Mostty.exe` (installed by `zig build`).
 
 A theme file uses the exact same `key = value` color keys listed below. `theme`
 and `config-file` keys inside a theme file are ignored (no recursion).

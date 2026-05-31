@@ -22,8 +22,8 @@ BEGIN
         //VALUE "FileDescription",    "???"
         //VALUE "FileVersion",        VERSION
         //VALUE "LegalCopyright",     "(C) 2024 ???"
-        VALUE "OriginalFilename", "mostty.exe"
-        VALUE "ProductName",        "mostty"
+        VALUE "OriginalFilename", "Mostty.exe"
+        VALUE "ProductName",        "Mostty"
         //VALUE "ProductVersion",     VERSION
         END
     END

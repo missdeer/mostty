@@ -3,7 +3,6 @@ const win32 = @import("win32").everything;
 const vt = @import("vt");
 
 const types = @import("types.zig");
-const util = @import("util.zig");
 const cp_mod = @import("child_process.zig");
 const vt_stream_mod = @import("vt_stream.zig");
 
@@ -99,16 +98,6 @@ pub const Window = struct {
     pub fn onActiveChanged(self: *Window) void {
         self.selection_fade = 0;
         _ = win32.KillTimer(self.hwnd, types.TIMER_SELECTION_FADE);
-        self.refreshWindowTitle();
         self.requestRender();
-    }
-
-    pub fn refreshWindowTitle(self: *Window) void {
-        const tab = self.active();
-        if (tab.title_len == 0) {
-            _ = win32.SetWindowTextW(self.hwnd, win32.L("Mostty"));
-            return;
-        }
-        util.setWindowTitleFromUtf8(self.hwnd, tab.title_buf[0..tab.title_len]);
     }
 };

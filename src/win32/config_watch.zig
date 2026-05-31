@@ -1,4 +1,4 @@
-// Watches %LOCALAPPDATA%/mostty for changes to the `config` file and pokes the
+// Watches %LOCALAPPDATA%/Mostty for changes to the `config` file and pokes the
 // UI thread (WM_APP_CONFIG_CHANGED) so it can hot-reload. Runs on a detached
 // thread blocked in ReadDirectoryChangesW; the process exits via ExitProcess,
 // so there's no graceful shutdown/join — the OS reaps the blocked thread.

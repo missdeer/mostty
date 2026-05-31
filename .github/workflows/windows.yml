@@ -36,12 +36,12 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item zig-out/bin/mostty.exe dist/
-          if (Test-Path zig-out/bin/mostty.pdb) { Copy-Item zig-out/bin/mostty.pdb dist/ }
+          Copy-Item zig-out/bin/Mostty.exe dist/
+          if (Test-Path zig-out/bin/Mostty.pdb) { Copy-Item zig-out/bin/Mostty.pdb dist/ }
           Copy-Item zig-out/bin/themes dist/themes -Recurse
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mostty-windows-x86_64-${{ matrix.optimize }}
+          name: Mostty-windows-x86_64-${{ matrix.optimize }}
           path: dist/
           if-no-files-found: error

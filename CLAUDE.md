@@ -65,7 +65,7 @@ Default to surfacing uncertainty, not hiding it.
 
 Requires Zig `0.15.2`. Windows-only. Dependencies are declared in `build.zig.zon`; `win32` is marked `lazy = true`.
 
-- `zig build` — build the `mostty` executable into `zig-out/bin/`.
+- `zig build` — build the `Mostty` executable into `zig-out/bin/`.
 - `zig build run -- [args]` — build and run; everything after `--` is forwarded as cmdline args (see `src/Cmdline.zig`: `--ttf <path>`, `--font-size <float>`).
 - `zig build test` — run the unit test step (compiles the same root file as the exe; there are very few tests today).
 - `zig build -Doptimize=ReleaseSmall` — what the README's "less than 2 MB" Windows binary refers to.

@@ -29,6 +29,8 @@ fn tabFromEffectHandler(handler: *vt.TerminalStream.Handler) *Tab {
 // stream_terminal Handler has no user context, so walk back through the
 // Stream's `handler` field to the owning Tab via @fieldParentPtr. The
 // Window comes from the singleton `global.window` (set once in WM_CREATE).
+// Only the per-tab title (shown in the tab bar) is updated; the main
+// window title bar is kept fixed at "Mostty" (set at window creation).
 fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
     if (global.window == null) return;
     const window: *Window = &global.window.?;
@@ -37,9 +39,6 @@ fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
     const n = @min(title.len, tab.title_buf.len);
     @memcpy(tab.title_buf[0..n], title[0..n]);
     tab.title_len = n;
-    if (window.tabs.items[window.active_index] == tab) {
-        util.setWindowTitleFromUtf8(window.hwnd, tab.title_buf[0..tab.title_len]);
-    }
     window.requestRender();
 }
 

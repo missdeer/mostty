@@ -2,7 +2,7 @@ const Config = @This();
 
 // Used when the user's config has no `theme = X` line (or no config at all).
 // Resolved via the normal theme search path, so users can drop a same-named
-// override into %LOCALAPPDATA%/mostty/themes to customize without editing
+// override into %LOCALAPPDATA%/Mostty/themes to customize without editing
 // the binary.
 pub const default_theme_name = "Ghostty Default Style Dark";
 
@@ -168,12 +168,12 @@ background_opacity: f32 = 0.94,
 
 arena: ?std.heap.ArenaAllocator = null,
 
-// The default config location, %LOCALAPPDATA%/mostty/config. Returns null when
+// The default config location, %LOCALAPPDATA%/Mostty/config. Returns null when
 // LOCALAPPDATA is unset. Caller owns the returned slice.
 pub fn defaultPath(gpa: std.mem.Allocator) ?[]const u8 {
     const localappdata = std.process.getEnvVarOwned(gpa, "LOCALAPPDATA") catch return null;
     defer gpa.free(localappdata);
-    return std.fs.path.join(gpa, &.{ localappdata, "mostty", "config" }) catch oom();
+    return std.fs.path.join(gpa, &.{ localappdata, "Mostty", "config" }) catch oom();
 }
 
 pub fn loadDefault(gpa: std.mem.Allocator) Config {
@@ -566,7 +566,7 @@ fn applyThemeFile(gpa: std.mem.Allocator, theme: *ThemeColors, value: []const u8
         gpa.dupe(u8, name) catch oom()
     else
         findThemeFile(gpa, name) orelse {
-            std.log.warn("config: theme '{s}' not found in %LOCALAPPDATA%/mostty/themes or <exe>/themes", .{name});
+            std.log.warn("config: theme '{s}' not found in %LOCALAPPDATA%/Mostty/themes or <exe>/themes", .{name});
             return;
         };
     defer gpa.free(path);
@@ -607,7 +607,7 @@ pub fn loadThemeColorsByName(gpa: std.mem.Allocator, name: []const u8) ?ThemeCol
         gpa.dupe(u8, name) catch oom()
     else
         findThemeFile(gpa, name) orelse {
-            std.log.warn("theme '{s}' not found in %LOCALAPPDATA%/mostty/themes or <exe>/themes", .{name});
+            std.log.warn("theme '{s}' not found in %LOCALAPPDATA%/Mostty/themes or <exe>/themes", .{name});
             return null;
         };
     defer gpa.free(path);
@@ -634,7 +634,7 @@ pub fn listThemeNames(gpa: std.mem.Allocator) [][]u8 {
 
     if (std.process.getEnvVarOwned(gpa, "LOCALAPPDATA")) |lad| {
         defer gpa.free(lad);
-        const dir = std.fs.path.join(gpa, &.{ lad, "mostty", "themes" }) catch oom();
+        const dir = std.fs.path.join(gpa, &.{ lad, "Mostty", "themes" }) catch oom();
         defer gpa.free(dir);
         appendThemesFromDir(gpa, dir, &names);
     } else |_| {}
@@ -726,12 +726,12 @@ fn systemPrefersDark() bool {
     return data == 0;
 }
 
-// Searches the theme name under %LOCALAPPDATA%/mostty/themes then <exeDir>/themes.
+// Searches the theme name under %LOCALAPPDATA%/Mostty/themes then <exeDir>/themes.
 // Returns the first existing path (caller owns it) or null.
 fn findThemeFile(gpa: std.mem.Allocator, name: []const u8) ?[]const u8 {
     if (std.process.getEnvVarOwned(gpa, "LOCALAPPDATA")) |lad| {
         defer gpa.free(lad);
-        const p = std.fs.path.join(gpa, &.{ lad, "mostty", "themes", name }) catch oom();
+        const p = std.fs.path.join(gpa, &.{ lad, "Mostty", "themes", name }) catch oom();
         if (fileExists(p)) return p;
         gpa.free(p);
     } else |_| {}

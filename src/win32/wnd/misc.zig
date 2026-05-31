@@ -397,7 +397,7 @@ fn setActiveThemeName(window: *Window, name: ?[]const u8) void {
     }
 }
 
-// Opens %LOCALAPPDATA%/mostty/config in notepad.exe, creating an empty file
+// Opens %LOCALAPPDATA%/Mostty/config in notepad.exe, creating an empty file
 // (and its parent dir) first if it does not exist yet.
 fn openSettingsFile(hwnd: win32.HWND) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
