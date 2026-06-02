@@ -297,7 +297,23 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
             return 0;
         }
     }
-    const scroll_lines: isize = if (delta > 0) -3 else 3;
+    // WM_MOUSEWHEEL delta is a multiple of WHEEL_DELTA (120) for classic
+    // mice (one notch = 120), but hi-res wheels and precision touchpads
+    // emit many messages with small deltas per physical notch. Accumulate
+    // until we cross a notch boundary so scroll speed matches the wheel,
+    // not the message rate.
+    const WHEEL_DELTA: i32 = 120;
+    // Reset on direction reversal: a stale sub-notch residual in the
+    // opposite direction would otherwise cancel part of the new flick
+    // and swallow a notch the user physically produced.
+    if ((delta > 0 and window.wheel_accum < 0) or (delta < 0 and window.wheel_accum > 0)) {
+        window.wheel_accum = 0;
+    }
+    window.wheel_accum += @as(i32, delta);
+    const notches = @divTrunc(window.wheel_accum, WHEEL_DELTA);
+    if (notches == 0) return 0;
+    window.wheel_accum -= notches * WHEEL_DELTA;
+    const scroll_lines: isize = -@as(isize, notches) * 3;
     const screen = tab.term.screens.active;
     screen.scroll(.{ .delta_row = scroll_lines });
     window.requestRender();

@@ -50,6 +50,11 @@ pub const Window = struct {
     // tab mid-drag; null when no mouse-report capture is in flight.
     mouse_report_tab_id: ?TabId = null,
     scrollbar_drag_offset: f32 = 0,
+    // Accumulates sub-notch WM_MOUSEWHEEL deltas for the local-scroll path.
+    // Hi-res wheels / precision touchpads deliver many messages with small
+    // deltas per physical notch; without accumulation each message would
+    // scroll a full step and the viewport would race.
+    wheel_accum: i32 = 0,
     resizing: bool = false,
     tab_bar_hover: ?TabHit = null,
     // Native Win32 tooltip control for tab-bar hover; null if creation failed.
