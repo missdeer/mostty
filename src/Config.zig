@@ -150,6 +150,11 @@ font_style_bold: FontStyle = .default,
 font_style_italic: FontStyle = .default,
 font_style_bold_italic: FontStyle = .default,
 font_size_pt: ?f32 = null,
+// Tab-bar-only font overrides. Empty/null means "inherit the terminal
+// font-family / font-size". Only the primary family is used; the tab bar's
+// fallback chain reuses the terminal font's fallbacks.
+tabbar_font_family: []const u8 = &.{},
+tabbar_font_size_pt: ?f32 = null,
 font_codepoint_maps: []const CodepointMap = &.{},
 launchers: []const Launcher = &.{},
 theme: ThemeColors = .{},
@@ -235,6 +240,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var style_italic: FontStyle = .default;
     var style_bold_italic: FontStyle = .default;
     var font_size_pt: ?f32 = null;
+    var tabbar_font_family: []const u8 = &.{};
+    var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
@@ -331,6 +338,28 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             font_size_pt = n;
+        } else if (std.mem.eql(u8, key, "tabbar-font-family")) {
+            // Only the primary family drives the tab bar; the rest of any
+            // comma list is ignored (the terminal fallback chain covers gaps).
+            // Reset first so an empty value clears a prior line (empty == inherit).
+            tabbar_font_family = &.{};
+            var vit = std.mem.splitScalar(u8, value, ',');
+            while (vit.next()) |v| {
+                const name = std.mem.trim(u8, v, " \t");
+                if (name.len == 0) continue;
+                tabbar_font_family = a.dupe(u8, name) catch oom();
+                break;
+            }
+        } else if (std.mem.eql(u8, key, "tabbar-font-size")) {
+            const n = std.fmt.parseFloat(f32, value) catch {
+                std.log.warn("config: {s}:{}: invalid tabbar-font-size '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+            if (!(n > 0)) {
+                std.log.warn("config: {s}:{}: tabbar-font-size must be positive (got {d})", .{ source_name, line_no, n });
+                continue;
+            }
+            tabbar_font_size_pt = n;
         } else if (std.mem.eql(u8, key, "background-opacity")) {
             const n = std.fmt.parseFloat(f32, value) catch {
                 std.log.warn("config: {s}:{}: invalid background-opacity '{s}'", .{ source_name, line_no, value });
@@ -370,6 +399,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .font_style_italic = style_italic,
         .font_style_bold_italic = style_bold_italic,
         .font_size_pt = font_size_pt,
+        .tabbar_font_family = tabbar_font_family,
+        .tabbar_font_size_pt = tabbar_font_size_pt,
         .font_codepoint_maps = codepoint_maps_slice,
         .launchers = launchers_slice,
         .theme = theme,

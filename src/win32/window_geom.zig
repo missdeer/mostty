@@ -2,11 +2,18 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 
 const d3d11 = @import("d3d11.zig");
+const global_mod = @import("global.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 const state = @import("state.zig");
 
 const GridPos = types.GridPos;
+
+// Pixel height reserved at the top for the tab-bar band. Single source of truth
+// so geometry/input never re-derive "one cell row".
+pub fn tabBarHeight() i32 {
+    return global_mod.global.renderer.tab_bar_height;
+}
 
 pub const WindowPlacementOptions = struct {
     left: ?i32 = null,
@@ -105,8 +112,8 @@ pub fn calcWindowRect(
 ) win32.RECT {
     const client_inset = util.getClientInset(dpi);
     const scrollbar_px: i32 = d3d11.scrollbarWidth(dpi);
-    // Reserve one cell row for the tab bar before snapping.
-    const tabbar_h: i32 = cell_size.cy;
+    // Reserve the tab-bar band height before snapping the grid to whole cells.
+    const tabbar_h: i32 = tabBarHeight();
     const bounding_client_size: win32.SIZE = .{
         .cx = (bounding_rect.right - bounding_rect.left) - client_inset.cx,
         .cy = (bounding_rect.bottom - bounding_rect.top) - client_inset.cy,
@@ -157,7 +164,7 @@ pub fn computeGridCellCount(hwnd: win32.HWND, cs: win32.SIZE) GridPos {
     const client_size = win32.getClientSize(hwnd);
     const sb_px: i32 = d3d11.scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w = client_size.cx -| sb_px;
-    const grid_h = @max(0, client_size.cy - cs.cy); // reserve one row for tab bar
+    const grid_h = @max(0, client_size.cy - tabBarHeight()); // reserve the tab-bar band
     return .{
         .col = @intCast(@max(1, @divTrunc(grid_w, cs.cx))),
         .row = @intCast(@max(1, @divTrunc(grid_h, cs.cy))),

@@ -106,9 +106,10 @@ pub fn onGetDpiScaledSize(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.
     const current_dpi = win32.dpiFromHwnd(hwnd);
     const cs = global.renderer.cell_size;
 
+    const tbh_cur = global.renderer.tab_bar_height;
     const client_size = win32.getClientSize(hwnd);
     const grid_w = client_size.cx -| @as(i32, d3d11.scrollbarWidth(current_dpi));
-    const grid_h_cur = @max(0, client_size.cy - cs.cy);
+    const grid_h_cur = @max(0, client_size.cy - tbh_cur);
     const col_count = @max(1, @divTrunc(grid_w, cs.cx));
     const row_count = @max(1, @divTrunc(grid_h_cur, cs.cy));
     if (col_count != 1) std.debug.assert(grid_w == col_count * cs.cx);
@@ -117,7 +118,7 @@ pub fn onGetDpiScaledSize(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.
     const new_cs = global.renderer.cellSizeForDpi(new_dpi);
     const new_client_w = col_count * new_cs.cx + @as(i32, d3d11.scrollbarWidth(new_dpi));
     const new_grid_h = row_count * new_cs.cy;
-    const new_client_h = new_grid_h + new_cs.cy; // add new tab bar height
+    const new_client_h = new_grid_h + global.renderer.tabBarHeightForDpi(new_dpi); // add tab bar band at new dpi
     const new_inset = util.getClientInset(new_dpi);
     inout_size.* = .{
         .cx = new_client_w + new_inset.cx,

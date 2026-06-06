@@ -118,6 +118,8 @@ fn reloadConfig(hwnd: win32.HWND) void {
             },
             .font_size_pt = new_cfg.font_size_pt,
             .codepoint_maps = codepoint_maps,
+            .tabbar_family = util.utf16FamilyOptional(gpa, new_cfg.tabbar_font_family),
+            .tabbar_font_size_pt = new_cfg.tabbar_font_size_pt,
         });
     }
 
@@ -172,6 +174,8 @@ fn reloadConfig(hwnd: win32.HWND) void {
 
 fn fontConfigEql(a: *const Config, b: *const Config) bool {
     if (!optF32Eql(a.font_size_pt, b.font_size_pt)) return false;
+    if (!optF32Eql(a.tabbar_font_size_pt, b.tabbar_font_size_pt)) return false;
+    if (!std.mem.eql(u8, a.tabbar_font_family, b.tabbar_font_family)) return false;
     if (a.font_families.len != b.font_families.len) return false;
     for (a.font_families, b.font_families) |x, y| {
         if (!std.mem.eql(u8, x, y)) return false;

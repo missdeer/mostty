@@ -10,7 +10,11 @@ cbuffer GridConfig : register(b0)
     // Glyph atlas geometry, supplied by CPU so the pixel shader skips a
     // per-pixel GetDimensions/divide just to recover the same constant.
     uint cells_per_row;
-    uint3 _pad;
+    // Pixel height of the tab-bar band at the top. The grid is drawn under a
+    // viewport offset by this much, so SV_Position.y is RT-absolute and every
+    // terminal-space calc subtracts tab_bar_height first.
+    uint tab_bar_height;
+    uint2 _pad;
 }
 
 struct Cell
@@ -50,10 +54,14 @@ float3 to_linear(float3 c) {
 }
 
 float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
+    // Terminal-space y: SV_Position is RT-absolute, the grid starts at
+    // tab_bar_height (viewport offset), so subtract it for every cell calc.
+    float gy_f = sv_pos.y - (float)tab_bar_height;
+
     // Background gradient (per-pixel sin dither was removed — its
     // amplitude was ±1/510 and the gradient deltas are tiny, so the
     // banding it hid is barely perceptible after sRGB encode).
-    float2 pos = sv_pos.xy / (cell_size * float2(col_count, row_count));
+    float2 pos = float2(sv_pos.x, max(0.0, gy_f)) / (cell_size * float2(col_count, row_count));
     float3 purple_gradient = float3(
         lerp(0.08, 0.08, pos.x),
         lerp(0.06, 0.07, pos.y),
@@ -77,9 +85,12 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         return float4(color * alpha, alpha);
     }
 
-    // Cell grid
+    // Cell grid. Band pixels (gy_f < 0) shouldn't be rasterized thanks to the
+    // viewport offset, but guard anyway so a stray pixel stays transparent.
+    if (gy_f < 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    uint gy = (uint)gy_f;
     uint col = sv_pos.x / cell_size.x;
-    uint row = sv_pos.y / cell_size.y;
+    uint row = gy / cell_size.y;
     uint cell_index = row * col_count + col;
 
     Cell cell = cells[cell_index];
@@ -98,7 +109,7 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         cell.glyph_index % cells_per_row,
         cell.glyph_index / cells_per_row
     );
-    uint2 cell_pixel = uint2(sv_pos.xy) % cell_size;
+    uint2 cell_pixel = uint2((uint)sv_pos.x, gy) % cell_size;
     uint2 texture_coord = glyph_cell_pos * cell_size + cell_pixel;
     float4 glyph_texel = glyph_texture.Load(int3(texture_coord, 0));
 

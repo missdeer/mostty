@@ -34,17 +34,6 @@ pub const Rgba8 = packed struct(u32) {
     }
 };
 
-/// One cell's worth of tab-bar content, laid out by the caller and
-/// rendered into the reserved top row by `render`.
-pub const TabBarCell = struct {
-    codepoint: u21,
-    bg: Rgba8,
-    fg: Rgba8,
-    pub fn rgba(c: u24) Rgba8 {
-        return Rgba8.fromU24(c);
-    }
-};
-
 // Used only when the terminal's dynamic fg/bg colors are unset (which normally
 // never happens — tab creation seeds term.colors from the active theme).
 pub const fallback_fg: u24 = 0xc8c4d0;
@@ -67,7 +56,11 @@ pub const shader = struct {
         scrollbar_x: f32,
         scrollbar_width: f32,
         cells_per_row: u32,
-        _pad: [3]u32 = .{ 0, 0, 0 },
+        // Pixel y where the terminal grid begins (tab-bar band height). The
+        // grid quad is drawn under a viewport offset by this much; the shader
+        // subtracts it from SV_Position.y (RT-absolute) for all cell math.
+        tab_bar_height: u32,
+        _pad: [2]u32 = .{ 0, 0 },
     };
     pub const Cell = extern struct {
         glyph_index: u32,
@@ -345,6 +338,107 @@ pub const StagingTexture = struct {
     fn releaseCached(cached: *?Cached) void {
         if (cached.*) |*c| {
             _ = c.white_brush.IUnknown.Release();
+            _ = c.render_target.IUnknown.Release();
+            _ = c.texture.IUnknown.Release();
+            cached.* = null;
+        }
+    }
+};
+
+// Offscreen target for the tab-bar band. The band is drawn with DirectWrite/D2D
+// at proportional positions (independent of the terminal cell grid) and copied
+// onto the back buffer's top strip via CopySubresourceRegion. Opaque (IGNORE)
+// alpha so ClearType behaves and the strip composites solidly under DComp.
+// Pinned to 96 DPI + PIXELS unit mode like StagingTexture, so the tab-bar text
+// format's already-DPI-scaled font size maps 1:1 to physical pixels.
+pub const BandTexture = struct {
+    pub const Cached = struct {
+        width: u32,
+        height: u32,
+        texture: *win32.ID3D11Texture2D,
+        render_target: *win32.ID2D1RenderTarget,
+        brush: *win32.ID2D1SolidColorBrush,
+    };
+    cached: ?Cached = null,
+
+    pub fn getOrCreate(
+        self: *BandTexture,
+        device: *win32.ID3D11Device,
+        d2d_factory: *win32.ID2D1Factory,
+        width: u32,
+        height: u32,
+    ) *Cached {
+        if (self.cached) |*c| {
+            if (c.width == width and c.height == height) return c;
+            releaseCached(&self.cached);
+        }
+
+        var texture: *win32.ID3D11Texture2D = undefined;
+        {
+            const desc: win32.D3D11_TEXTURE2D_DESC = .{
+                .Width = width,
+                .Height = height,
+                .MipLevels = 1,
+                .ArraySize = 1,
+                .Format = .B8G8R8A8_UNORM,
+                .SampleDesc = .{ .Count = 1, .Quality = 0 },
+                .Usage = .DEFAULT,
+                .BindFlags = .{ .RENDER_TARGET = 1 },
+                .CPUAccessFlags = .{},
+                .MiscFlags = .{},
+            };
+            const hr = device.CreateTexture2D(&desc, null, &texture);
+            if (hr < 0) com.fatalHr("CreateBandTexture", hr);
+        }
+
+        const dxgi_surface = com.queryInterface(texture, win32.IDXGISurface);
+        defer _ = dxgi_surface.IUnknown.Release();
+
+        var render_target: *win32.ID2D1RenderTarget = undefined;
+        {
+            const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
+                .type = .DEFAULT,
+                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
+                .dpiX = 96.0,
+                .dpiY = 96.0,
+                .usage = .{},
+                .minLevel = .DEFAULT,
+            };
+            const hr = d2d_factory.CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &render_target);
+            if (hr < 0) com.fatalHr("CreateBandRenderTarget", hr);
+        }
+
+        const dc = com.queryInterface(render_target, win32.ID2D1DeviceContext);
+        defer _ = dc.IUnknown.Release();
+        dc.SetUnitMode(win32.D2D1_UNIT_MODE_PIXELS);
+
+        var brush: *win32.ID2D1SolidColorBrush = undefined;
+        {
+            const hr = render_target.CreateSolidColorBrush(
+                &.{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
+                null,
+                &brush,
+            );
+            if (hr < 0) com.fatalHr("CreateBandBrush", hr);
+        }
+
+        self.cached = .{
+            .width = width,
+            .height = height,
+            .texture = texture,
+            .render_target = render_target,
+            .brush = brush,
+        };
+        return &self.cached.?;
+    }
+
+    pub fn release(self: *BandTexture) void {
+        releaseCached(&self.cached);
+    }
+
+    fn releaseCached(cached: *?Cached) void {
+        if (cached.*) |*c| {
+            _ = c.brush.IUnknown.Release();
             _ = c.render_target.IUnknown.Release();
             _ = c.texture.IUnknown.Release();
             cached.* = null;

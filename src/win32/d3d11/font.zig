@@ -68,6 +68,12 @@ pub const FontConfig = struct {
     /// mapping emoji / icon ranges that the primary monospace font lacks.
     /// Overlapping user ranges resolve in declaration order (earlier wins).
     codepoint_maps: []const CodepointMapEntry = &.{},
+    /// Tab-bar primary family. `null` -> inherit the regular primary. The tab
+    /// bar always renders at regular weight; its fallback chain reuses the
+    /// terminal `families`/`codepoint_maps` so CJK/emoji titles still resolve.
+    tabbar_family: ?[*:0]const u16 = null,
+    /// Tab-bar font size in points. `null` -> inherit `font_size_pt`.
+    tabbar_font_size_pt: ?f32 = null,
 };
 
 // Font configuration (mirrors WezTerm config). Primary family, then ordered
@@ -193,6 +199,55 @@ pub fn measureCellSize(
         .cx = @intFromFloat(@round(advance_dips)),
         .cy = @intFromFloat(@round(line_height_dips)),
     };
+}
+
+// Physical-pixel line height (ascent + descent + lineGap) of `primary` at
+// `font_size_pt_val`, used to size the tab-bar band independently of the
+// terminal cell. Mirrors measureCellSize's vertical metric (and its
+// not-installed fallback search) but returns only the height. Returns 0 when no
+// usable family is found so the caller can fall back to the terminal cell height.
+pub fn measureTabBarLineHeight(
+    dwrite_factory: *win32.IDWriteFactory,
+    dpi: u32,
+    primary: [*:0]const u16,
+    font_size_pt_val: f32,
+) i32 {
+    var system_collection: *win32.IDWriteFontCollection = undefined;
+    if (dwrite_factory.GetSystemFontCollection(&system_collection, 0) < 0) return 0;
+    defer _ = system_collection.IUnknown.Release();
+
+    var family_index: u32 = 0;
+    var family_exists: win32.BOOL = 0;
+    _ = system_collection.FindFamilyName(primary, &family_index, &family_exists);
+    if (family_exists == 0) {
+        for (&measurement_fallbacks) |candidate| {
+            if (system_collection.FindFamilyName(candidate, &family_index, &family_exists) >= 0 and family_exists != 0) break;
+        }
+        if (family_exists == 0) return 0;
+    }
+
+    var family: *win32.IDWriteFontFamily = undefined;
+    if (system_collection.GetFontFamily(family_index, &family) < 0) return 0;
+    defer _ = family.IUnknown.Release();
+
+    var font: *win32.IDWriteFont = undefined;
+    if (family.GetFirstMatchingFont(.NORMAL, .NORMAL, .NORMAL, &font) < 0) return 0;
+    defer _ = font.IUnknown.Release();
+
+    var face: *win32.IDWriteFontFace = undefined;
+    if (font.CreateFontFace(&face) < 0) return 0;
+    defer _ = face.IUnknown.Release();
+
+    var fm: win32.DWRITE_FONT_METRICS = undefined;
+    face.GetMetrics(&fm);
+
+    const font_size_dips = fontSizeDips(dpi, font_size_pt_val);
+    const units_per_em: f32 = @floatFromInt(fm.designUnitsPerEm);
+    const design_to_dips = font_size_dips / units_per_em;
+    const ascent_dips = @as(f32, @floatFromInt(fm.ascent)) * design_to_dips;
+    const descent_dips = @as(f32, @floatFromInt(fm.descent)) * design_to_dips;
+    const line_gap_dips = @as(f32, @floatFromInt(fm.lineGap)) * design_to_dips;
+    return @intFromFloat(@round(ascent_dips + descent_dips + line_gap_dips));
 }
 
 fn createTextFormat(
@@ -487,6 +542,41 @@ pub fn releaseTextFormatSet(
 ) void {
     for (formats) |tf| _ = tf.IUnknown.Release();
     for (fallbacks) |fb| _ = fb.IUnknown.Release();
+}
+
+pub const TabBarFormat = struct {
+    format: *win32.IDWriteTextFormat,
+    fallback: *win32.IDWriteFontFallback,
+    // Ellipsis sign bound to `format`, built once here so the per-frame painter
+    // doesn't recreate it. Null if creation failed (painter then hard-trims).
+    trimming_sign: ?*win32.IDWriteInlineObject,
+};
+
+// Single regular-weight text format for tab-bar titles, drawn proportionally by
+// the band painter. Fallback reuses the terminal's user fallbacks + codepoint
+// maps so CJK / emoji titles still resolve when the primary lacks the glyph.
+pub fn createTabBarTextFormat(
+    factory: *win32.IDWriteFactory2,
+    dpi: u32,
+    primary: [*:0]const u16,
+    user_fallbacks: []const [*:0]const u16,
+    codepoint_maps: []const FontConfig.CodepointMapEntry,
+    font_size_pt_val: f32,
+) TabBarFormat {
+    const fallback = buildFontFallback(factory, primary, null, user_fallbacks, codepoint_maps);
+    const format = createTextFormat(&factory.IDWriteFactory, dpi, fallback, primary, font_size_pt_val, .NORMAL, .NORMAL, .NORMAL);
+    var trimming_sign: ?*win32.IDWriteInlineObject = null;
+    {
+        var s: *win32.IDWriteInlineObject = undefined;
+        if (factory.IDWriteFactory.CreateEllipsisTrimmingSign(format, &s) >= 0) trimming_sign = s;
+    }
+    return .{ .format = format, .fallback = fallback, .trimming_sign = trimming_sign };
+}
+
+pub fn releaseTabBarFormat(f: *TabBarFormat) void {
+    if (f.trimming_sign) |s| _ = s.IUnknown.Release();
+    _ = f.format.IUnknown.Release();
+    _ = f.fallback.IUnknown.Release();
 }
 
 // Custom rendering parameters so the atlas is reproducible across machines

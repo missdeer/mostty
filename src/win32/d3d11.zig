@@ -13,13 +13,13 @@ const color = @import("d3d11/color.zig");
 const emoji = @import("d3d11/emoji.zig");
 const font_mod = @import("d3d11/font.zig");
 const glyph_mod = @import("d3d11/glyph.zig");
+const tabbar_paint = @import("d3d11/tabbar_paint.zig");
 
 const log = std.log.scoped(.d3d);
 
 // Re-exports for external callers (state/render/tab_bar/tab_mgmt depend on
 // these). New code inside the renderer should prefer the module-qualified
-// names (`gpu.TabBarCell`, `font_mod.FontConfig`, etc.).
-pub const TabBarCell = gpu.TabBarCell;
+// names (`font_mod.FontConfig`, etc.).
 pub const FontConfig = font_mod.FontConfig;
 pub const scrollbarWidth = gpu.scrollbarWidth;
 pub const default_primary_font_family = font_mod.default_primary_font_family;
@@ -123,9 +123,55 @@ effective_style: [4]GlyphIndexCache.Style,
 effective_user_fallbacks: []const [*:0]const u16,
 effective_codepoint_maps: []const FontConfig.CodepointMapEntry,
 
+// Tab-bar title text format (regular weight only). Built from the tab-bar
+// family/size overrides, falling back to the terminal primary/size. Rebuilt
+// alongside text_formats on DPI change and font hot-reload. Consumed by the
+// proportional band painter (tabbar_paint), which draws directly with D2D —
+// the tab bar does not go through the glyph atlas.
+tabbar_text_format: *win32.IDWriteTextFormat,
+tabbar_fallback: *win32.IDWriteFontFallback,
+// Ellipsis sign for the tab-bar format, cached so the per-frame painter reuses
+// it. Rebuilt with the format on DPI/font change.
+tabbar_trimming_sign: ?*win32.IDWriteInlineObject,
+effective_tabbar_primary: [*:0]const u16,
+tabbar_font_size_pt: f32,
+// Tab-bar band height in physical pixels (line height of the tab-bar font +
+// padding), independent of the terminal cell height. Drives the grid's pixel
+// offset and every "where does the terminal start" geometry/input calc.
+tab_bar_height: i32,
+// Offscreen target the tab bar is painted into, then copied onto the back
+// buffer's top strip. Recreated on resize / height change by getOrCreate.
+band_texture: gpu.BandTexture = .{},
+// Back-buffer texture retained alongside target_view so it can be the
+// CopySubresourceRegion destination for the tab-bar band. Released/reacquired
+// with target_view.
+back_buffer_tex: ?*win32.ID3D11Texture2D = null,
+
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.cell_size;
     return font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
+}
+
+// Band height = tab-bar font line height (or terminal cell height when the
+// family isn't installed) + symmetric vertical padding so glyphs aren't cramped
+// against the window edge / terminal. Kept in physical pixels.
+fn computeTabBarHeight(
+    dwrite_factory: *win32.IDWriteFactory2,
+    dpi: u32,
+    primary: [*:0]const u16,
+    font_size_pt_val: f32,
+    fallback_cy: i32,
+) i32 {
+    const lh = font_mod.measureTabBarLineHeight(&dwrite_factory.IDWriteFactory, dpi, primary, font_size_pt_val);
+    const base = if (lh > 0) lh else fallback_cy;
+    const pad: i32 = @intFromFloat(@round(win32.scaleDpi(f32, 4.0, dpi)));
+    return base + pad;
+}
+
+pub fn tabBarHeightForDpi(self: *D3d11Renderer, dpi: u32) i32 {
+    if (dpi == self.dpi) return self.tab_bar_height;
+    const cs = self.cellSizeForDpi(dpi);
+    return computeTabBarHeight(self.dwrite_factory, dpi, self.effective_tabbar_primary, self.tabbar_font_size_pt, @intCast(cs.cy));
 }
 
 pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
@@ -235,6 +281,18 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         .y = @intCast(cell_size.cy),
     };
 
+    const effective_tabbar_primary = font_config.tabbar_family orelse effective_primary;
+    const effective_tabbar_size = font_config.tabbar_font_size_pt orelse effective_font_size_pt;
+    const tabbar_format = font_mod.createTabBarTextFormat(
+        dwrite_factory,
+        dpi,
+        effective_tabbar_primary,
+        effective_user_fallbacks,
+        font_config.codepoint_maps,
+        effective_tabbar_size,
+    );
+    const tab_bar_height = computeTabBarHeight(dwrite_factory, dpi, effective_tabbar_primary, effective_tabbar_size, cell_size_xy.y);
+
     // Direct2D factory for glyph rendering
     var d2d_factory: *win32.ID2D1Factory = undefined;
     {
@@ -271,6 +329,12 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         .effective_style = effective_style,
         .effective_user_fallbacks = effective_user_fallbacks,
         .effective_codepoint_maps = font_config.codepoint_maps,
+        .tabbar_text_format = tabbar_format.format,
+        .tabbar_fallback = tabbar_format.fallback,
+        .tabbar_trimming_sign = tabbar_format.trimming_sign,
+        .effective_tabbar_primary = effective_tabbar_primary,
+        .tabbar_font_size_pt = effective_tabbar_size,
+        .tab_bar_height = tab_bar_height,
     };
 }
 
@@ -294,6 +358,20 @@ pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     );
     self.text_formats = set.formats;
     self.font_fallbacks = set.fallbacks;
+
+    var old_tabbar: font_mod.TabBarFormat = .{ .format = self.tabbar_text_format, .fallback = self.tabbar_fallback, .trimming_sign = self.tabbar_trimming_sign };
+    font_mod.releaseTabBarFormat(&old_tabbar);
+    const tabbar_format = font_mod.createTabBarTextFormat(
+        self.dwrite_factory,
+        dpi,
+        self.effective_tabbar_primary,
+        self.effective_user_fallbacks,
+        self.effective_codepoint_maps,
+        self.tabbar_font_size_pt,
+    );
+    self.tabbar_text_format = tabbar_format.format;
+    self.tabbar_fallback = tabbar_format.fallback;
+    self.tabbar_trimming_sign = tabbar_format.trimming_sign;
     self.dpi = dpi;
 
     const new_cs = font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
@@ -302,6 +380,7 @@ pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
         .x = @intCast(new_cs.cx),
         .y = @intCast(new_cs.cy),
     };
+    self.tab_bar_height = computeTabBarHeight(self.dwrite_factory, dpi, self.effective_tabbar_primary, self.tabbar_font_size_pt, @intCast(new_cs.cy));
 
     // Invalidate glyph cache since font size changed.
     if (self.glyph_cache) |*c| {
@@ -345,6 +424,24 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
     self.text_formats = set.formats;
     self.font_fallbacks = set.fallbacks;
 
+    var old_tabbar: font_mod.TabBarFormat = .{ .format = self.tabbar_text_format, .fallback = self.tabbar_fallback, .trimming_sign = self.tabbar_trimming_sign };
+    font_mod.releaseTabBarFormat(&old_tabbar);
+    const effective_tabbar_primary = font_config.tabbar_family orelse effective_primary;
+    const effective_tabbar_size = font_config.tabbar_font_size_pt orelse effective_font_size_pt;
+    const tabbar_format = font_mod.createTabBarTextFormat(
+        self.dwrite_factory,
+        self.dpi,
+        effective_tabbar_primary,
+        effective_user_fallbacks,
+        font_config.codepoint_maps,
+        effective_tabbar_size,
+    );
+    self.tabbar_text_format = tabbar_format.format;
+    self.tabbar_fallback = tabbar_format.fallback;
+    self.tabbar_trimming_sign = tabbar_format.trimming_sign;
+    self.effective_tabbar_primary = effective_tabbar_primary;
+    self.tabbar_font_size_pt = effective_tabbar_size;
+
     self.font_size_pt = effective_font_size_pt;
     self.effective_primary = effective_primary;
     self.effective_style_primaries = style_primaries;
@@ -359,6 +456,7 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
         .x = @intCast(new_cs.cx),
         .y = @intCast(new_cs.cy),
     };
+    self.tab_bar_height = computeTabBarHeight(self.dwrite_factory, self.dpi, effective_tabbar_primary, effective_tabbar_size, @intCast(new_cs.cy));
 
     // Font changed: drop the glyph atlas so glyphs re-rasterize at the new face/size.
     if (self.glyph_cache) |*c| {
@@ -376,6 +474,7 @@ pub fn deinit(self: *D3d11Renderer) void {
         log.info("uploadCellRow stats: uploaded={d} skipped={d} ({d:.1}% skipped)", .{ self.stats.rows_uploaded, self.stats.rows_skipped, skip_pct });
     }
     self.staging_texture.release();
+    self.band_texture.release();
     if (self.glyph_cache) |*c| {
         c.deinit(self.glyph_cache_arena.allocator());
         self.glyph_cache = null;
@@ -390,10 +489,16 @@ pub fn deinit(self: *D3d11Renderer) void {
     self.context.ClearState();
     if (self.target_view) |tv| _ = tv.IUnknown.Release();
     self.target_view = null;
+    if (self.back_buffer_tex) |bb| _ = bb.IUnknown.Release();
+    self.back_buffer_tex = null;
     self.context.Flush();
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
     font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    {
+        var tabbar: font_mod.TabBarFormat = .{ .format = self.tabbar_text_format, .fallback = self.tabbar_fallback, .trimming_sign = self.tabbar_trimming_sign };
+        font_mod.releaseTabBarFormat(&tabbar);
+    }
     _ = self.rendering_params.IUnknown.Release();
     _ = self.dwrite_factory.IUnknown.Release();
     _ = self.const_buf.IUnknown.Release();
@@ -408,7 +513,7 @@ pub fn render(
     self: *D3d11Renderer,
     hwnd: win32.HWND,
     term: *vt.Terminal,
-    tab_bar: []const TabBarCell,
+    tabbar: types.TabBarDraw,
     resizing: bool,
     mouse_in_scrollbar: bool,
     selection_fade: f32,
@@ -440,6 +545,12 @@ pub fn render(
                 _ = tv.IUnknown.Release();
                 self.target_view = null;
             }
+            // The retained back buffer is stale once the swap chain resizes;
+            // drop it so createRenderTargetView reacquires the new one.
+            if (self.back_buffer_tex) |bb| {
+                _ = bb.IUnknown.Release();
+                self.back_buffer_tex = null;
+            }
             self.context.Flush();
             const rhr = swap_chain.IDXGISwapChain.ResizeBuffers(
                 0,
@@ -456,10 +567,13 @@ pub fn render(
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w: u32 = client_w -| sb_px;
     const shader_col: u32 = @divTrunc(grid_w + cs.x - 1, cs.x);
-    const shader_row: u32 = @divTrunc(client_h + cs.y - 1, cs.y);
-    // Row 0 is reserved for the tab bar; terminal cells render in rows 1..shader_row.
-    const term_row_offset: u32 = 1;
-    const term_shader_row: u32 = if (shader_row > term_row_offset) shader_row - term_row_offset else 0;
+    // The tab bar is a separate pixel band at the top (height tab_bar_h),
+    // painted via D2D after the grid. The cell grid is terminal-only and the
+    // grid quad is drawn under a viewport offset by tab_bar_h (see the draw
+    // section); the shader subtracts tab_bar_h from SV_Position.y.
+    const tab_bar_h: u32 = @intCast(@max(0, self.tab_bar_height));
+    const term_pixel_h: u32 = client_h -| tab_bar_h;
+    const term_shader_row: u32 = @divTrunc(term_pixel_h + cs.y - 1, cs.y);
 
     // Defensive cap matching the per-row scratch capacity below. Must come
     // before `shader_cells.updateCount` / `ensureShadowCapacity`: those
@@ -494,22 +608,23 @@ pub fn render(
         config.cell_size[0] = cs.x;
         config.cell_size[1] = cs.y;
         config.col_count = shader_col;
-        config.row_count = shader_row;
+        config.row_count = term_shader_row;
         // Glyph atlas geometry — the shader uses this to convert a
         // glyph_index to (x,y) in the atlas. Previously the shader
         // called GetDimensions per pixel and divided by cell_size.
         config.cells_per_row = tex_cell_count.x;
+        config.tab_bar_height = tab_bar_h;
 
-        // Compute scrollbar geometry in pixels (within the reserved scrollbar area)
-        // Only show the thumb when scrolled up or mouse is hovering over the scrollbar.
-        // The grid sits below the tab bar, so the scrollbar's y origin shifts down by one cell.
+        // Compute scrollbar geometry in pixels (within the reserved scrollbar area).
+        // Coordinates are RT-absolute: the grid sits below the tab-bar band, so the
+        // scrollbar's y origin is the band height.
         const sb = term.screens.active.pages.scrollbar();
         const show_scrollbar = sb.total > sb.len and (!term.screens.active.viewportIsBottom() or mouse_in_scrollbar);
         if (show_scrollbar) {
             const sb_x: f32 = @floatFromInt(grid_w);
             const sb_w: f32 = @floatFromInt(sb_px);
-            const sb_origin_y: f32 = @floatFromInt(cs.y * term_row_offset);
-            const win_h: f32 = @floatFromInt(client_h -| (cs.y * term_row_offset));
+            const sb_origin_y: f32 = @floatFromInt(tab_bar_h);
+            const win_h: f32 = @floatFromInt(client_h -| tab_bar_h);
             const min_track_height: f32 = 20.0;
             const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
             const max_offset = sb.total - sb.len;
@@ -527,8 +642,9 @@ pub fn render(
         }
     }
 
-    // Build cell buffer from terminal state
-    const cell_count = shader_col * shader_row;
+    // Build cell buffer from terminal state (terminal-only; the tab bar is a
+    // separate band composited after the grid).
+    const cell_count = shader_col * term_shader_row;
     const blank_glyph = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, ' ', &.{}, .single, .regular);
 
     // Effective default fg/bg come from the terminal's dynamic colors (seeded
@@ -571,25 +687,6 @@ pub fn render(
         };
         const blink_visible = @mod(@divFloor(std.time.milliTimestamp(), 500), 2) == 0;
         var has_blink = false;
-
-        // Tab bar in shader row 0.
-        {
-            var col: u32 = 0;
-            while (col < shader_col) : (col += 1) {
-                if (col < tab_bar.len) {
-                    const tb = tab_bar[col];
-                    scratch[col] = .{
-                        .glyph_index = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, tb.codepoint, &.{}, .single, .regular),
-                        .background = tb.bg,
-                        .foreground = tb.fg,
-                        .attrs = 0,
-                    };
-                } else {
-                    scratch[col] = blank_cell;
-                }
-            }
-            self.uploadCellRow(0, scratch, force_full);
-        }
 
         const screen = term.screens.active;
         const palette = &term.colors.palette.current;
@@ -804,17 +901,16 @@ pub fn render(
                 @memset(scratch[col..shader_col], blank_cell);
             }
 
-            const dst_row_offset = (screen_row + term_row_offset) * shader_col;
+            const dst_row_offset = screen_row * shader_col;
             self.uploadCellRow(dst_row_offset, scratch, force_full);
         }
-        // Fill remaining terminal rows with blanks (offset by tab bar row).
-        // The row content is identical across iterations so we build scratch
-        // once and let uploadCellRow's diff skip any row whose shadow already
-        // matches.
+        // Fill remaining terminal rows with blanks. The row content is identical
+        // across iterations so we build scratch once and let uploadCellRow's diff
+        // skip any row whose shadow already matches.
         if (screen_row < term_shader_row) {
             @memset(scratch, blank_cell);
             while (screen_row < term_shader_row) : (screen_row += 1) {
-                const dst_row_offset = (screen_row + term_row_offset) * shader_col;
+                const dst_row_offset = screen_row * shader_col;
                 self.uploadCellRow(dst_row_offset, scratch, force_full);
             }
         }
@@ -822,7 +918,7 @@ pub fn render(
         // Cursor inversion is applied inline in the per-row cell loop so
         // wide CJK gets both halves flipped, not just the left one.
 
-        // Draw resize overlay (e.g. "80x25") in the terminal region (skip tab bar row).
+        // Draw resize overlay (e.g. "80x25") centered in the terminal region.
         // force_full above guarantees the shadow now mirrors GPU exactly, so we
         // can pull each overlaid row out of the shadow, apply the overlay
         // edits in-place, and re-upload — no need to recompute the row from
@@ -839,14 +935,13 @@ pub fn render(
             const box_w = text_len + pad;
             const box_h: u32 = 3;
             const box_x = (shader_col -| box_w) / 2;
-            const box_y_inner = (term_shader_row -| box_h) / 2;
-            const box_y = box_y_inner + term_row_offset;
+            const box_y = (term_shader_row -| box_h) / 2;
 
             const tx = box_x + (box_w -| text_len) / 2;
             const ty = box_y + 1;
 
             var by: u32 = box_y;
-            while (by < box_y + box_h and by < shader_row) : (by += 1) {
+            while (by < box_y + box_h and by < term_shader_row) : (by += 1) {
                 const dst_row_offset = by * shader_col;
                 @memcpy(scratch, self.shadow_cells[dst_row_offset..][0..shader_col]);
 
@@ -895,10 +990,25 @@ pub fn render(
         var target_views = [_]?*win32.ID3D11RenderTargetView{self.target_view.?};
         self.context.OMSetRenderTargets(target_views.len, &target_views, null);
     }
-    // Clear to transparent black for DWM glass compositing
+    // Clear to transparent black for DWM glass compositing (whole RT; the band
+    // strip stays transparent here and is overwritten by the band copy below).
     {
         const clear_color = [4]f32{ 0, 0, 0, 0 };
         self.context.ClearRenderTargetView(self.target_view.?, @ptrCast(&clear_color));
+    }
+    // Offset the grid below the tab-bar band. Set every frame from the current
+    // size + tab_bar_h: a font/DPI/config reload can change tab_bar_h without a
+    // swapchain resize (stale-viewport bug otherwise).
+    {
+        var viewport = win32.D3D11_VIEWPORT{
+            .TopLeftX = 0,
+            .TopLeftY = @floatFromInt(tab_bar_h),
+            .Width = @floatFromInt(client_w),
+            .Height = @floatFromInt(term_pixel_h),
+            .MinDepth = 0.0,
+            .MaxDepth = 0.0,
+        };
+        self.context.RSSetViewports(1, @ptrCast(&viewport));
     }
     self.context.PSSetConstantBuffers(0, 1, @ptrCast(@constCast(&self.const_buf)));
     var resources = [_]?*win32.ID3D11ShaderResourceView{
@@ -909,6 +1019,37 @@ pub fn render(
     self.context.VSSetShader(self.vertex_shader, null, 0);
     self.context.PSSetShader(self.pixel_shader, null, 0);
     self.context.Draw(4, 0);
+
+    // Tab-bar band: paint proportionally into the offscreen band texture, then
+    // copy it onto the back buffer's top strip. Mirrors the glyph-staging
+    // pattern (D2D EndDraw flushes before the D3D copy reads the texture).
+    if (tab_bar_h > 0) {
+        const band = self.band_texture.getOrCreate(self.device, self.d2d_factory, client_w, tab_bar_h);
+        tabbar_paint.paint(
+            band.render_target,
+            band.brush,
+            &self.dwrite_factory.IDWriteFactory,
+            self.tabbar_text_format,
+            self.tabbar_trimming_sign,
+            tabbar,
+            cs.x,
+            tab_bar_h,
+        );
+        // Unbind the RTV so the back buffer can be a CopySubresourceRegion dest.
+        self.context.OMSetRenderTargets(0, null, null);
+        if (self.back_buffer_tex) |bb| {
+            const copy_h = @min(tab_bar_h, client_h);
+            const src_box = win32.D3D11_BOX{
+                .left = 0,
+                .top = 0,
+                .front = 0,
+                .right = client_w,
+                .bottom = copy_h,
+                .back = 1,
+            };
+            self.context.CopySubresourceRegion(&bb.ID3D11Resource, 0, 0, 0, 0, &band.texture.ID3D11Resource, 0, &src_box);
+        }
+    }
 
     {
         const hr = swap_chain.IDXGISwapChain.Present(0, 0);
@@ -1005,7 +1146,10 @@ fn createRenderTargetView(
         const hr = swap_chain.IDXGISwapChain.GetBuffer(0, win32.IID_ID3D11Texture2D, @ptrCast(&back_buffer));
         if (hr < 0) fatalHr("GetBuffer", hr);
     }
-    defer _ = back_buffer.IUnknown.Release();
+    // Retain the back buffer as the CopySubresourceRegion destination for the
+    // tab-bar band. Released/replaced together with target_view.
+    if (self.back_buffer_tex) |old| _ = old.IUnknown.Release();
+    self.back_buffer_tex = back_buffer;
 
     var target_view: *win32.ID3D11RenderTargetView = undefined;
     {

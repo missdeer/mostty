@@ -69,3 +69,26 @@ pub const tab_active_bg: u24 = 0x2a2a2a;
 pub const tab_active_fg: u24 = 0xffffff;
 pub const tab_hover_bg: u24 = 0x252525;
 pub const new_tab_button_fg: u24 = 0xc8c4d0;
+pub const close_hover_fg: u24 = 0xff5555;
+pub const new_tab_hover_fg: u24 = 0xffffff;
+
+// One tab's drawing description for the proportional tab-bar painter. Column
+// fields are grid columns (tab widths/buttons stay column-based); the painter
+// multiplies by the cell width to get pixels. `title` borrows the tab's title
+// buffer and is only valid during the synchronous render call.
+pub const TabDrawInfo = struct {
+    col_start: u32,
+    col_end: u32,
+    close_col: u32,
+    tab_number: u32, // 1-based, for the "tab N" placeholder when title is empty
+    active: bool,
+    hovered: bool,
+    close_hovered: bool,
+    title: []const u8,
+};
+
+pub const TabBarDraw = struct {
+    tabs: []const TabDrawInfo,
+    new_tab_col: ?u32,
+    new_tab_hovered: bool,
+};

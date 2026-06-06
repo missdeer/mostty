@@ -25,11 +25,12 @@ const TerminalMouse = struct {
 
 fn terminalMouse(tab: *state.Tab, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) TerminalMouse {
     const cs = global.renderer.cell_size;
+    const tbh = global.renderer.tab_bar_height;
     const client_size = win32.getClientSize(hwnd);
     const sb_px = d3d11.scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w = client_size.cx -| @as(i32, sb_px);
-    const grid_h = @max(0, client_size.cy - cs.cy);
-    const grid_mouse_y = mouse_y - cs.cy;
+    const grid_h = @max(0, client_size.cy - tbh);
+    const grid_mouse_y = mouse_y - tbh;
     return .{
         .pos = .{ .x = mouse_x, .y = grid_mouse_y },
         .grid = .{
@@ -38,7 +39,7 @@ fn terminalMouse(tab: *state.Tab, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) 
             .cell_width = cs.cx,
             .cell_height = cs.cy,
         },
-        .in_grid = mouse_y >= cs.cy and mouse_x >= 0 and mouse_x < grid_w and grid_mouse_y >= 0 and grid_mouse_y < grid_h,
+        .in_grid = mouse_y >= tbh and mouse_x >= 0 and mouse_x < grid_w and grid_mouse_y >= 0 and grid_mouse_y < grid_h,
     };
 }
 
@@ -174,12 +175,13 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.cell_size;
+    const tbh = global.renderer.tab_bar_height;
     const client_size = win32.getClientSize(hwnd);
     const sb_px = d3d11.scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w = client_size.cx -| @as(i32, sb_px);
 
     // Tab bar gets first dibs on a fresh click.
-    if (mouse_y < cs.cy) {
+    if (mouse_y < tbh) {
         tooltip.hide(window);
         const cell_count = window_geom.computeGridCellCount(hwnd, cs);
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
@@ -200,12 +202,12 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     if (!util.isShiftDown() and reportButtonDown(window, hwnd, mouse_x, mouse_y, .left)) return 0;
 
     // Below tab bar: existing scrollbar / selection logic with y offset.
-    const grid_mouse_y = mouse_y - cs.cy;
+    const grid_mouse_y = mouse_y - tbh;
     if (mouse_x >= grid_w) {
         const screen = window.active().term.screens.active;
         const sb = screen.pages.scrollbar();
         if (sb.total > sb.len) {
-            const win_h: f32 = @floatFromInt(client_size.cy - cs.cy);
+            const win_h: f32 = @floatFromInt(client_size.cy - tbh);
             const min_track_height: f32 = 20.0;
             const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
             const max_offset = sb.total - sb.len;
@@ -335,17 +337,18 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.cell_size;
+    const tbh = global.renderer.tab_bar_height;
     const client_size = win32.getClientSize(hwnd);
     const grid_w = client_size.cx -| @as(i32, d3d11.scrollbarWidth(win32.dpiFromHwnd(hwnd)));
 
     // Capture in progress takes priority over tab-bar hover.
     if (window.mouse_capture != .none) {
         tooltip.hide(window);
-        const grid_mouse_y = mouse_y - cs.cy;
+        const grid_mouse_y = mouse_y - tbh;
         switch (window.mouse_capture) {
             .none => {},
             .scrollbar_drag => {
-                const win_h: f32 = @floatFromInt(client_size.cy - cs.cy);
+                const win_h: f32 = @floatFromInt(client_size.cy - tbh);
                 const sb = window.active().term.screens.active.pages.scrollbar();
                 const min_track_height: f32 = 20.0;
                 const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
@@ -355,7 +358,7 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
             .selecting => {
                 const screen = window.active().term.screens.active;
                 const clamped_x: i32 = @max(0, @min(mouse_x, grid_w - 1));
-                const clamped_y: i32 = @max(0, @min(grid_mouse_y, client_size.cy - cs.cy - 1));
+                const clamped_y: i32 = @max(0, @min(grid_mouse_y, client_size.cy - tbh - 1));
                 const col: usize = @intCast(@divTrunc(clamped_x, cs.cx));
                 const row: usize = @intCast(@divTrunc(clamped_y, cs.cy));
                 if (screen.pages.pin(.{ .viewport = .{ .x = @intCast(col), .y = @intCast(row) } })) |pin| {
@@ -374,7 +377,7 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
     }
 
     // Tab bar hover
-    if (mouse_y < cs.cy) {
+    if (mouse_y < tbh) {
         const cell_count = window_geom.computeGridCellCount(hwnd, cs);
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
         if (!util.hitEql(window.tab_bar_hover, hit)) {
@@ -439,7 +442,7 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.cell_size;
-    if (mouse_y < cs.cy) {
+    if (mouse_y < global.renderer.tab_bar_height) {
         tooltip.hide(window);
         const cell_count = window_geom.computeGridCellCount(hwnd, cs);
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);

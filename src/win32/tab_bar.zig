@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const d3d11 = @import("d3d11.zig");
 const state = @import("state.zig");
 const types = @import("types.zig");
 
@@ -92,14 +91,16 @@ pub fn displayTitle(title: []const u8) []const u8 {
     return title;
 }
 
-pub fn buildTabBarRow(window: *Window, total_cols: usize, row: []d3d11.TabBarCell) void {
-    const bg_default = d3d11.TabBarCell.rgba(types.tab_bar_bg);
-    const fg_default = d3d11.TabBarCell.rgba(types.tab_bar_fg);
-    for (row) |*c| c.* = .{ .codepoint = ' ', .bg = bg_default, .fg = fg_default };
-
+// Builds the per-tab drawing list consumed by the proportional D2D painter.
+// Column ranges come straight from `layoutTabBar` (tab widths/buttons stay
+// column-based); the painter converts columns to pixels and draws titles with
+// DirectWrite. `buf` must hold at least MAX_TABS entries; titles borrow each
+// tab's title buffer and are valid only for the current render call.
+pub fn buildTabBarDraw(window: *Window, total_cols: usize, buf: []types.TabDrawInfo) types.TabBarDraw {
     const layout = layoutTabBar(window, total_cols);
+    var n: usize = 0;
     for (layout.entries()) |e| {
-        const is_active = e.tab_index == window.active_index;
+        if (n >= buf.len) break;
         const tab = window.tabs.items[e.tab_index];
         const close_hovered = if (window.tab_bar_hover) |h| switch (h) {
             .close => |idx| idx == e.tab_index,
@@ -109,69 +110,21 @@ pub fn buildTabBarRow(window: *Window, total_cols: usize, row: []d3d11.TabBarCel
             .activate => |idx| idx == e.tab_index,
             else => false,
         } else false;
-        const bg_u24: u24 = if (is_active) types.tab_active_bg else if (tab_hovered) types.tab_hover_bg else types.tab_bar_bg;
-        const fg_u24: u24 = if (is_active) types.tab_active_fg else types.tab_bar_fg;
-        const cell_bg = d3d11.TabBarCell.rgba(bg_u24);
-        const cell_fg = d3d11.TabBarCell.rgba(fg_u24);
-
-        var col = e.col_start;
-        while (col < e.col_end) : (col += 1) {
-            row[col] = .{ .codepoint = ' ', .bg = cell_bg, .fg = cell_fg };
-        }
-
-        // Title text, leaving room for a leading space and trailing " x"
-        const title_start = e.col_start + 1;
-        const title_end_inclusive = if (e.close_col > 1) e.close_col - 2 else e.col_start;
-        const max_title_cols = if (title_end_inclusive >= title_start) title_end_inclusive - title_start + 1 else 0;
-
-        const title = displayTitle(tab.title_buf[0..tab.title_len]);
-        var title_cols_written: usize = 0;
-        var i: usize = 0;
-        while (i < title.len and title_cols_written < max_title_cols) {
-            const seq_len = std.unicode.utf8ByteSequenceLength(title[i]) catch {
-                row[title_start + title_cols_written] = .{ .codepoint = '?', .bg = cell_bg, .fg = cell_fg };
-                title_cols_written += 1;
-                i += 1;
-                continue;
-            };
-            if (i + seq_len > title.len) break;
-            const cp = std.unicode.utf8Decode(title[i .. i + seq_len]) catch {
-                row[title_start + title_cols_written] = .{ .codepoint = '?', .bg = cell_bg, .fg = cell_fg };
-                title_cols_written += 1;
-                i += seq_len;
-                continue;
-            };
-            row[title_start + title_cols_written] = .{ .codepoint = @intCast(cp), .bg = cell_bg, .fg = cell_fg };
-            title_cols_written += 1;
-            i += seq_len;
-        }
-        // Pad title area with tab id digit if no title yet
-        if (tab.title_len == 0 and max_title_cols > 0) {
-            var idbuf: [12]u8 = undefined;
-            const s = std.fmt.bufPrint(&idbuf, "tab {d}", .{e.tab_index + 1}) catch idbuf[0..0];
-            const lim = @min(s.len, max_title_cols);
-            for (s[0..lim], 0..) |ch, k| {
-                row[title_start + k] = .{ .codepoint = ch, .bg = cell_bg, .fg = cell_fg };
-            }
-        }
-
-        // Close button '×'
-        if (e.close_col < e.col_end) {
-            const close_fg_u24: u24 = if (close_hovered) 0xff5555 else fg_u24;
-            row[e.close_col] = .{
-                .codepoint = 'x',
-                .bg = cell_bg,
-                .fg = d3d11.TabBarCell.rgba(close_fg_u24),
-            };
-        }
-    }
-    if (layout.new_tab_col) |c| {
-        const hover = if (window.tab_bar_hover) |h| h == .new_tab else false;
-        const fg_u24: u24 = if (hover) 0xffffff else types.new_tab_button_fg;
-        row[c] = .{
-            .codepoint = '+',
-            .bg = d3d11.TabBarCell.rgba(types.tab_bar_bg),
-            .fg = d3d11.TabBarCell.rgba(fg_u24),
+        buf[n] = .{
+            .col_start = @intCast(e.col_start),
+            .col_end = @intCast(e.col_end),
+            .close_col = @intCast(e.close_col),
+            .tab_number = @intCast(e.tab_index + 1),
+            .active = e.tab_index == window.active_index,
+            .hovered = tab_hovered,
+            .close_hovered = close_hovered,
+            .title = displayTitle(tab.title_buf[0..tab.title_len]),
         };
+        n += 1;
     }
+    return .{
+        .tabs = buf[0..n],
+        .new_tab_col = if (layout.new_tab_col) |c| @intCast(c) else null,
+        .new_tab_hovered = if (window.tab_bar_hover) |h| h == .new_tab else false,
+    };
 }

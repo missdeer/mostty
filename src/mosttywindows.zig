@@ -94,6 +94,8 @@ pub fn main() !void {
         },
         .font_size_pt = global.config.font_size_pt,
         .codepoint_maps = codepoint_maps_u16,
+        .tabbar_family = util.utf16FamilyOptional(gpa_alloc, global.config.tabbar_font_family),
+        .tabbar_font_size_pt = global.config.tabbar_font_size_pt,
     };
     global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
     const cell_size = global.renderer.cell_size;

@@ -64,6 +64,26 @@ font-size = 13.5
 
 Default: `13.0`.
 
+### `tabbar-font-family` / `tabbar-font-size`
+
+Override the font used to render tab-bar titles. When unset, the tab bar
+inherits `font-family`'s primary entry and `font-size` respectively.
+
+```
+tabbar-font-family = Segoe UI
+tabbar-font-size   = 11
+```
+
+`tabbar-font-family` uses only the primary family — if a comma list is given,
+only the first entry is taken; the terminal `font-family` chain still acts as
+the fallback for codepoints the tab-bar family lacks (CJK / emoji titles).
+`tabbar-font-size` must be a positive number.
+
+Tab titles are rendered proportionally (the font's natural glyph widths, not
+one glyph per terminal cell), and the tab-bar height auto-sizes to the tab-bar
+font's line height so the whole glyph is visible. Tab widths and the close/new
+buttons stay aligned to the terminal cell grid. Long titles are ellipsized.
+
 ### `font-family-bold` / `font-family-italic` / `font-family-bold-italic`
 
 Single family name to use for cells with the corresponding SGR style. When
