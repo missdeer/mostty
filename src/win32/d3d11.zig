@@ -99,6 +99,7 @@ glyph_cache_cell_size: ?CellXY = null,
 staging_texture: StagingTexture = .{},
 
 stats: DebugStats = .{},
+remote_or_software_adapter: bool = false,
 
 cell_size: win32.SIZE,
 cell_size_xy: CellXY,
@@ -203,7 +204,11 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         );
         if (hr < 0) fatalHr("D3D11CreateDevice", hr);
     }
-    log.info("D3D11 device created", .{});
+    const adapter_info = detectAdapter(device);
+    log.info(
+        "D3D11 device created: adapter='{s}', remote_or_software={}",
+        .{ adapter_info.name[0..adapter_info.name_len], adapter_info.remote_or_software },
+    );
 
     // Compile shaders
     const shader_source = @embedFile("terminal.hlsl");
@@ -335,7 +340,65 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         .effective_tabbar_primary = effective_tabbar_primary,
         .tabbar_font_size_pt = effective_tabbar_size,
         .tab_bar_height = tab_bar_height,
+        .remote_or_software_adapter = adapter_info.remote_or_software,
     };
+}
+
+const AdapterInfo = struct {
+    // desc.Description is [128]u16 — UTF-8 worst case is 4 bytes/wchar so the
+    // converted buffer must be at least 512 bytes, otherwise utf16LeToUtf8
+    // returns NoSpaceLeft on localized GPU names and the heuristic silently
+    // falls back to "unknown" + remote_or_software=false.
+    name: [512]u8,
+    name_len: usize,
+    remote_or_software: bool,
+};
+
+fn detectAdapter(device: *win32.ID3D11Device) AdapterInfo {
+    const dxgi_device = com.queryInterface(device, win32.IDXGIDevice);
+    defer _ = dxgi_device.IUnknown.Release();
+
+    var adapter: *win32.IDXGIAdapter = undefined;
+    {
+        const hr = dxgi_device.GetAdapter(&adapter);
+        if (hr < 0) return unknownAdapter();
+    }
+    defer _ = adapter.IUnknown.Release();
+
+    var desc: win32.DXGI_ADAPTER_DESC = undefined;
+    {
+        const hr = adapter.GetDesc(&desc);
+        if (hr < 0) return unknownAdapter();
+    }
+
+    const raw_name = std.mem.sliceTo(&desc.Description, 0);
+    var name_buf: [512]u8 = undefined;
+    const name_len = std.unicode.utf16LeToUtf8(&name_buf, raw_name) catch {
+        return unknownAdapter();
+    };
+    const name = name_buf[0..name_len];
+    const remote_or_software =
+        desc.VendorId == 0x1414 or
+        utf8ContainsIgnoreCase(name, "warp") or
+        utf8ContainsIgnoreCase(name, "basic render") or
+        utf8ContainsIgnoreCase(name, "remote");
+    return .{ .name = name_buf, .name_len = name_len, .remote_or_software = remote_or_software };
+}
+
+fn unknownAdapter() AdapterInfo {
+    var name_buf: [512]u8 = @splat(0);
+    @memcpy(name_buf[0.."unknown".len], "unknown");
+    return .{ .name = name_buf, .name_len = "unknown".len, .remote_or_software = false };
+}
+
+fn utf8ContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
 }
 
 pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
@@ -1052,6 +1115,12 @@ pub fn render(
     }
 
     {
+        // Sync interval 0: rate limiting lives in the SetTimer-driven render
+        // throttle on the UI side. Present(1) on a 60Hz display would stack
+        // with the 16ms software cap and halve effective FPS, and on RDP
+        // DXGI's vsync wait is emulated and can block the UI thread for
+        // arbitrary network-bound durations — exactly the CPU spike this
+        // change is meant to avoid.
         const hr = swap_chain.IDXGISwapChain.Present(0, 0);
         if (hr < 0) fatalHr("Present", hr);
     }

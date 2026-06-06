@@ -84,6 +84,12 @@ pub const Window = struct {
     // WM_PAINT before render() so events fired *during* render still
     // schedule a follow-up frame.
     render_pending: bool = false,
+    render_timer_armed: bool = false,
+    last_render_tick_ms: u64 = 0,
+    render_interval_ms: u32 = 16,
+    diag_last_tick_ms: u64 = 0,
+    diag_pty_bytes: u64 = 0,
+    diag_renders: u64 = 0,
     // System-menu "Theme" cascading submenu. Owned by the system menu once
     // attached, so Windows destroys it with the parent — no manual cleanup.
     // Items are rebuilt on each WM_INITMENUPOPUP.
@@ -101,7 +107,90 @@ pub const Window = struct {
     pub fn requestRender(self: *Window) void {
         if (self.render_pending) return;
         self.render_pending = true;
-        win32.invalidateHwnd(self.hwnd);
+        self.scheduleRender();
+    }
+
+    // Re-evaluates the active frame interval from the config caps and the
+    // current SM_REMOTESESSION reading, picking remote when either the system
+    // metric says we're under a remote session or the boot-time adapter probe
+    // flagged the GPU as remote/software (WARP, Basic Render, etc).
+    // Called from onCreate, on WM_WTSSESSION_CHANGE, and after config reload.
+    // If a frame timer was armed at the previous interval, it is cancelled so
+    // the next requestRender re-arms with the new value; render_pending stays
+    // true so the in-flight request isn't lost.
+    pub fn applyRenderInterval(
+        self: *Window,
+        local_ms: u32,
+        remote_ms: u32,
+        remote_or_software_adapter: bool,
+    ) void {
+        const remote_session = win32.GetSystemMetrics(win32.SM_REMOTESESSION) != 0;
+        const new_interval = if (remote_or_software_adapter or remote_session) remote_ms else local_ms;
+        if (new_interval == self.render_interval_ms) return;
+        std.log.info(
+            "render frame interval: {} ms -> {} ms (remote_session={}, remote_or_software_adapter={})",
+            .{ self.render_interval_ms, new_interval, remote_session, remote_or_software_adapter },
+        );
+        self.render_interval_ms = new_interval;
+        if (self.render_timer_armed) {
+            _ = win32.KillTimer(self.hwnd, types.TIMER_RENDER_FRAME);
+            self.render_timer_armed = false;
+            if (self.render_pending) win32.invalidateHwnd(self.hwnd);
+        }
+    }
+
+    pub fn scheduleRender(self: *Window) void {
+        const now = win32.GetTickCount64();
+        const elapsed = now -| self.last_render_tick_ms;
+        if (elapsed >= self.render_interval_ms) {
+            win32.invalidateHwnd(self.hwnd);
+            return;
+        }
+        if (self.render_timer_armed) return;
+        const delay: u32 = @max(1, self.render_interval_ms - @as(u32, @intCast(elapsed)));
+        // If SetTimer fails we MUST NOT mark the timer armed: render_pending
+        // is already true and nothing else clears it, so a phantom timer
+        // would freeze the renderer until external repaint. Fall back to an
+        // immediate invalidate — the budget is already exhausted anyway.
+        if (win32.SetTimer(self.hwnd, types.TIMER_RENDER_FRAME, delay, null) == 0) {
+            win32.invalidateHwnd(self.hwnd);
+            return;
+        }
+        self.render_timer_armed = true;
+    }
+
+    pub fn noteRender(self: *Window) void {
+        const now = win32.GetTickCount64();
+        self.last_render_tick_ms = now;
+        self.diag_renders += 1;
+        self.logDiagnostics(now);
+    }
+
+    // Hot path: WM_APP_CHILD_PROCESS_DATA fires on every PTY chunk. Keep this
+    // a single field bump; the diagnostic flush only happens on noteRender,
+    // which is naturally rate-limited by the render throttle.
+    pub fn notePtyBytes(self: *Window, len: u32) void {
+        self.diag_pty_bytes += len;
+    }
+
+    fn logDiagnostics(self: *Window, now: u64) void {
+        if (self.diag_last_tick_ms == 0) {
+            self.diag_last_tick_ms = now;
+            return;
+        }
+        const elapsed = now - self.diag_last_tick_ms;
+        if (elapsed < 1000) return;
+        // Guard the divide: the boot sentinel and any future "reset before
+        // reapply" path could leave render_interval_ms == 0 in principle;
+        // cheaper to be defensive here than to audit every call site.
+        const fps_cap: u32 = if (self.render_interval_ms > 0) @divTrunc(1000, self.render_interval_ms) else 0;
+        std.log.info(
+            "render stats: {} fps cap, {} render(s)/s, {} PTY byte(s)/s",
+            .{ fps_cap, self.diag_renders, self.diag_pty_bytes },
+        );
+        self.diag_last_tick_ms = now;
+        self.diag_renders = 0;
+        self.diag_pty_bytes = 0;
     }
 
     pub fn findById(self: *Window, id: TabId) ?*Tab {

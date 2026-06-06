@@ -39,6 +39,14 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         const window = global_mod.windowFromHwnd(hwnd);
         window.requestRender();
     }
+    if (wparam == types.TIMER_RENDER_FRAME) {
+        const window = global_mod.windowFromHwnd(hwnd);
+        _ = win32.KillTimer(hwnd, types.TIMER_RENDER_FRAME);
+        window.render_timer_armed = false;
+        if (window.render_pending) {
+            win32.invalidateHwnd(hwnd);
+        }
+    }
     return 0;
 }
 
@@ -128,6 +136,16 @@ fn reloadConfig(hwnd: win32.HWND) void {
     var old = global.config;
     global.config = new_cfg;
     old.deinit();
+
+    // render-interval-*-ms may have changed; re-apply against the current
+    // session state. No-op when the effective interval is unchanged.
+    if (global.window) |*window| {
+        window.applyRenderInterval(
+            global.config.render_interval_local_ms,
+            global.config.render_interval_remote_ms,
+            global.renderer.remote_or_software_adapter,
+        );
+    }
 
     if (font_changed) {
         if (global.window) |*window| {
@@ -455,6 +473,21 @@ pub fn onDropFiles(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win
     return 0;
 }
 
+// WTS posts this whenever the session changes state (RDP connect/disconnect,
+// console connect/disconnect, lock/unlock, etc). We don't care which event
+// fired — we just re-poll SM_REMOTESESSION and let applyRenderInterval pick
+// the right cap. Cheap; runs only on session transitions, not per frame.
+pub fn onWtsSessionChange(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    const window = global_mod.windowFromHwnd(hwnd);
+    std.log.info("WTS session change event: {}", .{wparam});
+    window.applyRenderInterval(
+        global.config.render_interval_local_ms,
+        global.config.render_interval_remote_ms,
+        global.renderer.remote_or_software_adapter,
+    );
+    return 0;
+}
+
 pub fn onAppChildProcessData(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     const read_msg: *const ReadMsg = @ptrFromInt(wparam);
     // Always return the magic value, even when dropping payload.
@@ -463,6 +496,7 @@ pub fn onAppChildProcessData(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARA
     const tab = window.findById(read_msg.tab_id) orelse return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
     if (tab.closing) return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
     tab.vt_stream.nextSlice(read_msg.data[0..read_msg.len]);
+    window.notePtyBytes(read_msg.len);
     window.requestRender();
     return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
 }

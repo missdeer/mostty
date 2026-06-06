@@ -26,6 +26,7 @@ pub fn onPaint(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESUL
     if (win32.IsIconic(hwnd) != 0) return 0;
     window.render_pending = false;
     render.renderWindow(window);
+    window.noteRender();
     return 0;
 }
 
@@ -94,6 +95,7 @@ pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARA
     // frame lost.
     window.render_pending = false;
     render.renderWindow(window);
+    window.noteRender();
     if (!window.render_pending) {
         _ = win32.ValidateRect(hwnd, null);
     }

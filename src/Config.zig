@@ -171,6 +171,14 @@ color_overrides: ColorOverrides = .{},
 // stay opaque so highlighted regions remain readable.
 background_opacity: f32 = 0.94,
 
+// Render-throttle frame interval (ms). Two independent caps because the
+// "right" cadence differs: local D3D presents are nearly free at 60 FPS,
+// while a remote/RDP session pays per-frame for the encoded delta over the
+// wire. Effective interval is recomputed on session-change (WTS) events.
+// Validated range 1..1000; out-of-range values fall back to the default.
+render_interval_local_ms: u32 = 16,
+render_interval_remote_ms: u32 = 33,
+
 arena: ?std.heap.ArenaAllocator = null,
 
 // The default config location, %LOCALAPPDATA%/Mostty/config. Returns null when
@@ -243,6 +251,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var tabbar_font_family: []const u8 = &.{};
     var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
+    var render_interval_local_ms: u32 = 16;
+    var render_interval_remote_ms: u32 = 33;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
     var theme: ThemeColors = .{};
@@ -360,6 +370,18 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             tabbar_font_size_pt = n;
+        } else if (std.mem.eql(u8, key, "render-interval-local-ms")) {
+            const n = parseRenderIntervalMs(value) orelse {
+                std.log.warn("config: {s}:{}: invalid render-interval-local-ms '{s}' (expect 1..1000)", .{ source_name, line_no, value });
+                continue;
+            };
+            render_interval_local_ms = n;
+        } else if (std.mem.eql(u8, key, "render-interval-remote-ms")) {
+            const n = parseRenderIntervalMs(value) orelse {
+                std.log.warn("config: {s}:{}: invalid render-interval-remote-ms '{s}' (expect 1..1000)", .{ source_name, line_no, value });
+                continue;
+            };
+            render_interval_remote_ms = n;
         } else if (std.mem.eql(u8, key, "background-opacity")) {
             const n = std.fmt.parseFloat(f32, value) catch {
                 std.log.warn("config: {s}:{}: invalid background-opacity '{s}'", .{ source_name, line_no, value });
@@ -407,8 +429,18 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .theme_name = theme_name,
         .color_overrides = overrides,
         .background_opacity = background_opacity,
+        .render_interval_local_ms = render_interval_local_ms,
+        .render_interval_remote_ms = render_interval_remote_ms,
         .arena = arena,
     };
+}
+
+// 1..1000 ms: 1 ms is effectively "no throttle" (a single GetTickCount tick),
+// 1000 ms is 1 FPS — anything outside that range is almost certainly a typo.
+fn parseRenderIntervalMs(value: []const u8) ?u32 {
+    const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, " \t"), 10) catch return null;
+    if (n < 1 or n > 1000) return null;
+    return n;
 }
 
 // Empty value is treated as `.default` so users can clear a previously-set

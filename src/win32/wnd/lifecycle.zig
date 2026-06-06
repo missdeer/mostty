@@ -13,6 +13,21 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     std.debug.assert(global.window == null);
     global.window = .{ .hwnd = hwnd };
     const window = &global.window.?;
+    // Boot the renderer at whatever cadence the current session deserves, then
+    // keep it in sync by subscribing to WTS session-change notifications so
+    // an RDP connect/disconnect after launch toggles the cap dynamically.
+    // Sentinel 0 forces applyRenderInterval to log the initial value (its
+    // no-op check is "new == current", which would otherwise skip the log
+    // when the local config matches the struct default).
+    window.render_interval_ms = 0;
+    window.applyRenderInterval(
+        global.config.render_interval_local_ms,
+        global.config.render_interval_remote_ms,
+        global.renderer.remote_or_software_adapter,
+    );
+    if (win32.WTSRegisterSessionNotification(hwnd, win32.NOTIFY_FOR_THIS_SESSION) == 0) {
+        std.log.warn("WTSRegisterSessionNotification failed; render interval will not adapt to RDP connect/disconnect", .{});
+    }
     if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
         _ = win32.AppendMenuW(menu, win32.MF_SEPARATOR, 0, null);
         if (win32.CreatePopupMenu()) |sub| {
@@ -49,8 +64,11 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     return 0;
 }
 
-pub fn onDestroy(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+pub fn onDestroy(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     if (global.window) |*window| {
+        // Paired with the registration in onCreate. Best-effort; if it failed
+        // at register time the unregister is a harmless no-op.
+        _ = win32.WTSUnRegisterSessionNotification(hwnd);
         tooltip.destroy(window);
         tab_mgmt.destroyAllTabs(window);
         if (window.active_theme_name) |s| {
