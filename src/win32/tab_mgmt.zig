@@ -157,6 +157,7 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         cell_count,
         tab.id,
         &tab.reader_stop,
+        global.config.env,
     ) catch {
         // User-configurable launchers can fail (bad path, missing exe, etc.);
         // surface and abandon this tab rather than crashing the whole app.

@@ -3,6 +3,7 @@ const win32 = @import("win32").everything;
 const types = @import("types.zig");
 const util = @import("util.zig");
 const err_mod = @import("error.zig");
+const Config = @import("../Config.zig");
 
 const Error = err_mod.Error;
 const GridPos = types.GridPos;
@@ -52,7 +53,10 @@ pub const ChildProcess = struct {
         if (hr < 0) return out_err.setHresult("ResizePseudoConsole", hr);
     }
 
-    fn buildChildEnvBlock(allocator: std.mem.Allocator) ![]u16 {
+    fn buildChildEnvBlock(
+        allocator: std.mem.Allocator,
+        extra: []const Config.EnvEntry,
+    ) ![]u16 {
         const block = win32.GetEnvironmentStringsW() orelse return error.GetEnvFailed;
         defer _ = win32.FreeEnvironmentStringsW(block);
 
@@ -74,31 +78,63 @@ pub const ChildProcess = struct {
             override_bufs.deinit(allocator);
         }
 
-        const term_override = try util.utf16ZAlloc(allocator, "TERM=xterm-256color");
-        try override_bufs.append(allocator, term_override);
+        // User-configured env entries first; later same-named user entries
+        // replace earlier ones. The hardcoded TERM default is only added if
+        // the user hasn't set one.
+        for (extra) |e| {
+            const line = try std.fmt.allocPrint(allocator, "{s}={s}", .{ e.name, e.value });
+            defer allocator.free(line);
+            const u16_line = try util.utf16ZAlloc(allocator, line);
+            // u16_line is unowned until the append below succeeds; free on early
+            // exit so an OOM in append doesn't leak it (the outer defer only
+            // frees what's already in override_bufs).
+            errdefer allocator.free(u16_line);
+            // Drop any earlier override with the same name so the last one
+            // wins. orderedRemove (vs swapRemove) preserves declaration order
+            // for deterministic env-block layout.
+            var k: usize = 0;
+            while (k < override_bufs.items.len) {
+                if (entryNameMatches(override_bufs.items[k], u16_line)) {
+                    const removed = override_bufs.orderedRemove(k);
+                    allocator.free(removed);
+                } else k += 1;
+            }
+            try override_bufs.append(allocator, u16_line);
+        }
+
+        if (!hasOverrideForAsciiName(override_bufs.items, "TERM")) {
+            const term_override = try util.utf16ZAlloc(allocator, "TERM=xterm-256color");
+            errdefer allocator.free(term_override);
+            try override_bufs.append(allocator, term_override);
+        }
 
         var modified: std.ArrayListUnmanaged([]const u16) = .empty;
         defer modified.deinit(allocator);
 
+        // Track which overrides have already been emitted, so two parent-env
+        // entries colliding to the same override (theoretical with case-insensitive
+        // matching) don't duplicate the override in the output. Replaces the
+        // older pass-2 ptr-equality scan with O(n) bookkeeping.
+        var emitted: std.ArrayListUnmanaged(bool) = .empty;
+        defer emitted.deinit(allocator);
+        try emitted.resize(allocator, override_bufs.items.len);
+        @memset(emitted.items, false);
+
         outer: for (entries.items) |entry| {
-            for (override_bufs.items) |override| {
+            for (override_bufs.items, 0..) |override, oi| {
                 if (entryNameMatches(entry, override)) {
-                    try modified.append(allocator, override);
+                    if (!emitted.items[oi]) {
+                        try modified.append(allocator, override);
+                        emitted.items[oi] = true;
+                    }
                     continue :outer;
                 }
             }
             try modified.append(allocator, entry);
         }
         // Append overrides that weren't present in the original block.
-        for (override_bufs.items) |override| {
-            var found = false;
-            for (modified.items) |entry| {
-                if (entry.ptr == override.ptr) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) try modified.append(allocator, override);
+        for (override_bufs.items, 0..) |override, oi| {
+            if (!emitted.items[oi]) try modified.append(allocator, override);
         }
 
         var total: usize = 1; // final double null
@@ -114,12 +150,42 @@ pub const ChildProcess = struct {
         return buf;
     }
 
+    // ASCII case-insensitive fold for u16 (matches Windows env semantics, which
+    // are case-insensitive in the ASCII range; non-ASCII codepoints pass through
+    // unchanged — fine because env names are conventionally ASCII).
+    fn foldU16(c: u16) u16 {
+        return if (c >= 'A' and c <= 'Z') c + ('a' - 'A') else c;
+    }
+
     fn entryNameMatches(entry: []const u16, override: []const u16) bool {
         const eq: u16 = '=';
         const ei = std.mem.indexOfScalar(u16, entry, eq) orelse return false;
         const oi = std.mem.indexOfScalar(u16, override, eq) orelse return false;
         if (ei != oi) return false;
-        return std.mem.eql(u16, entry[0..ei], override[0..oi]);
+        for (entry[0..ei], override[0..oi]) |a, b| {
+            if (foldU16(a) != foldU16(b)) return false;
+        }
+        return true;
+    }
+
+    // True if any of `items` (each `NAME=VALUE` in UTF-16) has NAME equal to
+    // the given ASCII string. Compared ASCII case-insensitively (shared
+    // foldU16) to match Windows env conventions.
+    fn hasOverrideForAsciiName(items: []const []u16, name: []const u8) bool {
+        for (items) |item| {
+            const eq: u16 = '=';
+            const ei = std.mem.indexOfScalar(u16, item, eq) orelse continue;
+            if (ei != name.len) continue;
+            var ok = true;
+            for (item[0..ei], name) |a, b| {
+                if (foldU16(a) != foldU16(@as(u16, b))) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return true;
+        }
+        return false;
     }
 
     pub fn startConPtyWin32(
@@ -134,6 +200,7 @@ pub const ChildProcess = struct {
         cell_count: GridPos,
         tab_id: TabId,
         stop_flag: *std.atomic.Value(bool),
+        extra_env: []const Config.EnvEntry,
     ) error{Error}!ChildProcess {
         var sec_attr: win32.SECURITY_ATTRIBUTES = .{
             .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
@@ -242,7 +309,7 @@ pub const ChildProcess = struct {
             },
             .lpAttributeList = attr_list.ptr,
         };
-        const child_env = buildChildEnvBlock(allocator) catch |e| switch (e) {
+        const child_env = buildChildEnvBlock(allocator, extra_env) catch |e| switch (e) {
             error.OutOfMemory => util.oom(error.OutOfMemory),
             error.GetEnvFailed => return out_err.setWin32("GetEnvironmentStringsW", win32.GetLastError()),
         };

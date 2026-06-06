@@ -33,6 +33,8 @@ The file is watched live. Saving it re-applies changes without a restart:
 - **Theme/color** changes re-baseline every tab's colors (preserving any live
   `OSC 10/11/12/4` color overrides an app set at runtime).
 - **Launchers** are read on demand, so they take effect immediately.
+- **Env entries** apply to newly-spawned tabs. Existing tabs keep the
+  environment they were started with (ConPTY's environment is fixed at spawn).
 
 ---
 
@@ -306,6 +308,36 @@ launcher = WSL home | wsl.exe ~ | C:\Users\me
 
 May be repeated to define multiple launchers.
 
+### `env`
+
+Inject an environment variable into every newly-spawned tab's child process.
+The value is `NAME=VALUE`.
+
+```
+env = LANG=en_US.UTF-8
+env = LC_CTYPE=zh_CN.UTF-8
+env = COLORTERM=truecolor
+```
+
+May be repeated. Each entry is one variable; comma lists are not parsed here.
+
+**NAME** must be printable ASCII without spaces or `=`. **VALUE** is UTF-8;
+may contain `=` (everything after the first `=` is the value) and may be
+empty (`env = FOO=` sets `FOO` to the empty string).
+
+**Precedence.** Config entries replace same-named variables inherited from
+the Mostty process environment. Names are compared case-insensitively to
+match Windows env semantics (so `env = path=...` replaces a parent `Path`).
+If multiple `env` lines share a name, the last one wins.
+
+**`TERM`.** Mostty injects `TERM=xterm-256color` into every child by default.
+An explicit `env = TERM=<value>` overrides that default.
+
+**SSH note.** Setting `env = LANG=...` only makes `LANG` available to the
+Windows-side shell. To forward it to a remote host over SSH, add `SendEnv
+LANG LC_*` to `~/.ssh/config` (the remote `sshd` must accept the same names
+via `AcceptEnv`, which macOS/Linux defaults usually do).
+
 ---
 
 ## Example config
@@ -326,4 +358,6 @@ render-interval-local-ms  = 16
 render-interval-remote-ms = 33
 launcher                = PowerShell | powershell.exe
 launcher                = WSL | wsl.exe ~
+env                     = LANG=en_US.UTF-8
+env                     = LC_CTYPE=zh_CN.UTF-8
 ```

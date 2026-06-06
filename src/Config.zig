@@ -12,6 +12,14 @@ pub const Launcher = struct {
     working_directory: []const u8, // empty = inherit parent
 };
 
+// One `env = NAME=VALUE` line. Applied per new tab when spawning the ConPTY
+// child; same-named entries in the parent process environment (and the
+// hardcoded `TERM` default) are replaced.
+pub const EnvEntry = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 // One contiguous range of codepoints that should resolve to a specific font
 // family during DirectWrite fallback (i.e. when the preferred family for the
 // active text format doesn't cover the codepoint). `range_end` is inclusive;
@@ -157,6 +165,7 @@ tabbar_font_family: []const u8 = &.{},
 tabbar_font_size_pt: ?f32 = null,
 font_codepoint_maps: []const CodepointMap = &.{},
 launchers: []const Launcher = &.{},
+env: []const EnvEntry = &.{},
 theme: ThemeColors = .{},
 // Resolved name from the last `theme = X` line in the config (with Ghostty's
 // `light:/dark:` variant already picked). Arena-owned; null when the config
@@ -255,6 +264,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var render_interval_remote_ms: u32 = 33;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
+    var envs: std.ArrayListUnmanaged(EnvEntry) = .empty;
     var theme: ThemeColors = .{};
     var overrides: ColorOverrides = .{};
     var theme_name: ?[]const u8 = null;
@@ -402,6 +412,12 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             };
             launchers.append(a, launcher) catch oom();
+        } else if (std.mem.eql(u8, key, "env")) {
+            const entry = parseEnvEntry(a, value) orelse {
+                std.log.warn("config: {s}:{}: invalid env '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+            envs.append(a, entry) catch oom();
         } else {
             std.log.warn("config: {s}:{}: unknown key '{s}'", .{ source_name, line_no, key });
         }
@@ -410,6 +426,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     const families_slice = families.toOwnedSlice(a) catch oom();
     const codepoint_maps_slice = codepoint_maps.toOwnedSlice(a) catch oom();
     const launchers_slice = launchers.toOwnedSlice(a) catch oom();
+    const envs_slice = envs.toOwnedSlice(a) catch oom();
     return .{
         .font_families = families_slice,
         .font_family_bold = family_bold,
@@ -425,6 +442,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .tabbar_font_size_pt = tabbar_font_size_pt,
         .font_codepoint_maps = codepoint_maps_slice,
         .launchers = launchers_slice,
+        .env = envs_slice,
         .theme = theme,
         .theme_name = theme_name,
         .color_overrides = overrides,
@@ -847,6 +865,31 @@ fn parseLauncher(a: std.mem.Allocator, value: []const u8) ?Launcher {
     };
 }
 
+// Parses `NAME=VALUE`. NAME is trimmed; must be non-empty pure ASCII (printable,
+// no NUL, no '='). VALUE is everything after the first '=' (trimmed of
+// surrounding whitespace, interior whitespace preserved); must be UTF-8 with
+// no NUL. ASCII-only NAME matches Windows env conventions and lets the
+// downstream override match use ASCII case folding without losing entries.
+// Returns null on any violation — caller logs and discards the line.
+fn parseEnvEntry(a: std.mem.Allocator, value: []const u8) ?EnvEntry {
+    const eq = std.mem.indexOfScalar(u8, value, '=') orelse return null;
+    const name = std.mem.trim(u8, value[0..eq], " \t");
+    const val = std.mem.trim(u8, value[eq + 1 ..], " \t");
+    if (name.len == 0) return null;
+    for (name) |c| {
+        // Printable ASCII only, excluding space and '='. (Space is excluded
+        // because POSIX tools choke on it; '=' is impossible here because we
+        // split on the first '=' but keep this defensive.)
+        if (c <= 0x20 or c >= 0x7F or c == '=') return null;
+    }
+    if (std.mem.indexOfScalar(u8, val, 0) != null) return null;
+    if (!std.unicode.utf8ValidateSlice(val)) return null;
+    return .{
+        .name = a.dupe(u8, name) catch oom(),
+        .value = a.dupe(u8, val) catch oom(),
+    };
+}
+
 pub fn deinit(self: *Config) void {
     if (self.arena) |*a| a.deinit();
     self.* = undefined;
@@ -1005,6 +1048,64 @@ test "parseSyntheticStyle: true/false/list/invalid" {
     // Unknown token poisons the whole line.
     try std.testing.expectEqual(@as(?SyntheticStyle, null), parseSyntheticStyle("no-bold,bogus"));
     try std.testing.expectEqual(@as(?SyntheticStyle, null), parseSyntheticStyle(""));
+}
+
+test "parse env: simple, with spaces in value, rejects bad lines" {
+    const src =
+        \\env = LANG=en_US.UTF-8
+        \\env =   LC_CTYPE = zh_CN.UTF-8
+        \\env = WITH_SPACES=hello world
+        \\env = =NOKEY
+        \\env = NOVALUE_LINE_NO_EQ
+        \\env = TERM=xterm-direct
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 4), cfg.env.len);
+    try std.testing.expectEqualStrings("LANG", cfg.env[0].name);
+    try std.testing.expectEqualStrings("en_US.UTF-8", cfg.env[0].value);
+    try std.testing.expectEqualStrings("LC_CTYPE", cfg.env[1].name);
+    try std.testing.expectEqualStrings("zh_CN.UTF-8", cfg.env[1].value);
+    try std.testing.expectEqualStrings("WITH_SPACES", cfg.env[2].name);
+    try std.testing.expectEqualStrings("hello world", cfg.env[2].value);
+    try std.testing.expectEqualStrings("TERM", cfg.env[3].name);
+    try std.testing.expectEqualStrings("xterm-direct", cfg.env[3].value);
+}
+
+test "parse env: rejects non-ASCII / spaced / NUL-laden names; accepts UTF-8 values" {
+    const src = "env = \xE4\xB8\xAD=cjk-name-rejected\n" ++
+        "env = HAS SPACE=v\n" ++
+        "env = OK=\xE6\x9C\x9D\xE5\xA4\x95\n";
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 1), cfg.env.len);
+    try std.testing.expectEqualStrings("OK", cfg.env[0].name);
+    try std.testing.expectEqualStrings("\xE6\x9C\x9D\xE5\xA4\x95", cfg.env[0].value);
+}
+
+test "parse env: value may contain '=', empty value allowed, duplicate names kept in order" {
+    // Edge cases flagged in review:
+    //   - VALUE may contain '=' (e.g. PATH-like values, query strings)
+    //   - empty VALUE is legal (unsets a parent var to "")
+    //   - duplicate user keys are both stored at the parser layer; downstream
+    //     dedupe (in child_process.buildChildEnvBlock) is "last wins".
+    const src =
+        \\env = QUERY=a=1&b=2
+        \\env = EMPTY=
+        \\env = DUP=first
+        \\env = DUP=second
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 4), cfg.env.len);
+    try std.testing.expectEqualStrings("QUERY", cfg.env[0].name);
+    try std.testing.expectEqualStrings("a=1&b=2", cfg.env[0].value);
+    try std.testing.expectEqualStrings("EMPTY", cfg.env[1].name);
+    try std.testing.expectEqualStrings("", cfg.env[1].value);
+    try std.testing.expectEqualStrings("DUP", cfg.env[2].name);
+    try std.testing.expectEqualStrings("first", cfg.env[2].value);
+    try std.testing.expectEqualStrings("DUP", cfg.env[3].name);
+    try std.testing.expectEqualStrings("second", cfg.env[3].value);
 }
 
 test "font-thicken/font-shaping-break are silently ignored" {
