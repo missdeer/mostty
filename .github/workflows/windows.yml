@@ -22,6 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
+        cpu: [baseline, x86_64_v2, x86_64_v3]
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +31,7 @@ jobs:
           version: 0.15.2
 
       - name: Build
-        run: zig build -Doptimize=${{ matrix.optimize }}
+        run: zig build -Doptimize=${{ matrix.optimize }} -Dcpu=${{ matrix.cpu }}
 
       - name: Stage artifact
         shell: pwsh
@@ -42,6 +43,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Mostty-windows-x86_64-${{ matrix.optimize }}
+          name: Mostty-windows-${{ matrix.cpu }}-${{ matrix.optimize }}
           path: dist/
           if-no-files-found: error
