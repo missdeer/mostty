@@ -255,6 +255,36 @@ palette = 1=#ff5555
 palette = 200=#ff00ff
 ```
 
+### `render-interval-local-ms` / `render-interval-remote-ms`
+
+Minimum interval (in milliseconds) between rendered frames. Mostty coalesces
+render requests behind a `SetTimer`-driven cap so a burst of PTY output does
+not fire one `WM_PAINT` per chunk. Two independent caps are kept because the
+"right" cadence differs by session type:
+
+- `render-interval-local-ms` — used when running on a local console with a
+  hardware GPU. Default `16` (~60 FPS).
+- `render-interval-remote-ms` — used when Windows reports a remote session
+  (`SM_REMOTESESSION`) or the active DXGI adapter is a software renderer
+  (WARP / Microsoft Basic Render Driver). Default `33` (~30 FPS), since every
+  frame in an RDP session pays a per-frame encode over the wire.
+
+```
+render-interval-local-ms  = 16
+render-interval-remote-ms = 33
+```
+
+Each value is a positive integer in `1..1000`. Out-of-range or non-numeric
+values are warned and the default is kept. `1` is effectively "no throttle";
+`1000` is 1 FPS.
+
+The active cap is re-evaluated on every Windows session-state change
+(`WM_WTSSESSION_CHANGE` — RDP connect/disconnect, console switch, lock /
+unlock), so connecting over RDP to a running Mostty instance switches the
+window to the remote cap without a restart. Editing these keys in the config
+file also takes effect immediately via the same re-application path (no
+restart needed).
+
 ### `launcher`
 
 Defines an entry for opening a new tab with a custom command. The value is:
@@ -292,6 +322,8 @@ font-codepoint-map      = U+1F300-U+1F9FF=Segoe UI Emoji
 theme                   = light:Rose Pine Dawn, dark:Rose Pine
 background              = #191724
 palette                 = 1 = #eb6f92
+render-interval-local-ms  = 16
+render-interval-remote-ms = 33
 launcher                = PowerShell | powershell.exe
 launcher                = WSL | wsl.exe ~
 ```
