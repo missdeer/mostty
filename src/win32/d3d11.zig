@@ -116,7 +116,6 @@ dcomp_visual: *win32.IDCompositionVisual = undefined,
 
 // Per-window state (lazily initialized)
 swap_chain: ?*win32.IDXGISwapChain2 = null,
-target_view: ?*win32.ID3D11RenderTargetView = null,
 shader_cells: ShaderCells = .{},
 // CPU shadow of the GPU cell buffer. Per-row equality vs scratch picks
 // which rows actually need UpdateSubresource; on a steady-state terminal
@@ -133,11 +132,10 @@ staging_texture: StagingTexture = .{},
 stats: DebugStats = .{},
 remote_or_software_adapter: bool = false,
 // Set by Present when DXGI returns DXGI_STATUS_OCCLUDED (window fully
-// covered or display-mode-locked). While true, the final Present call
-// becomes Present(0, DXGI_PRESENT_TEST) — no swap-chain bandwidth, just
-// polling for visibility. Cleared when Present returns any other success
-// HRESULT. The rest of render() still runs as normal; only the Present
-// call changes.
+// covered or display-mode-locked). While true, render() first sends a cheap
+// Present(0, DXGI_PRESENT_TEST) probe. If the window is still occluded we
+// skip the expensive draw/copy path; if it is visible again, the same call
+// continues through a full redraw and a normal Present.
 occluded: bool = false,
 
 // Always-on renderer diagnostics (~24 bytes overhead). Flushed once per
@@ -218,9 +216,9 @@ tab_bar_height: i32,
 // Offscreen target the tab bar is painted into, then copied onto the back
 // buffer's top strip. Recreated on resize / height change by getOrCreate.
 band_texture: gpu.BandTexture = .{},
-// Back-buffer texture retained alongside target_view so it can be the
-// CopySubresourceRegion destination for the tab-bar band. Released/reacquired
-// with target_view.
+// Back-buffer texture retained so the persistent grid texture and tab-bar band
+// can be copied into the current flip-model back buffer. Released/reacquired
+// on swap-chain resize.
 back_buffer_tex: ?*win32.ID3D11Texture2D = null,
 
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
@@ -636,8 +634,6 @@ pub fn deinit(self: *D3d11Renderer) void {
     // Clear all D3D state and flush before releasing the swap chain,
     // otherwise DXGI keeps the window surface and GDI can't draw to it.
     self.context.ClearState();
-    if (self.target_view) |tv| _ = tv.IUnknown.Release();
-    self.target_view = null;
     if (self.back_buffer_tex) |bb| _ = bb.IUnknown.Release();
     self.back_buffer_tex = null;
     // Step B persistent grid: release RTV before its underlying texture
@@ -699,12 +695,8 @@ pub fn render(
         if (hr < 0) fatalHr("GetSourceSize", hr);
         if (sc_w != client_w or sc_h != client_h) {
             self.context.ClearState();
-            if (self.target_view) |tv| {
-                _ = tv.IUnknown.Release();
-                self.target_view = null;
-            }
             // The retained back buffer is stale once the swap chain resizes;
-            // drop it so createRenderTargetView reacquires the new one.
+            // drop it so acquireBackBufferTexture reacquires the new one.
             if (self.back_buffer_tex) |bb| {
                 _ = bb.IUnknown.Release();
                 self.back_buffer_tex = null;
@@ -729,6 +721,24 @@ pub fn render(
                 @intFromEnum(win32.DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT),
             );
             if (rhr < 0) fatalHr("ResizeBuffers", rhr);
+        }
+    }
+
+    // If the window is fully covered, don't spend CPU rebuilding cells,
+    // repainting the grid, copying textures, or drawing the tab bar. A TEST
+    // present only probes visibility and does not submit a frame; once it
+    // succeeds, continue through this same render() call and finish with a
+    // normal Present so the restored window updates immediately.
+    if (self.occluded) {
+        const hr = swap_chain.IDXGISwapChain.Present(0, win32.DXGI_PRESENT_TEST);
+        if (hr == DXGI_STATUS_OCCLUDED) {
+            self.grid_force_full = true;
+            return;
+        } else if (hr >= 0) {
+            self.occluded = false;
+            self.grid_force_full = true;
+        } else {
+            fatalHr("Present(TEST)", hr);
         }
     }
 
@@ -1195,14 +1205,7 @@ pub fn render(
         }
     }
 
-    // Acquire/refresh back_buffer_tex via createRenderTargetView when needed.
-    // target_view is no longer used as the draw target (Step B draws into
-    // grid_rtv instead) but createRenderTargetView's side effect of
-    // populating back_buffer_tex is still needed for the CopyResource
-    // delivery below and the tab-bar CopySubresourceRegion further down.
-    if (self.target_view == null) {
-        self.target_view = self.createRenderTargetView(swap_chain, client_w, client_h);
-    }
+    self.acquireBackBufferTexture(swap_chain);
 
     // Step B draw-scope decision:
     //   - grid_force_full → full client-area scissor; redraw everything
@@ -1348,18 +1351,13 @@ pub fn render(
         // before returning, naturally back-pressuring producer rate to
         // actual consumer throughput.
         //
-        // When OCCLUDED (window fully covered), use Present(0, TEST) so we
-        // poll for visibility without consuming swap-chain bandwidth. Any
-        // non-OCCLUDED success HRESULT (S_OK, DXGI_STATUS_PRESENT_REQUIRED,
-        // etc.) clears the flag.
-        const sync_interval: u32 = if (self.occluded)
-            0
-        else if (self.remote_or_software_adapter)
+        // OCCLUDED is handled by the cheap early TEST probe at the top of
+        // render(). This final Present always submits the frame.
+        const sync_interval: u32 = if (self.remote_or_software_adapter)
             1
         else
             0;
-        const flags: u32 = if (self.occluded) win32.DXGI_PRESENT_TEST else 0;
-        const hr = swap_chain.IDXGISwapChain.Present(sync_interval, flags);
+        const hr = swap_chain.IDXGISwapChain.Present(sync_interval, 0);
         if (hr == DXGI_STATUS_OCCLUDED) {
             self.occluded = true;
         } else if (hr >= 0) {
@@ -1482,48 +1480,19 @@ fn initSwapChain(self: *D3d11Renderer, hwnd: win32.HWND, width: u32, height: u32
     return swap_chain2;
 }
 
-fn createRenderTargetView(
-    self: *D3d11Renderer,
-    swap_chain: *win32.IDXGISwapChain2,
-    width: u32,
-    height: u32,
-) *win32.ID3D11RenderTargetView {
+fn acquireBackBufferTexture(self: *D3d11Renderer, swap_chain: *win32.IDXGISwapChain2) void {
+    if (self.back_buffer_tex != null) return;
+
     var back_buffer: *win32.ID3D11Texture2D = undefined;
     {
         const hr = swap_chain.IDXGISwapChain.GetBuffer(0, win32.IID_ID3D11Texture2D, @ptrCast(&back_buffer));
         if (hr < 0) fatalHr("GetBuffer", hr);
     }
-    // Retain the back buffer as the CopySubresourceRegion destination for the
-    // tab-bar band. Released/replaced together with target_view.
-    if (self.back_buffer_tex) |old| _ = old.IUnknown.Release();
     self.back_buffer_tex = back_buffer;
 
-    var target_view: *win32.ID3D11RenderTargetView = undefined;
-    {
-        // Swap chain is B8G8R8A8_UNORM (flip-model + DComp require it), but
-        // the RTV uses the _SRGB view so the GPU does linear→sRGB encoding
-        // on store. Shader blends in linear space.
-        const rtv_desc: win32.D3D11_RENDER_TARGET_VIEW_DESC = .{
-            .Format = .B8G8R8A8_UNORM_SRGB,
-            .ViewDimension = .TEXTURE2D,
-            .Anonymous = .{ .Texture2D = .{ .MipSlice = 0 } },
-        };
-        const hr = self.device.CreateRenderTargetView(&back_buffer.ID3D11Resource, &rtv_desc, &target_view);
-        if (hr < 0) fatalHr("CreateRenderTargetView", hr);
-    }
-
-    var viewport = win32.D3D11_VIEWPORT{
-        .TopLeftX = 0,
-        .TopLeftY = 0,
-        .Width = @floatFromInt(width),
-        .Height = @floatFromInt(height),
-        .MinDepth = 0.0,
-        .MaxDepth = 0.0,
-    };
-    self.context.RSSetViewports(1, @ptrCast(&viewport));
+    // ClearState during swap-chain resize resets IA state; restore the
+    // full-screen triangle topology when reacquiring the back buffer.
     self.context.IASetPrimitiveTopology(._PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-    return target_view;
 }
 
 /// Grow `shadow_cells` to hold `count` entries. Returns true on grow so the
@@ -1582,10 +1551,9 @@ fn uploadCellRow(
 }
 
 /// Create the persistent grid texture (B8G8R8A8_UNORM) and its sRGB RTV.
-/// Mirrors the swap-chain back-buffer setup at d3d11.zig:createRenderTargetView
-/// — resource is UNORM, RTV is _SRGB so the GPU does linear→sRGB encoding on
-/// store and CopyResource between the grid texture and back buffer is a
-/// byte-exact transfer with no gamma reinterpretation.
+/// Uses an sRGB RTV so the GPU does linear→sRGB encoding on store, then
+/// CopyResource transfers the encoded bytes to the swap-chain back buffer
+/// without gamma reinterpretation.
 fn ensureGridTexture(self: *D3d11Renderer, width: u32, height: u32) void {
     if (self.grid_texture != null and
         self.grid_texture_size.cx == @as(i32, @intCast(width)) and
