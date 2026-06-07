@@ -38,6 +38,13 @@ pub fn setupGlyphAtlas(self: *D3d11Renderer) gpu.AtlasFrame {
             _ = self.glyph_cache_arena.reset(.retain_capacity);
             self.glyph_cache = null;
         }
+        // Glyph cache reset → atlas slot assignments will change; any
+        // already-baked grid texture pixels referencing the old slots are
+        // stale. Force a full grid redraw next render to be safe even
+        // though current callers (font/DPI reload, tex-size change) also
+        // perturb the GridConfigSnapshot. Maintains the design invariant:
+        // every glyph_cache reset path sets grid_force_full.
+        self.grid_force_full = true;
     }
 
     if (self.glyph_cache == null) {

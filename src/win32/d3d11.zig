@@ -17,6 +17,12 @@ const tabbar_paint = @import("d3d11/tabbar_paint.zig");
 
 const log = std.log.scoped(.d3d);
 
+// DXGI success code: window is fully covered (compositor will discard the
+// Present). Positive HRESULT, so `if (hr < 0)` won't catch it. Not defined
+// by zigwin32 (only the negative DXGI_ERROR_* set is exposed); spelled out
+// from the dxgi.h SDK header.
+const DXGI_STATUS_OCCLUDED: i32 = 0x087A0001;
+
 // Re-exports for external callers (state/render/tab_bar/tab_mgmt depend on
 // these). New code inside the renderer should prefer the module-qualified
 // names (`font_mod.FontConfig`, etc.).
@@ -52,6 +58,32 @@ const debug_stats_enabled = builtin.mode == .Debug;
 const DebugStats = struct {
     rows_uploaded: u64 = 0,
     rows_skipped: u64 = 0,
+};
+
+// Snapshot of every GridConfig const-buffer field that does NOT flow through
+// the per-row cell-upload diff. Compared frame-to-frame in render(); any
+// mismatch sets grid_force_full=true so the persistent grid texture is
+// fully redrawn this frame.
+//
+// What's deliberately NOT here: theme/opacity/background-color changes flow
+// into per-cell uploads (blank cells re-upload when eff_bg changes), so the
+// per-row dirty path already covers them. Glyph atlas LRU eviction during
+// steady rendering doesn't invalidate already-baked grid pixels.
+const GridConfigSnapshot = struct {
+    cell_w: u16 = 0,
+    cell_h: u16 = 0,
+    col_count: u32 = 0,
+    row_count: u32 = 0,
+    cells_per_row: u16 = 0,
+    tab_bar_height: u32 = 0,
+    scrollbar_x: f32 = 0,
+    scrollbar_y: f32 = 0,
+    scrollbar_width: f32 = 0,
+    scrollbar_height: f32 = 0,
+
+    fn eql(a: GridConfigSnapshot, b: GridConfigSnapshot) bool {
+        return std.meta.eql(a, b);
+    }
 };
 
 // D3D11 core
@@ -100,6 +132,49 @@ staging_texture: StagingTexture = .{},
 
 stats: DebugStats = .{},
 remote_or_software_adapter: bool = false,
+// Set by Present when DXGI returns DXGI_STATUS_OCCLUDED (window fully
+// covered or display-mode-locked). While true, the final Present call
+// becomes Present(0, DXGI_PRESENT_TEST) — no swap-chain bandwidth, just
+// polling for visibility. Cleared when Present returns any other success
+// HRESULT. The rest of render() still runs as normal; only the Present
+// call changes.
+occluded: bool = false,
+
+// Always-on renderer diagnostics (~24 bytes overhead). Flushed once per
+// second by maybeLogDiag() at the end of render(). Promoted out of the
+// Debug-only DebugStats above because the spinner-CPU investigation needs
+// these in release builds too. Last-log timestamp uses GetTickCount64 (u64
+// ms) to match the Window-level diagnostics in state.zig — keeping both
+// flushes on one clock prevents their loglines from drifting apart.
+diag_tabbar_paints: u64 = 0,
+diag_rows_uploaded: u64 = 0,
+diag_rows_skipped: u64 = 0,
+diag_last_log_ms: u64 = 0,
+
+// --- Persistent grid texture (Step B) ---
+// Sized to the full client area; the cell pixel shader renders into this
+// texture with scissor restricted to rows that actually changed this frame.
+// Each frame the entire texture is CopyResource'd to the swap-chain back
+// buffer (flip-model back-buffer content is undefined after Present, so
+// partial redraws against the back buffer aren't possible — but the
+// persistent texture lets us do partial redraws into a surface we own,
+// then deliver in full via a cheap memcpy-equivalent on WARP).
+//
+// `grid_force_full` is set on:
+//   - first frame after (re)create
+//   - any GridConfigSnapshot mismatch (see snapshot field)
+//   - font reload, DPI change (anywhere glyph_cache is reset)
+// and cleared at the end of render() only when a draw actually ran.
+//
+// The resource is B8G8R8A8_UNORM; the RTV is B8G8R8A8_UNORM_SRGB. This
+// mirrors the swap-chain back-buffer setup exactly so CopyResource is a
+// byte-for-byte transfer with no color reinterpretation.
+grid_texture: ?*win32.ID3D11Texture2D = null,
+grid_rtv: ?*win32.ID3D11RenderTargetView = null,
+grid_texture_size: win32.SIZE = .{ .cx = 0, .cy = 0 },
+scissor_rasterizer_state: ?*win32.ID3D11RasterizerState = null,
+grid_force_full: bool = true,
+last_const_snapshot: GridConfigSnapshot = .{},
 
 cell_size: win32.SIZE,
 cell_size_xy: CellXY,
@@ -452,6 +527,12 @@ pub fn updateDpi(self: *D3d11Renderer, dpi: u32) void {
     }
     _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_cache_cell_size = null;
+    // Glyph rendering inputs changed: already-baked pixels in the
+    // persistent grid texture are stale even if the per-row shadow diff
+    // would otherwise skip them. Force a full redraw next frame. Cheap
+    // insurance — also redundantly covered by cell_size changing in the
+    // GridConfigSnapshot compare, but explicit beats audit.
+    self.grid_force_full = true;
 }
 
 // Re-applies font configuration at runtime (config hot-reload). Unlike
@@ -528,6 +609,11 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
     }
     _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_cache_cell_size = null;
+    // A font hot-reload can change face/fallback/style while keeping the
+    // cell size identical — same shadow_cells bytes, same atlas slot
+    // numbers after rebuild, but different rendered pixels. The per-row
+    // diff alone would falsely skip rows; force a full grid redraw.
+    self.grid_force_full = true;
 }
 
 pub fn deinit(self: *D3d11Renderer) void {
@@ -554,6 +640,15 @@ pub fn deinit(self: *D3d11Renderer) void {
     self.target_view = null;
     if (self.back_buffer_tex) |bb| _ = bb.IUnknown.Release();
     self.back_buffer_tex = null;
+    // Step B persistent grid: release RTV before its underlying texture
+    // (RTV holds a ref on the resource), then release the texture and
+    // the rasterizer state.
+    if (self.grid_rtv) |rtv| _ = rtv.IUnknown.Release();
+    self.grid_rtv = null;
+    if (self.grid_texture) |t| _ = t.IUnknown.Release();
+    self.grid_texture = null;
+    if (self.scissor_rasterizer_state) |rs| _ = rs.IUnknown.Release();
+    self.scissor_rasterizer_state = null;
     self.context.Flush();
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
@@ -614,6 +709,17 @@ pub fn render(
                 _ = bb.IUnknown.Release();
                 self.back_buffer_tex = null;
             }
+            // Persistent grid texture is sized to the client area; resize
+            // invalidates it. Release RTV before texture (RTV holds the ref).
+            // Lazy-init below recreates at the new size with grid_force_full.
+            if (self.grid_rtv) |rtv| {
+                _ = rtv.IUnknown.Release();
+                self.grid_rtv = null;
+            }
+            if (self.grid_texture) |t| {
+                _ = t.IUnknown.Release();
+                self.grid_texture = null;
+            }
             self.context.Flush();
             const rhr = swap_chain.IDXGISwapChain.ResizeBuffers(
                 0,
@@ -625,6 +731,13 @@ pub fn render(
             if (rhr < 0) fatalHr("ResizeBuffers", rhr);
         }
     }
+
+    // Persistent grid texture (Step B): create or recreate to match the
+    // current client size; ensureGridTexture sets grid_force_full on (re)create.
+    // Also lazily create the ScissorEnable=TRUE rasterizer state. Both are
+    // safe to call every frame — they early-return when up to date.
+    self.ensureGridTexture(client_w, client_h);
+    _ = self.ensureScissorRasterizerState();
 
     const cs = self.cell_size_xy;
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
@@ -655,6 +768,51 @@ pub fn render(
     const glyph_cache = atlas.cache;
     const tex_cell_count = atlas.tex_cell_count;
 
+    // Compute scrollbar geometry once so both the const-buffer write and the
+    // GridConfigSnapshot compare see the same values. Coordinates are
+    // RT-absolute: the grid sits below the tab-bar band so the scrollbar's y
+    // origin is the band height.
+    var sb_geom: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    {
+        const sb = term.screens.active.pages.scrollbar();
+        const show_scrollbar = sb.total > sb.len and (!term.screens.active.viewportIsBottom() or mouse_in_scrollbar);
+        if (show_scrollbar) {
+            const sb_origin_y: f32 = @floatFromInt(tab_bar_h);
+            const win_h: f32 = @floatFromInt(client_h -| tab_bar_h);
+            const min_track_height: f32 = 20.0;
+            const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
+            const max_offset = sb.total - sb.len;
+            const track_y = sb_origin_y + @as(f32, @floatFromInt(sb.offset)) / @as(f32, @floatFromInt(max_offset)) * (win_h - track_height);
+            sb_geom = .{
+                .x = @floatFromInt(grid_w),
+                .y = track_y,
+                .w = @floatFromInt(sb_px),
+                .h = track_height,
+            };
+        }
+    }
+
+    // Step B: compare every const-buffer field that does NOT flow through
+    // per-cell uploads against last frame's snapshot. Any mismatch means
+    // pixels in the grid texture could be stale outside the row-dirty rect
+    // (e.g. scrollbar moved without any cell change). Force a full redraw.
+    const new_snapshot: GridConfigSnapshot = .{
+        .cell_w = cs.x,
+        .cell_h = cs.y,
+        .col_count = shader_col,
+        .row_count = term_shader_row,
+        .cells_per_row = tex_cell_count.x,
+        .tab_bar_height = tab_bar_h,
+        .scrollbar_x = sb_geom.x,
+        .scrollbar_y = sb_geom.y,
+        .scrollbar_width = sb_geom.w,
+        .scrollbar_height = sb_geom.h,
+    };
+    if (!new_snapshot.eql(self.last_const_snapshot)) {
+        self.grid_force_full = true;
+        self.last_const_snapshot = new_snapshot;
+    }
+
     // Update constant buffer
     {
         var mapped: win32.D3D11_MAPPED_SUBRESOURCE = undefined;
@@ -677,32 +835,10 @@ pub fn render(
         // called GetDimensions per pixel and divided by cell_size.
         config.cells_per_row = tex_cell_count.x;
         config.tab_bar_height = tab_bar_h;
-
-        // Compute scrollbar geometry in pixels (within the reserved scrollbar area).
-        // Coordinates are RT-absolute: the grid sits below the tab-bar band, so the
-        // scrollbar's y origin is the band height.
-        const sb = term.screens.active.pages.scrollbar();
-        const show_scrollbar = sb.total > sb.len and (!term.screens.active.viewportIsBottom() or mouse_in_scrollbar);
-        if (show_scrollbar) {
-            const sb_x: f32 = @floatFromInt(grid_w);
-            const sb_w: f32 = @floatFromInt(sb_px);
-            const sb_origin_y: f32 = @floatFromInt(tab_bar_h);
-            const win_h: f32 = @floatFromInt(client_h -| tab_bar_h);
-            const min_track_height: f32 = 20.0;
-            const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
-            const max_offset = sb.total - sb.len;
-            const track_y = sb_origin_y + @as(f32, @floatFromInt(sb.offset)) / @as(f32, @floatFromInt(max_offset)) * (win_h - track_height);
-
-            config.scrollbar_x = sb_x;
-            config.scrollbar_width = sb_w;
-            config.scrollbar_y = track_y;
-            config.scrollbar_height = track_height;
-        } else {
-            config.scrollbar_x = 0;
-            config.scrollbar_width = 0;
-            config.scrollbar_y = 0;
-            config.scrollbar_height = 0;
-        }
+        config.scrollbar_x = sb_geom.x;
+        config.scrollbar_width = sb_geom.w;
+        config.scrollbar_y = sb_geom.y;
+        config.scrollbar_height = sb_geom.h;
     }
 
     // Build cell buffer from terminal state (terminal-only; the tab bar is a
@@ -727,6 +863,13 @@ pub fn render(
         .b = @intCast(eff_bg & 0xFF),
         .a = opacity_byte,
     };
+
+    // Step B: track the dirty row range across this frame's cell uploads
+    // so the persistent grid texture can be scissored to those rows only.
+    // Initialized at outer scope so the post-loop draw-scope decision can
+    // read it even when cell_count == 0 (no rows touched this frame).
+    var dirty_min_row: ?u32 = null;
+    var dirty_max_row: ?u32 = null;
 
     const cells_recreated = self.shader_cells.updateCount(self.device, cell_count);
     if (cell_count > 0) {
@@ -965,7 +1108,10 @@ pub fn render(
             }
 
             const dst_row_offset = screen_row * shader_col;
-            self.uploadCellRow(dst_row_offset, scratch, force_full);
+            if (self.uploadCellRow(dst_row_offset, scratch, force_full)) {
+                if (dirty_min_row == null or screen_row < dirty_min_row.?) dirty_min_row = screen_row;
+                if (dirty_max_row == null or screen_row > dirty_max_row.?) dirty_max_row = screen_row;
+            }
         }
         // Fill remaining terminal rows with blanks. The row content is identical
         // across iterations so we build scratch once and let uploadCellRow's diff
@@ -974,7 +1120,10 @@ pub fn render(
             @memset(scratch, blank_cell);
             while (screen_row < term_shader_row) : (screen_row += 1) {
                 const dst_row_offset = screen_row * shader_col;
-                self.uploadCellRow(dst_row_offset, scratch, force_full);
+                if (self.uploadCellRow(dst_row_offset, scratch, force_full)) {
+                    if (dirty_min_row == null or screen_row < dirty_min_row.?) dirty_min_row = screen_row;
+                    if (dirty_max_row == null or screen_row > dirty_max_row.?) dirty_max_row = screen_row;
+                }
             }
         }
 
@@ -1032,7 +1181,10 @@ pub fn render(
                         }
                     }
                 }
-                self.uploadCellRow(dst_row_offset, scratch, true);
+                if (self.uploadCellRow(dst_row_offset, scratch, true)) {
+                    if (dirty_min_row == null or by < dirty_min_row.?) dirty_min_row = by;
+                    if (dirty_max_row == null or by > dirty_max_row.?) dirty_max_row = by;
+                }
             }
         }
 
@@ -1043,26 +1195,65 @@ pub fn render(
         }
     }
 
-    // Create render target view if needed
+    // Acquire/refresh back_buffer_tex via createRenderTargetView when needed.
+    // target_view is no longer used as the draw target (Step B draws into
+    // grid_rtv instead) but createRenderTargetView's side effect of
+    // populating back_buffer_tex is still needed for the CopyResource
+    // delivery below and the tab-bar CopySubresourceRegion further down.
     if (self.target_view == null) {
         self.target_view = self.createRenderTargetView(swap_chain, client_w, client_h);
     }
 
-    // Draw
-    {
-        var target_views = [_]?*win32.ID3D11RenderTargetView{self.target_view.?};
+    // Step B draw-scope decision:
+    //   - grid_force_full → full client-area scissor; redraw everything
+    //   - dirty_min_row != null → scissor to that row strip only
+    //   - else → no row content changed, no const-buffer change; skip Draw
+    //     entirely. The persistent grid texture still holds the correct
+    //     image from the previous render(); CopyResource below delivers it
+    //     to the freshly-rotated back buffer.
+    const full_redraw = self.grid_force_full or resizing;
+    const have_row_dirty = dirty_min_row != null;
+    const do_draw = full_redraw or have_row_dirty;
+
+    if (do_draw) {
+        // Bind the persistent grid texture as the draw target. Unlike the
+        // back buffer (which is rotated after each Present, contents
+        // undefined), the grid texture is owned by us and retains pixels
+        // across frames — that's what makes the scissor optimization safe.
+        var target_views = [_]?*win32.ID3D11RenderTargetView{self.grid_rtv.?};
         self.context.OMSetRenderTargets(target_views.len, &target_views, null);
-    }
-    // Clear to transparent black for DWM glass compositing (whole RT; the band
-    // strip stays transparent here and is overwritten by the band copy below).
-    {
-        const clear_color = [4]f32{ 0, 0, 0, 0 };
-        self.context.ClearRenderTargetView(self.target_view.?, @ptrCast(&clear_color));
-    }
-    // Offset the grid below the tab-bar band. Set every frame from the current
-    // size + tab_bar_h: a font/DPI/config reload can change tab_bar_h without a
-    // swapchain resize (stale-viewport bug otherwise).
-    {
+
+        // Compute scissor rect. When full_redraw, cover the entire client
+        // area; otherwise restrict to the dirty row strip (in RT-absolute
+        // pixel coords, including the tab-bar offset since the viewport
+        // below is also tab-bar-offset and the rasterizer applies viewport
+        // first, then scissor). right/bottom are exclusive per D3D11 spec;
+        // clamp bottom to client_h defensively.
+        const scissor: win32.RECT = if (full_redraw) .{
+            .left = 0,
+            .top = 0,
+            .right = @intCast(client_w),
+            .bottom = @intCast(client_h),
+        } else blk: {
+            const last_row = term_shader_row -| 1;
+            const lo = @min(dirty_min_row.?, last_row);
+            const hi = @min(dirty_max_row.?, last_row);
+            const y0_u: u32 = tab_bar_h + lo * cs.y;
+            const y1_u: u32 = @min(tab_bar_h + (hi + 1) * cs.y, client_h);
+            break :blk .{
+                .left = 0,
+                .top = @intCast(y0_u),
+                .right = @intCast(client_w),
+                .bottom = @intCast(y1_u),
+            };
+        };
+        self.context.RSSetState(self.scissor_rasterizer_state.?);
+        self.context.RSSetScissorRects(1, @ptrCast(&scissor));
+
+        // Offset the grid below the tab-bar band. Set every frame from
+        // the current size + tab_bar_h: a font/DPI/config reload can
+        // change tab_bar_h without a swap-chain resize (stale-viewport
+        // bug otherwise).
         var viewport = win32.D3D11_VIEWPORT{
             .TopLeftX = 0,
             .TopLeftY = @floatFromInt(tab_bar_h),
@@ -1072,21 +1263,49 @@ pub fn render(
             .MaxDepth = 0.0,
         };
         self.context.RSSetViewports(1, @ptrCast(&viewport));
+
+        self.context.PSSetConstantBuffers(0, 1, @ptrCast(@constCast(&self.const_buf)));
+        var resources = [_]?*win32.ID3D11ShaderResourceView{
+            if (cell_count > 0) self.shader_cells.cell_view else null,
+            self.glyph_texture.view,
+        };
+        self.context.PSSetShaderResources(0, resources.len, &resources);
+        self.context.VSSetShader(self.vertex_shader, null, 0);
+        self.context.PSSetShader(self.pixel_shader, null, 0);
+        // ClearRenderTargetView is intentionally NOT called here: the cell
+        // shader writes every pixel inside the scissor rect (background
+        // color even for blank cells). Outside the scissor, the persistent
+        // grid texture retains the previous frame's correct pixels. First
+        // frame after (re)create has grid_force_full=true → scissor = full
+        // client area → shader covers everything. Cleared-clear ignores
+        // scissor and would wipe the persistent texture's valid regions.
+        self.context.Draw(4, 0);
+
+        // Clear the force-full flag only now that a redraw actually ran —
+        // matches the rev-3 design discipline (don't drop the flag on a
+        // skipped frame, otherwise the next non-skipped frame would miss
+        // the full redraw it needed).
+        self.grid_force_full = false;
     }
-    self.context.PSSetConstantBuffers(0, 1, @ptrCast(@constCast(&self.const_buf)));
-    var resources = [_]?*win32.ID3D11ShaderResourceView{
-        if (cell_count > 0) self.shader_cells.cell_view else null,
-        self.glyph_texture.view,
-    };
-    self.context.PSSetShaderResources(0, resources.len, &resources);
-    self.context.VSSetShader(self.vertex_shader, null, 0);
-    self.context.PSSetShader(self.pixel_shader, null, 0);
-    self.context.Draw(4, 0);
+
+    // Deliver the grid texture to the back buffer. Always runs — flip-model
+    // gave us a fresh undefined back buffer; the grid texture (whether
+    // updated above or unchanged from last frame) is the correct image.
+    // Unbind RTVs first: CopyResource forbids src or dst being currently
+    // bound as an RTV / SRV in the immediate context.
+    self.context.OMSetRenderTargets(0, null, null);
+    if (self.back_buffer_tex) |bb| {
+        self.context.CopyResource(
+            &bb.ID3D11Resource,
+            &self.grid_texture.?.ID3D11Resource,
+        );
+    }
 
     // Tab-bar band: paint proportionally into the offscreen band texture, then
     // copy it onto the back buffer's top strip. Mirrors the glyph-staging
     // pattern (D2D EndDraw flushes before the D3D copy reads the texture).
     if (tab_bar_h > 0) {
+        self.diag_tabbar_paints += 1;
         const band = self.band_texture.getOrCreate(self.device, self.d2d_factory, client_w, tab_bar_h);
         tabbar_paint.paint(
             band.render_target,
@@ -1115,15 +1334,74 @@ pub fn render(
     }
 
     {
-        // Sync interval 0: rate limiting lives in the SetTimer-driven render
-        // throttle on the UI side. Present(1) on a 60Hz display would stack
-        // with the 16ms software cap and halve effective FPS, and on RDP
-        // DXGI's vsync wait is emulated and can block the UI thread for
-        // arbitrary network-bound durations — exactly the CPU spike this
-        // change is meant to avoid.
-        const hr = swap_chain.IDXGISwapChain.Present(0, 0);
-        if (hr < 0) fatalHr("Present", hr);
+        // Local hardware: Present(0,0). SetTimer caps producer rate; DXGI
+        // offloads rasterization to TPP workers without blocking the UI
+        // thread, and a sync-interval would just stack with the 16ms cap.
+        //
+        // Remote/software (RDP w/o RemoteFX → WARP): Present(1,0). Software
+        // rasterization can't sustain 60fps anyway, so the "halve FPS"
+        // concern from the local path doesn't apply. Critically, the
+        // SetTimer cap only bounds paint frequency; with WARP each frame
+        // still costs real CPU on worker threads, and uncapped producer
+        // rate piles up workers (~30% CPU during spinner animation).
+        // Present(1) makes DXGI wait for the previous frame's workers
+        // before returning, naturally back-pressuring producer rate to
+        // actual consumer throughput.
+        //
+        // When OCCLUDED (window fully covered), use Present(0, TEST) so we
+        // poll for visibility without consuming swap-chain bandwidth. Any
+        // non-OCCLUDED success HRESULT (S_OK, DXGI_STATUS_PRESENT_REQUIRED,
+        // etc.) clears the flag.
+        const sync_interval: u32 = if (self.occluded)
+            0
+        else if (self.remote_or_software_adapter)
+            1
+        else
+            0;
+        const flags: u32 = if (self.occluded) win32.DXGI_PRESENT_TEST else 0;
+        const hr = swap_chain.IDXGISwapChain.Present(sync_interval, flags);
+        if (hr == DXGI_STATUS_OCCLUDED) {
+            self.occluded = true;
+        } else if (hr >= 0) {
+            self.occluded = false;
+        } else {
+            fatalHr("Present", hr);
+        }
     }
+
+    self.maybeLogDiag(client_w, client_h, shader_col, term_shader_row);
+}
+
+// 1Hz flush of the renderer-side diagnostic counters into std.log.info,
+// which the file logger in mosttywindows.zig writes to tmp/mostty.log.
+// Lives next to the counters rather than in state.zig because state.zig
+// cannot import d3d11.zig without a circular dependency. Skipped on the
+// very first call (no prior tick to diff against). Includes grid + client
+// dims so "rows/s uploaded" has a denominator (e.g. 18/(30*24) = 2.5% of
+// available rows actually changed per second).
+fn maybeLogDiag(self: *D3d11Renderer, client_w: u32, client_h: u32, cols: u32, rows: u32) void {
+    const now = win32.GetTickCount64();
+    if (self.diag_last_log_ms == 0) {
+        self.diag_last_log_ms = now;
+        return;
+    }
+    if (now - self.diag_last_log_ms < 1000) return;
+    log.info(
+        "renderer stats: {}x{} grid ({}x{} px), {} tabbar paint(s)/s, {} row(s)/s uploaded, {} row(s)/s skipped",
+        .{
+            cols,
+            rows,
+            client_w,
+            client_h,
+            self.diag_tabbar_paints,
+            self.diag_rows_uploaded,
+            self.diag_rows_skipped,
+        },
+    );
+    self.diag_last_log_ms = now;
+    self.diag_tabbar_paints = 0;
+    self.diag_rows_uploaded = 0;
+    self.diag_rows_skipped = 0;
 }
 
 // --- Swap chain ---
@@ -1261,13 +1539,15 @@ fn ensureShadowCapacity(self: *D3d11Renderer, count: u32) bool {
 
 /// Diff `scratch` against the shadow row at `row_start_cell`; if changed (or
 /// `force_full`), push the row to the GPU via UpdateSubresource and sync the
-/// shadow. `row_start_cell` is in cell units (not bytes).
+/// shadow. `row_start_cell` is in cell units (not bytes). Returns true iff the
+/// row was actually uploaded — Step B uses this to track the dirty row range
+/// for scissoring the persistent grid texture's draw.
 fn uploadCellRow(
     self: *D3d11Renderer,
     row_start_cell: u32,
     scratch: []const shader.Cell,
     force_full: bool,
-) void {
+) bool {
     const shadow_row = self.shadow_cells[row_start_cell..][0..scratch.len];
     if (!force_full and std.mem.eql(
         u8,
@@ -1275,9 +1555,11 @@ fn uploadCellRow(
         std.mem.sliceAsBytes(scratch),
     )) {
         if (comptime debug_stats_enabled) self.stats.rows_skipped += 1;
-        return;
+        self.diag_rows_skipped += 1;
+        return false;
     }
     if (comptime debug_stats_enabled) self.stats.rows_uploaded += 1;
+    self.diag_rows_uploaded += 1;
     const cell_bytes: u32 = @sizeOf(shader.Cell);
     const box: win32.D3D11_BOX = .{
         .left = row_start_cell * cell_bytes,
@@ -1296,4 +1578,96 @@ fn uploadCellRow(
         0,
     );
     @memcpy(shadow_row, scratch);
+    return true;
+}
+
+/// Create the persistent grid texture (B8G8R8A8_UNORM) and its sRGB RTV.
+/// Mirrors the swap-chain back-buffer setup at d3d11.zig:createRenderTargetView
+/// — resource is UNORM, RTV is _SRGB so the GPU does linear→sRGB encoding on
+/// store and CopyResource between the grid texture and back buffer is a
+/// byte-exact transfer with no gamma reinterpretation.
+fn ensureGridTexture(self: *D3d11Renderer, width: u32, height: u32) void {
+    if (self.grid_texture != null and
+        self.grid_texture_size.cx == @as(i32, @intCast(width)) and
+        self.grid_texture_size.cy == @as(i32, @intCast(height)))
+    {
+        return;
+    }
+    // Release RTV before the underlying texture (RTV holds a ref on the resource).
+    if (self.grid_rtv) |rtv| {
+        _ = rtv.IUnknown.Release();
+        self.grid_rtv = null;
+    }
+    if (self.grid_texture) |t| {
+        _ = t.IUnknown.Release();
+        self.grid_texture = null;
+    }
+    // Resource is TYPELESS so we can create an `_SRGB` RTV view on it.
+    // CreateTexture2D with format `B8G8R8A8_UNORM` would refuse a
+    // `B8G8R8A8_UNORM_SRGB` RTV (E_INVALIDARG = 0x80070057) — D3D11
+    // requires the view format to be in the same typeless family as the
+    // resource format. The swap-chain back buffer gets away with
+    // UNORM-resource + _SRGB-RTV only because DXGI flip-model internally
+    // creates the back buffers as TYPELESS as a special concession; that
+    // concession doesn't extend to user-created textures.
+    //
+    // CopyResource(back_buffer:UNORM, grid:TYPELESS) is allowed: both
+    // formats are in the BGRA8 type group, satisfying the
+    // "same-type-group" compatibility rule.
+    const desc: win32.D3D11_TEXTURE2D_DESC = .{
+        .Width = width,
+        .Height = height,
+        .MipLevels = 1,
+        .ArraySize = 1,
+        .Format = .B8G8R8A8_TYPELESS,
+        .SampleDesc = .{ .Count = 1, .Quality = 0 },
+        .Usage = .DEFAULT,
+        .BindFlags = .{ .RENDER_TARGET = 1 },
+        .CPUAccessFlags = .{},
+        .MiscFlags = .{},
+    };
+    var tex: *win32.ID3D11Texture2D = undefined;
+    {
+        const hr = self.device.CreateTexture2D(&desc, null, &tex);
+        if (hr < 0) fatalHr("CreateTexture2D(grid)", hr);
+    }
+    var rtv: *win32.ID3D11RenderTargetView = undefined;
+    {
+        const rtv_desc: win32.D3D11_RENDER_TARGET_VIEW_DESC = .{
+            .Format = .B8G8R8A8_UNORM_SRGB,
+            .ViewDimension = .TEXTURE2D,
+            .Anonymous = .{ .Texture2D = .{ .MipSlice = 0 } },
+        };
+        const hr = self.device.CreateRenderTargetView(&tex.ID3D11Resource, &rtv_desc, &rtv);
+        if (hr < 0) fatalHr("CreateRenderTargetView(grid)", hr);
+    }
+    self.grid_texture = tex;
+    self.grid_rtv = rtv;
+    self.grid_texture_size = .{ .cx = @intCast(width), .cy = @intCast(height) };
+    // Fresh texture content is undefined; the next render must cover every
+    // pixel inside the visible client area, not just the dirty row range.
+    self.grid_force_full = true;
+}
+
+/// Lazily create the rasterizer state with ScissorEnable=TRUE. Reused across
+/// frames (device-lifetime). All other fields are D3D11 defaults.
+fn ensureScissorRasterizerState(self: *D3d11Renderer) *win32.ID3D11RasterizerState {
+    if (self.scissor_rasterizer_state) |rs| return rs;
+    const desc: win32.D3D11_RASTERIZER_DESC = .{
+        .FillMode = .SOLID,
+        .CullMode = .NONE,
+        .FrontCounterClockwise = 0,
+        .DepthBias = 0,
+        .DepthBiasClamp = 0,
+        .SlopeScaledDepthBias = 0,
+        .DepthClipEnable = 1,
+        .ScissorEnable = 1,
+        .MultisampleEnable = 0,
+        .AntialiasedLineEnable = 0,
+    };
+    var rs: *win32.ID3D11RasterizerState = undefined;
+    const hr = self.device.CreateRasterizerState(&desc, &rs);
+    if (hr < 0) fatalHr("CreateRasterizerState(scissor)", hr);
+    self.scissor_rasterizer_state = rs;
+    return rs;
 }

@@ -17,21 +17,33 @@
 
 ### Phase 1: per-adapter Present sync_interval + OCCLUDED 处理
 
-- [ ] **改动 1**：`src/win32/d3d11.zig:1124` 的 `Present(0, 0)` 改为按适配器选择：
+- [x] **改动 1**：`src/win32/d3d11.zig:1124` 的 `Present(0, 0)` 改为按适配器选择：
   ```zig
   const sync_interval: u32 = if (self.remote_or_software_adapter) 1 else 0;
   const hr = swap_chain.IDXGISwapChain.Present(sync_interval, 0);
   ```
   原理：软件路径下 `Present(1, 0)` 让 DXGI 等上一帧 TPP worker 做完才返回，自然反压 producer rate 到 consumer 实际吞吐。
+  实现细节：sync_interval 选择与 occluded 状态联动（occluded 时强制 0 + `DXGI_PRESENT_TEST`）。
 
-- [ ] **改动 2**：补 `DXGI_STATUS_OCCLUDED` 处理（0x087A0001，正数，当前 `if (hr < 0)` 不会触发）：
+- [x] **改动 2**：补 `DXGI_STATUS_OCCLUDED` 处理（0x087A0001，正数，当前 `if (hr < 0)` 不会触发）：
   - 收到 OCCLUDED 后，renderer 进入 occluded 状态，后续 paint 改用 `Present(0, DXGI_PRESENT_TEST)` 轮询
   - 收到 `S_OK` 时恢复正常路径
   - 窗口最小化路径（`IsIconic`）已经短路 paint，不需要额外处理
+  实现细节：`D3d11Renderer` 加 `occluded: bool = false` 字段；`DXGI_STATUS_OCCLUDED` 常量在 d3d11.zig 顶部手动定义（zigwin32 只导出负向 DXGI_ERROR_*，未导出该 success code）。
 
-- [ ] **改动 3**：保留现有 SetTimer 节流不动。本地硬件路径它仍是 fps cap；软件路径它变成上限保护，由 Present(1) 真正反压。
+- [x] **改动 3**：保留现有 SetTimer 节流不动。本地硬件路径它仍是 fps cap；软件路径它变成上限保护，由 Present(1) 真正反压。
 
-- [ ] **改动 4**：commit message 解释「为什么 35d1351 review 时反对 Present(1) 的两条理由（叠加 cap 砍半 FPS / RDP vsync 阻塞 UI）在 software 路径下反而是 feature」。
+- [x] **改动 4**：commit message 解释「为什么 35d1351 review 时反对 Present(1) 的两条理由（叠加 cap 砍半 FPS / RDP vsync 阻塞 UI）在 software 路径下反而是 feature」。
+
+---
+
+### 增补：拖动标题栏 CPU 飙到 30%（已修）
+
+Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell prompt + 不闪烁光标（零内容变化），CPU 也飙到 30%。停止拖动立即恢复。
+
+**根因**：`src/win32/wnd/paint.zig:onWindowPosChanged` 在 `WM_WINDOWPOSCHANGED` 上**无条件**调用 `render.renderWindow(window)`，**绕过 SetTimer 节流**。Windows 以 60–125 Hz 节奏发送该消息，每帧做完整 render → tab bar D2D 重绘 → cell upload → Present；WARP 路径上 30% CPU 完全合理。
+
+**修复**：纯 move 事件（`pos.flags.NOSIZE != 0`）直接 return，不触发 render。size 变化路径保留原同步 render + ValidateRect 逻辑。
 
 #### Phase 1 验证
 
@@ -76,9 +88,63 @@
 
 ---
 
-### Phase 2: GetFrameLatencyWaitableObject 解耦 back-pressure 与 UI 阻塞
+### Step 0: 临时诊断日志（已完成）
+
+为了从猜测切换到数据驱动，加了一套最小诊断 instrumentation：
+
+- `src/mosttywindows.zig`：`std_options.logFn = fileLogFn`，所有 `std.log.*` 写到 `tmp/mostty.log`（启动 truncate，mutex 保护多线程，UTF-16 镜像到 `OutputDebugStringW`）。
+- `src/win32/state.zig`：`qpcNow` / `qpcUsSince`（QPC 微秒级 wrapper，atomic 缓存 frequency）；`Window.diag_render_us` / `diag_render_max_us`；`logDiagnostics` 输出 `render stats: X fps cap, Y renders/s, busy A.B ms/s, max C us, D PTY byte/s`。
+- `src/win32/wnd/paint.zig`：`timedRender(window)` 把 `renderWindow` 包了 QPC 计时。
+- `src/win32/d3d11.zig`：always-on 渲染器 counters（`diag_tabbar_paints`/`rows_uploaded`/`rows_skipped`），`maybeLogDiag` 1Hz flush 输出 `renderer stats: WxH grid (XxY px), N tabbar paint(s)/s, U row(s)/s uploaded, S row(s)/s skipped`。
+
+**首次数据采集结论**（log 见 `zig-out/bin/tmp/mostty.bak.log`）：
+- UI 线程 spinner 期间 busy 仅 14–25 ms/s（≈ 2% UI thread CPU）—— Phase 1 已彻底反压住 UI 线程。
+- 真正吃 CPU 的是 WARP TPP worker 线程做软件 pixel shading。
+- **关键侧信道**：用户报最大化窗口 CPU 翻倍以上 → 反解 `2.5 = (4.3·N·c + f) / (N·c + f)` 得 per-pixel WARP shader cost ≈ 总 CPU 的 70%。
+- 锁定瓶颈：`d3d11.zig:Draw(4, 0)` 全屏 pixel shader 跑过每个 back-buffer 像素，即使一帧只有 1 行 cell 真脏（spinner 实测 `1 row uploaded + ~46 rows skipped per render`）。
+
+→ 切到 Step B。
+
+### Step B: persistent grid texture + dirty-row scissor（已完成）
+
+设计文档：`tmp/plan-step-b-persistent-grid.md`（rev 3，Codex / Gemini 两轮 review approved 后才动代码）。
+
+**核心思路**：把"算像素"和"交给 swap chain"两步解耦。
+
+1. 新增 owner-managed offscreen `ID3D11Texture2D`（"grid texture"），尺寸 = client area。
+   - 格式 `B8G8R8A8_TYPELESS` 资源 + `B8G8R8A8_UNORM_SRGB` RTV view（**注意**：不能像 back buffer 那样用 `B8G8R8A8_UNORM` 资源 —— flip-model 给 back buffer 偷偷加了 TYPELESS 的 special concession，`CreateTexture2D` 没这特权，会返 `E_INVALIDARG = 0x80070057`）。
+2. 用 `RSSetScissorRects` + `ScissorEnable=TRUE` rasterizer state，把 cell pixel shader 限制到本帧真脏的行带。
+3. 每帧 `CopyResource(back_buffer, grid_texture)` 把 grid texture 拷到刚 rotate 出来的 undefined back buffer 上。
+4. tab-bar D2D paint + Present 不变。
+5. **删除 `ClearRenderTargetView`** —— shader 覆盖 scissor rect 内所有像素，rect 外 grid texture 保留上帧像素；clear 忽略 scissor 反而会把好像素抹掉。
+
+**Dirty-trigger 覆盖**（rev 3 review 锁定的不变量：**任何让 glyph_cache reset 的路径都必须 set `grid_force_full = true`**）：
+- 每行 `uploadCellRow` 返回 `bool`，per-row loop / blank-fill tail / resize-overlay 三处都更新 `dirty_min_row` / `dirty_max_row`。
+- `GridConfigSnapshot` 缓存上帧所有非-per-cell 的 const-buffer 字段（cell_size, col/row count, cells_per_row, tab_bar_height, scrollbar geom）；不匹配 → `grid_force_full = true`。
+- 显式钩子：`updateFont`、`updateDpi`、`setupGlyphAtlas`（cache reset 分支）三处都 set `grid_force_full = true`。
+- `resizing` 也强制 full-redraw（覆盖底部不能整除 cell_h 的残余条带）。
+- `grid_force_full` 只在真的画了一帧之后才 clear（draw 被 skip 的帧保留这个标志到下一帧）。
+
+**Skip 路径**：`!grid_force_full && dirty_min_row == null` → 跳过 Draw，但仍然 `CopyResource` + Present（flip-model 给的 back buffer 是 undefined，必须 deliver 上一帧的 grid texture 内容）。
+
+**Reviewer-caught corrections during implementation**:
+- 启动 crash `0x80070057`：grid texture 资源最初用了 `B8G8R8A8_UNORM`，改成 `B8G8R8A8_TYPELESS`（详见上面的 special concession 说明）。
+- 第一轮 review codex 找出：`setupGlyphAtlas` 也 reset glyph_cache 但漏了 `grid_force_full = true`，已补。
+
+**待用户测试验证**：spinner CPU 从 10–45% 应降到 ~3–14%（per-pixel shader cost 占 ~70%，dirty 行只占 ~2.2% 像素 → ~68% 总 CPU 节省）。最大化窗口的 CPU scaling 也应大幅减弱。
+
+**后续可选优化**（按 ROI 排序，等用户测了 Step B 实际效果再定）：
+- **B-followup-1：true frame skip**（不 Present）—— 谓词非平凡（scrollbar/tab-bar hover 等），单独 patch。
+- **B-followup-2：`Present1` + `pDirtyRects`** —— 省 DWM 合成 CPU + RDP 带宽（与 Step B 省 shader CPU 正交）。
+- Tab-bar D2D paint caching：数据显示 UI 线程已健康，预期收益小。
+
+---
+
+### Phase 2（已搁置）: GetFrameLatencyWaitableObject 解耦 back-pressure 与 UI 阻塞
 
 **触发条件**：仅当 Phase 1 上线后**确实观察到**输入卡顿、resize 鬼影、或多 tab 一个堵住影响其他 tab，才推进 Phase 2。否则维持 Phase 1 不动。
+
+**当前状态**：用户未报告这三类症状；Step B 已直接砍掉了主要 CPU 成本。Phase 2 暂不推进。
 
 **目标**：把 back-pressure 从 UI 线程同步阻塞（`Present(1)` 的副作用）改成由 waitable handle 驱动，UI 线程在主循环里和 tab process handle 一起 wait，永远不在 Present 里卡住。
 
@@ -174,6 +240,7 @@
 - [ ] `tmp/mostty.log`：调试结束手动删除，加入 `.gitignore`（如未在）
 
 # DONE
+- [x]RDP/WARP CPU 飙升：Phase 1 (Present(1) + OCCLUDED) + 拖动 NOSIZE short-circuit + Step 0 诊断日志 + Step B persistent grid + dirty-row scissor
 - [x]拖拽输入文件路径
 - [x]输入窗口候选窗口定位
 - [x]粘贴多行时只能粘贴到同一行，所有回车换行符丢了

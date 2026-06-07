@@ -5,12 +5,26 @@ const d3d11 = @import("../d3d11.zig");
 const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const render = @import("../render.zig");
+const state = @import("../state.zig");
 const types = @import("../types.zig");
 const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
 
 const Error = err_mod.Error;
+const Window = state.Window;
 const global = global_mod.global;
+
+// Wraps renderWindow with a QueryPerformanceCounter timing pair and folds
+// the elapsed microseconds into window.diag_render_us / diag_render_max_us.
+// Both onPaint and onWindowPosChanged (resize path) go through this so the
+// 1Hz logDiagnostics flush sees every render in the window.
+fn timedRender(window: *Window) void {
+    const t0 = state.qpcNow();
+    render.renderWindow(window);
+    const us = state.qpcUsSince(t0);
+    window.diag_render_us += us;
+    if (us > window.diag_render_max_us) window.diag_render_max_us = us;
+}
 
 pub fn onEraseBkgnd(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     return 1;
@@ -25,7 +39,7 @@ pub fn onPaint(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESUL
     // any request that landed before this paint still fires on restore.
     if (win32.IsIconic(hwnd) != 0) return 0;
     window.render_pending = false;
-    render.renderWindow(window);
+    timedRender(window);
     window.noteRender();
     return 0;
 }
@@ -87,14 +101,27 @@ pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARA
     // Nothing to paint while minimized; leave render_pending alone so any
     // request that landed before this message still fires on restore.
     if (iconic) return 0;
-    // Clear before render so requests fired during render() still
-    // schedule a follow-up frame. Skip the unconditional
-    // ValidateRect when a new request landed during render —
-    // otherwise it would cancel the WM_PAINT requestRender just
-    // posted, leaving render_pending stuck true and the next
-    // frame lost.
+
+    // Pure move (no size change): the swap-chain back buffer is unchanged
+    // and DComposition handles the screen-position update — no render is
+    // required. A title-bar drag fires WM_WINDOWPOSCHANGED at mouse-move
+    // rate (60-125 Hz); rendering on every event bypasses the SetTimer
+    // throttle and on WARP burns ~30% CPU for no visible change. Any
+    // pending render request remains queued and will fire via the normal
+    // SetTimer / WM_PAINT path. Z-order/show/hide-only changes fall here
+    // too; Windows posts a separate WM_PAINT when those need repainting.
+    if (pos.flags.NOSIZE != 0) return 0;
+
+    // Size changed: render synchronously so the new client area shows
+    // correct content immediately (avoids a single-frame stretch glitch
+    // from DWM until the next WM_PAINT). Clear render_pending before
+    // render so requests fired *during* render still schedule a follow-up
+    // frame; skip the unconditional ValidateRect when a new request
+    // landed during render — otherwise it would cancel the WM_PAINT
+    // requestRender just posted, leaving render_pending stuck true and
+    // the next frame lost.
     window.render_pending = false;
-    render.renderWindow(window);
+    timedRender(window);
     window.noteRender();
     if (!window.render_pending) {
         _ = win32.ValidateRect(hwnd, null);

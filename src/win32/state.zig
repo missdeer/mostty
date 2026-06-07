@@ -90,6 +90,13 @@ pub const Window = struct {
     diag_last_tick_ms: u64 = 0,
     diag_pty_bytes: u64 = 0,
     diag_renders: u64 = 0,
+    // QPC microseconds accumulated by paint.zig's renderWindow timing wrap.
+    // Reset every 1s flush along with diag_renders. busy_us / 10_000 = busy %.
+    diag_render_us: u64 = 0,
+    // Worst single-frame render duration in the current 1s window. Useful for
+    // spotting tail latency hidden by the average (e.g. resize / hot-reload
+    // spikes vs steady-state cost).
+    diag_render_max_us: u64 = 0,
     // System-menu "Theme" cascading submenu. Owned by the system menu once
     // attached, so Windows destroys it with the parent — no manual cleanup.
     // Items are rebuilt on each WM_INITMENUPOPUP.
@@ -184,13 +191,24 @@ pub const Window = struct {
         // reapply" path could leave render_interval_ms == 0 in principle;
         // cheaper to be defensive here than to audit every call site.
         const fps_cap: u32 = if (self.render_interval_ms > 0) @divTrunc(1000, self.render_interval_ms) else 0;
+        // Convert to whole + tenths-of-ms without floating-point formatting.
+        const busy_ms_x10 = self.diag_render_us / 100;
         std.log.info(
-            "render stats: {} fps cap, {} render(s)/s, {} PTY byte(s)/s",
-            .{ fps_cap, self.diag_renders, self.diag_pty_bytes },
+            "render stats: {} fps cap, {} render(s)/s, busy {}.{:0>1} ms/s, max {} us, {} PTY byte(s)/s",
+            .{
+                fps_cap,
+                self.diag_renders,
+                busy_ms_x10 / 10,
+                busy_ms_x10 % 10,
+                self.diag_render_max_us,
+                self.diag_pty_bytes,
+            },
         );
         self.diag_last_tick_ms = now;
         self.diag_renders = 0;
         self.diag_pty_bytes = 0;
+        self.diag_render_us = 0;
+        self.diag_render_max_us = 0;
     }
 
     pub fn findById(self: *Window, id: TabId) ?*Tab {
@@ -209,3 +227,31 @@ pub const Window = struct {
         self.requestRender();
     }
 };
+
+// QueryPerformanceCounter wrappers for short-interval (sub-ms) render timing.
+// GetTickCount64 is 15.6 ms resolution by default — useless for a 1–10 ms
+// render. QPF returns a system-wide constant, so the cached frequency only
+// needs to be written once; using std.atomic.Value with monotonic ordering
+// makes the lazy init safe even if a future call site invokes qpcNow from
+// a non-UI thread (today only paint handlers call it, but the cost of being
+// defensive is one atomic load per render).
+var qpc_freq_hz: std.atomic.Value(u64) = .init(0);
+
+pub fn qpcNow() u64 {
+    var c: win32.LARGE_INTEGER = undefined;
+    _ = win32.QueryPerformanceCounter(&c);
+    return @bitCast(c.QuadPart);
+}
+
+pub fn qpcUsSince(prev: u64) u64 {
+    var freq = qpc_freq_hz.load(.monotonic);
+    if (freq == 0) {
+        var f: win32.LARGE_INTEGER = undefined;
+        _ = win32.QueryPerformanceFrequency(&f);
+        freq = @bitCast(f.QuadPart);
+        qpc_freq_hz.store(freq, .monotonic);
+    }
+    const now = qpcNow();
+    if (now <= prev or freq == 0) return 0;
+    return (now - prev) * 1_000_000 / freq;
+}
