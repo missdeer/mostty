@@ -2,67 +2,6 @@ pub const panic = std.debug.FullPanic(panic_mod.panicHandler);
 
 pub const WndProc = dispatch.WndProc;
 
-// Temporary file logger: subsystem=Windows has no console, so the default
-// std.log writer drops everything. Route std.log.* into `tmp/mostty.log` so
-// the diagnostic counters (state.zig:logDiagnostics, d3d11.zig:maybeLogDiag)
-// are actually readable. Truncated on each startup so consecutive runs don't
-// pile up. Each line is also mirrored to OutputDebugStringW so DebugView/VS
-// catches output even when the file sink is unavailable (e.g. cwd is not
-// writable, AV blocks creation). Remove when render-perf work is done
-// (see TODO 临时诊断代码处置).
-pub const std_options: std.Options = .{
-    .log_level = .info,
-    .logFn = fileLogFn,
-};
-
-var log_state: struct {
-    mutex: std.Thread.Mutex = .{},
-    file: ?std.fs.File = null,
-    init_attempted: bool = false,
-} = .{};
-
-fn fileLogFn(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.enum_literal),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    log_state.mutex.lock();
-    defer log_state.mutex.unlock();
-
-    if (!log_state.init_attempted) {
-        log_state.init_attempted = true;
-        std.fs.cwd().makePath("tmp") catch {};
-        log_state.file = std.fs.cwd().createFile("tmp/mostty.log", .{ .truncate = true }) catch null;
-    }
-
-    var buf: [4096]u8 = undefined;
-    const head = std.fmt.bufPrint(&buf, "{d} [{s}] ({s}) ", .{
-        std.time.milliTimestamp(),
-        @tagName(level),
-        @tagName(scope),
-    }) catch return;
-    const body = std.fmt.bufPrint(buf[head.len..], format ++ "\n", args) catch return;
-    const line = buf[0 .. head.len + body.len];
-
-    if (log_state.file) |f| f.writeAll(line) catch {};
-
-    // Mirror to OutputDebugStringW: visible in DebugView / VS Output even
-    // when the file sink is gone, and effectively free when no debugger is
-    // attached. Reuse a stack buffer for the UTF-16 conversion; if the
-    // conversion fails or fills the buffer (no room for the NUL), the
-    // mirror is skipped for this line — the file write above already
-    // captured it. The size matches `buf` above (line ≤ 4096 UTF-8 bytes
-    // → ≤ 4096 UTF-16 units), so in practice the skip only triggers when
-    // the line was malformed.
-    var w_buf: [4096]u16 = undefined;
-    const w_len = std.unicode.utf8ToUtf16Le(&w_buf, line) catch w_buf.len;
-    if (w_len < w_buf.len) {
-        w_buf[w_len] = 0;
-        win32.OutputDebugStringW(@ptrCast(&w_buf));
-    }
-}
-
 // Subsystem=Windows + MSVC ABI pulls libcmt's exe_winmain.obj as the startup,
 // which calls WinMain instead of the Zig-style `main`. We can't suppress
 // libcmt's startup (highway/simdutf require linkLibC), so provide a WinMain

@@ -1370,8 +1370,7 @@ pub fn render(
     self.maybeLogDiag(client_w, client_h, shader_col, term_shader_row);
 }
 
-// 1Hz flush of the renderer-side diagnostic counters into std.log.info,
-// which the file logger in mosttywindows.zig writes to tmp/mostty.log.
+// 1Hz flush of the renderer-side diagnostic counters into std.log.info.
 // Lives next to the counters rather than in state.zig because state.zig
 // cannot import d3d11.zig without a circular dependency. Skipped on the
 // very first call (no prior tick to diff against). Includes grid + client

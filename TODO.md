@@ -51,7 +51,7 @@ Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell promp
    - 启动 Mostty（RDP 环境）
    - 启动 Claude Code，进入思考状态，保持 30+ 秒
    - Process Explorer 观察 Mostty.exe **CPU 应稳定在 15–30%**
-   - 检查 `tmp/mostty.log`：render busy 应约 10 ms/s
+   - 观察诊断输出：render busy 应约 10 ms/s
 
 2. **应用 Phase 1 改动，重新构建**：
    ```
@@ -62,7 +62,7 @@ Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell promp
    - 同样的场景（RDP + Claude Code 思考）
    - **期望**：Mostty.exe CPU 降到 **5% 以下**（理想 1–3%）
    - **期望**：Process Explorer 里 TPP worker 线程数和 CPU 占比显著下降
-   - **期望**：`tmp/mostty.log` 里 render busy 不一定降（单帧成本不变），但 renders/s 可能从 18 降到 10–15（被 vsync 反压）
+   - **期望**：render busy 不一定降（单帧成本不变），但 renders/s 可能从 18 降到 10–15（被 vsync 反压）
 
 4. **不能回退的对照点**：
    - 本地（非 RDP）启动 Mostty，正常使用：CPU、帧率、输入响应都不应有任何变化
@@ -71,7 +71,7 @@ Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell promp
 5. **OCCLUDED 验证**：
    - 用另一个窗口完全盖住 Mostty 窗口
    - 在底下产生 PTY 输出（`yes` 之类）
-   - **期望**：Mostty CPU 接近 0（不再 paint），`tmp/mostty.log` 里 render 频次趋零
+   - **期望**：Mostty CPU 接近 0（不再 paint），render 频次趋零
    - 切回 Mostty 窗口，渲染立即恢复正常
 
 6. **回归检查**：
@@ -92,7 +92,7 @@ Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell promp
 
 为了从猜测切换到数据驱动，加了一套最小诊断 instrumentation：
 
-- `src/mosttywindows.zig`：`std_options.logFn = fileLogFn`，所有 `std.log.*` 写到 `tmp/mostty.log`（启动 truncate，mutex 保护多线程，UTF-16 镜像到 `OutputDebugStringW`）。
+- `src/mosttywindows.zig`：曾临时添加 `std_options.logFn = fileLogFn` 把 `std.log.*` 写到文件；现已移除。
 - `src/win32/state.zig`：`qpcNow` / `qpcUsSince`（QPC 微秒级 wrapper，atomic 缓存 frequency）；`Window.diag_render_us` / `diag_render_max_us`；`logDiagnostics` 输出 `render stats: X fps cap, Y renders/s, busy A.B ms/s, max C us, D PTY byte/s`。
 - `src/win32/wnd/paint.zig`：`timedRender(window)` 把 `renderWindow` 包了 QPC 计时。
 - `src/win32/d3d11.zig`：always-on 渲染器 counters（`diag_tabbar_paints`/`rows_uploaded`/`rows_skipped`），`maybeLogDiag` 1Hz flush 输出 `renderer stats: WxH grid (XxY px), N tabbar paint(s)/s, U row(s)/s uploaded, S row(s)/s skipped`。
@@ -190,7 +190,7 @@ Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell promp
 1. **冒烟测试**（本地非 RDP）：
    - 启动 Mostty，正常使用 5 分钟
    - **期望**：行为、帧率、CPU 与 Phase 1 等价或更好
-   - 检查 `tmp/mostty.log`：render 频次、render busy 应与 Phase 1 接近
+   - 观察诊断输出：render 频次、render busy 应与 Phase 1 接近
 
 2. **RDP 复现验证**（与 Phase 1 相同）：
    - **期望**：CPU 占比与 Phase 1 等价（5% 以下）
@@ -234,10 +234,10 @@ Phase 1 部署后用户发现：拖动标题栏，即使终端只有 shell promp
 
 修复合入后，决定如何处置当前 PR 里的诊断代码：
 
-- [ ] `src/mosttywindows.zig` 的 `fileLogFn`：临时文件日志，**移除**（subsystem=Windows 没控制台是有意的）
+- [x] `src/mosttywindows.zig` 的 `fileLogFn`：临时文件日志，**移除**（subsystem=Windows 没控制台是有意的）
 - [ ] `src/win32/state.zig` 的 `qpcNow` / `qpcUsSince` / 各 `diag_*` 字段：**保留**，加 build option `-Drender-diag=true` 守起来，默认关闭。理由：以后还会复用，且开销已证实 <0.01% CPU
 - [ ] `src/win32/wnd/paint.zig` / `misc.zig` 的 timing 调用：同上，build option 控制
-- [ ] `tmp/mostty.log`：调试结束手动删除，加入 `.gitignore`（如未在）
+- [x] `tmp/mostty.log`：临时文件日志已移除，不再生成
 
 # DONE
 - [x]RDP/WARP CPU 飙升：Phase 1 (Present(1) + OCCLUDED) + 拖动 NOSIZE short-circuit + Step 0 诊断日志 + Step B persistent grid + dirty-row scissor
