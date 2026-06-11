@@ -1,7 +1,15 @@
-# AGENTS.md — 12-rule 
+# AGENTS.md — 13-rule 
 
 These rules apply to every task in this project unless explicitly overridden.
 Bias: caution over speed on non-trivial work. Use judgment on trivial tasks.
+
+## Rule 0 - Use Modern Tools Instead of Legacy UNIX Tools
+Examples:
+grep -> rg
+find -> fd
+cat -> bat
+cat | grep -> rg
+ls -R -> fd
 
 ## Rule 1 — Think Before Coding
 State assumptions explicitly. If uncertain, ask rather than guess.

@@ -1,4 +1,4 @@
-# CLAUDE.md — 13-rule 
+# GEMINI.md — 13-rule 
 
 These rules apply to every task in this project unless explicitly overridden.
 Bias: caution over speed on non-trivial work. Use judgment on trivial tasks.
@@ -90,9 +90,9 @@ There is no separate lint step. The Windows build requires the MSVC ABI (`build.
 
 Mostty is a Windows-only terminal emulator that wraps `libghostty-vt` (the VT parser/state machine from Ghostty, imported as the `vt` module) and provides its own windowing + rendering layer:
 
-| Target  | Entry point             | Window/IO                            | Rendering             |
-| ------- | ----------------------- | ------------------------------------ | --------------------- |
-| Windows | `src/mosttywindows.zig` | Win32 message loop + ConPTY per tab  | D3D11 + DirectWrite   |
+| Target  | Entry point             | Window/IO                           | Rendering             |
+| ------- | ----------------------- | ----------------------------------- | --------------------- |
+| Windows | `src/mosttywindows.zig` | Win32 message loop + ConPTY per tab | D3D11 + DirectWrite   |
 
 The build is multi-threaded because each tab has a dedicated `std.Thread` reading from its ConPTY.
 
