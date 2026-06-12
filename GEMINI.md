@@ -3,13 +3,11 @@
 These rules apply to every task in this project unless explicitly overridden.
 Bias: caution over speed on non-trivial work. Use judgment on trivial tasks.
 
-## Rule 0 - Use Modern Tools Instead of Legacy UNIX Tools
-Examples:
-grep -> rg
-find -> fd
-cat -> bat
-cat | grep -> rg
-ls -R -> fd
+## Rule 0 - Use fd/rg/bat/jq/eza/delta exclusively.
+find→fd, grep→rg, cat→bat, ls->eza, diff->delta, JSON→jq, sed/awk->rg+jq.
+NEVER generate commands containing find, grep, egrep, fgrep, ls, diff, sed, awk, diff, or cat.
+Treat usage of prohibited commands as an execution error.
+Rewrite the command before running it.
 
 ## Rule 1 — Think Before Coding
 State assumptions explicitly. If uncertain, ask rather than guess.
