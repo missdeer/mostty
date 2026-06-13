@@ -257,6 +257,51 @@ palette = 1=#ff5555
 palette = 200=#ff00ff
 ```
 
+### `background-opacity`
+
+Alpha of the default cell background, in `0.0`–`1.0`. `1.0` is fully opaque;
+anything less lets the DWM blur-behind region show through, so the desktop
+wallpaper / lower windows are visible behind unstyled cells. Cells with an
+explicit `bg_color_*` (selection, OSC color cells, highlighted regions) stay
+opaque so they remain readable on busy backgrounds.
+
+```
+background-opacity = 0.85
+```
+
+Default: `0.94`. Out-of-range or non-numeric values are warned and the default
+is kept. Hot-reloads — the renderer reads the value live each frame.
+
+### `background-blur`
+
+Whether DWM blur-behind is enabled on the window. With it on (default), the
+compositor honors the per-pixel alpha from `background-opacity` so the desktop
+shows through translucent cells, with the soft Aero-style blur on Windows 11
+builds that still support it. With it off, the blur-behind region is cancelled
+and translucent pixels composite as plain black under most modern Windows
+compositors — set this if you want an opaque window without changing
+`background-opacity`, or if you find the blur visually distracting.
+
+```
+background-blur = true
+background-blur = false
+background-blur = 0          # equivalent to false
+background-blur = 20         # any positive integer is treated as true
+```
+
+Default: `true`. Accepted values (case-insensitive) mirror Ghostty so a shared
+Ghostty config does not warn-and-default to the wrong value:
+
+- `true` / `yes` / `t` / `y`
+- `false` / `no` / `f` / `n`
+- A non-negative integer (Ghostty's macOS blur radius): `0` → off, `>0` → on.
+- `macos-glass-regular` / `macos-glass-clear` (Ghostty's macOS-only glass
+  enums) → on, matching Ghostty's own `BackgroundBlur.enabled()`.
+
+Note: this is the legacy `DwmEnableBlurBehindWindow` API, not Mica / Acrylic
+via `DWMWA_SYSTEMBACKDROP_TYPE`. Hot-reloads — toggling the key re-invokes
+the DWM call and triggers a repaint.
+
 ### `render-interval-local-ms` / `render-interval-remote-ms`
 
 Minimum interval (in milliseconds) between rendered frames. Mostty coalesces
@@ -354,6 +399,8 @@ font-codepoint-map      = U+1F300-U+1F9FF=Segoe UI Emoji
 theme                   = light:Rose Pine Dawn, dark:Rose Pine
 background              = #191724
 palette                 = 1 = #eb6f92
+background-opacity      = 0.85
+background-blur         = true
 render-interval-local-ms  = 16
 render-interval-remote-ms = 33
 launcher                = PowerShell | powershell.exe

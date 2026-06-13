@@ -24,7 +24,7 @@ This fork adds several Windows-side enhancements on top of upstream:
 
 - Configurable startup launchers per tab, including right-click `+` launcher selection and SSH hosts integrated into the launcher menu.
 - Confirmation prompts before closing a tab or the window to reduce accidental session loss.
-- User configuration via `%LOCALAPPDATA%\Mostty\config`: font family/size, colors and Ghostty-compatible themes (with live light/dark switching), and per-tab launchers. See [Configuration](configurations.md).
+- User configuration via `%LOCALAPPDATA%\Mostty\config`: font family/size, colors and Ghostty-compatible themes (with live light/dark switching), per-tab launchers, and window transparency (`background-opacity` / `background-blur`, the latter toggling DWM blur-behind so users can opt out of the default Aero-style translucency). See [Configuration](configurations.md).
 - Rendering improvements for wide-glyph clipping, tile-design handling, ambiguous-width symbol alignment/readability, and CRLF tolerance in the octant glyph parser.
 - Drag-and-drop from Explorer: dropped files are pasted as space-separated, double-quoted paths into the active tab (works under elevation via UIPI message filters).
 - IME composition and candidate windows track the caret cell instead of opening at the screen corner; the position re-pins if PTY output scrolls mid-composition.
