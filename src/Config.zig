@@ -53,6 +53,27 @@ pub const FontStyle = union(enum) {
     named: []const u8,
 };
 
+// Anchor for `background-image-position`. Maps Ghostty's nine hyphenated names.
+pub const BackgroundImagePosition = enum {
+    top_left,
+    top_center,
+    top_right,
+    center_left,
+    center,
+    center_right,
+    bottom_left,
+    bottom_center,
+    bottom_right,
+};
+
+// Scaling mode for `background-image-fit`. Mirrors Ghostty's values.
+pub const BackgroundImageFit = enum {
+    contain,
+    cover,
+    stretch,
+    none,
+};
+
 const default_palette: [256]vt.color.RGB = palette: {
     var p = vt.color.default;
     p[0] = u24ToRgb(0x000000);
@@ -185,6 +206,19 @@ background_opacity: f32 = 0.94,
 // < 1 effectively black under most modern Windows compositors.
 background_blur: bool = true,
 
+// Path to a PNG/JPEG drawn behind the terminal grid. Empty = no image. The
+// image only shows through translucent (default-background) cells — cells with
+// an explicit background color stay opaque and hide it, matching Ghostty.
+// Arena-owned; absolute or relative to the process CWD.
+background_image: []const u8 = &.{},
+// Opacity multiplier applied to the image's own alpha (Ghostty allows > 1.0 to
+// push the image past the general background-opacity). 0 hides it.
+background_image_opacity: f32 = 1.0,
+background_image_position: BackgroundImagePosition = .center,
+background_image_fit: BackgroundImageFit = .contain,
+// Tile the image to fill space left over after fitting.
+background_image_repeat: bool = false,
+
 // Start each new window maximized. Applied after the initial ShowWindow.
 // When `fullscreen` is also true, fullscreen takes effect on top of this so
 // toggling fullscreen back off restores a maximized window, not a normal one.
@@ -276,6 +310,11 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
     var background_blur: bool = true;
+    var background_image: []const u8 = &.{};
+    var background_image_opacity: f32 = 1.0;
+    var background_image_position: BackgroundImagePosition = .center;
+    var background_image_fit: BackgroundImageFit = .contain;
+    var background_image_repeat: bool = false;
     var maximize: bool = false;
     var fullscreen: bool = false;
     var render_interval_local_ms: u32 = 16;
@@ -425,6 +464,34 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 std.log.warn("config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
                 continue;
             };
+        } else if (std.mem.eql(u8, key, "background-image")) {
+            // Empty value clears a prior line (no image).
+            background_image = if (value.len == 0) &.{} else a.dupe(u8, value) catch oom();
+        } else if (std.mem.eql(u8, key, "background-image-opacity")) {
+            const n = std.fmt.parseFloat(f32, value) catch {
+                std.log.warn("config: {s}:{}: invalid background-image-opacity '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+            if (!(n >= 0.0)) {
+                std.log.warn("config: {s}:{}: background-image-opacity must be >= 0 (got {d})", .{ source_name, line_no, n });
+                continue;
+            }
+            background_image_opacity = n;
+        } else if (std.mem.eql(u8, key, "background-image-position")) {
+            background_image_position = parseBackgroundImagePosition(value) orelse {
+                std.log.warn("config: {s}:{}: invalid background-image-position '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+        } else if (std.mem.eql(u8, key, "background-image-fit")) {
+            background_image_fit = parseBackgroundImageFit(value) orelse {
+                std.log.warn("config: {s}:{}: invalid background-image-fit '{s}'", .{ source_name, line_no, value });
+                continue;
+            };
+        } else if (std.mem.eql(u8, key, "background-image-repeat")) {
+            background_image_repeat = parseStrictBool(value) orelse {
+                std.log.warn("config: {s}:{}: invalid background-image-repeat '{s}' (expect true/false)", .{ source_name, line_no, value });
+                continue;
+            };
         } else if (std.mem.eql(u8, key, "maximize")) {
             maximize = parseStrictBool(value) orelse {
                 std.log.warn("config: {s}:{}: invalid maximize '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
@@ -481,12 +548,43 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .color_overrides = overrides,
         .background_opacity = background_opacity,
         .background_blur = background_blur,
+        .background_image = background_image,
+        .background_image_opacity = background_image_opacity,
+        .background_image_position = background_image_position,
+        .background_image_fit = background_image_fit,
+        .background_image_repeat = background_image_repeat,
         .maximize = maximize,
         .fullscreen = fullscreen,
         .render_interval_local_ms = render_interval_local_ms,
         .render_interval_remote_ms = render_interval_remote_ms,
         .arena = arena,
     };
+}
+
+fn parseBackgroundImagePosition(value: []const u8) ?BackgroundImagePosition {
+    const map = .{
+        .{ "top-left", BackgroundImagePosition.top_left },
+        .{ "top-center", BackgroundImagePosition.top_center },
+        .{ "top-right", BackgroundImagePosition.top_right },
+        .{ "center-left", BackgroundImagePosition.center_left },
+        .{ "center", BackgroundImagePosition.center },
+        .{ "center-right", BackgroundImagePosition.center_right },
+        .{ "bottom-left", BackgroundImagePosition.bottom_left },
+        .{ "bottom-center", BackgroundImagePosition.bottom_center },
+        .{ "bottom-right", BackgroundImagePosition.bottom_right },
+    };
+    inline for (map) |entry| {
+        if (std.ascii.eqlIgnoreCase(value, entry[0])) return entry[1];
+    }
+    return null;
+}
+
+fn parseBackgroundImageFit(value: []const u8) ?BackgroundImageFit {
+    if (std.ascii.eqlIgnoreCase(value, "contain")) return .contain;
+    if (std.ascii.eqlIgnoreCase(value, "cover")) return .cover;
+    if (std.ascii.eqlIgnoreCase(value, "stretch")) return .stretch;
+    if (std.ascii.eqlIgnoreCase(value, "none")) return .none;
+    return null;
 }
 
 // Accepts Ghostty's bool forms (case-insensitive): `true/yes/t/y/1` →
@@ -1053,6 +1151,49 @@ test "parse reads color keys into theme" {
     try std.testing.expectEqual(@as(?u24, 0x445566), cfg.theme.selection_background);
     // Index not set by the theme keeps the standard xterm cube (non-zero).
     try std.testing.expectEqual(vt.color.default[16], cfg.theme.palette[16]);
+}
+
+test "parse background-image keys" {
+    const src =
+        \\background-image = C:\pics\wall.png
+        \\background-image-opacity = 1.5
+        \\background-image-position = bottom-right
+        \\background-image-fit = cover
+        \\background-image-repeat = true
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("C:\\pics\\wall.png", cfg.background_image);
+    try std.testing.expectEqual(@as(f32, 1.5), cfg.background_image_opacity);
+    try std.testing.expectEqual(BackgroundImagePosition.bottom_right, cfg.background_image_position);
+    try std.testing.expectEqual(BackgroundImageFit.cover, cfg.background_image_fit);
+    try std.testing.expectEqual(true, cfg.background_image_repeat);
+}
+
+test "parse background-image: defaults and invalid values rejected" {
+    // No keys: defaults hold (empty path, opacity 1.0, center, contain, no repeat).
+    {
+        var cfg = parse(std.testing.allocator, "", "test");
+        defer cfg.deinit();
+        try std.testing.expectEqual(@as(usize, 0), cfg.background_image.len);
+        try std.testing.expectEqual(@as(f32, 1.0), cfg.background_image_opacity);
+        try std.testing.expectEqual(BackgroundImagePosition.center, cfg.background_image_position);
+        try std.testing.expectEqual(BackgroundImageFit.contain, cfg.background_image_fit);
+        try std.testing.expectEqual(false, cfg.background_image_repeat);
+    }
+    // Invalid enum/opacity values are discarded, leaving defaults intact.
+    {
+        const src =
+            \\background-image-opacity = -0.2
+            \\background-image-position = middle
+            \\background-image-fit = squish
+        ;
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expectEqual(@as(f32, 1.0), cfg.background_image_opacity);
+        try std.testing.expectEqual(BackgroundImagePosition.center, cfg.background_image_position);
+        try std.testing.expectEqual(BackgroundImageFit.contain, cfg.background_image_fit);
+    }
 }
 
 test "parse font-codepoint-map: single, range, multi-range, repeats" {

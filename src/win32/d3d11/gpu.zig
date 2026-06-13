@@ -60,7 +60,14 @@ pub const shader = struct {
         // grid quad is drawn under a viewport offset by this much; the shader
         // subtracts it from SV_Position.y (RT-absolute) for all cell math.
         tab_bar_height: u32,
-        _pad: [2]u32 = .{ 0, 0 },
+        // bit0 = background image enabled, bit1 = repeat/tile. 0 disables all
+        // image sampling in the shader (zero-cost when no image configured).
+        bg_image_flags: u32 = 0,
+        // Multiplier on the sampled image alpha (background-image-opacity).
+        bg_image_opacity: f32 = 0,
+        // Fitted image rectangle in terminal-grid pixel space (origin at the
+        // top-left terminal cell, below the tab bar): offset.xy, size.xy.
+        bg_image_dest: [4]f32 = .{ 0, 0, 0, 0 },
     };
     pub const Cell = extern struct {
         glyph_index: u32,
@@ -232,6 +239,155 @@ pub const GlyphTexture = struct {
         self.size = null;
     }
 };
+
+// Decoded `background-image`: one static BGRA texture + SRV bound at t2. The
+// shader samples it behind the cell grid (see terminal.hlsl). Source pixel
+// dimensions are kept so the CPU can compute the fit/position rectangle each
+// frame against the live client size.
+pub const BackgroundImage = struct {
+    texture: ?*win32.ID3D11Texture2D = null,
+    view: ?*win32.ID3D11ShaderResourceView = null,
+    src_w: u32 = 0,
+    src_h: u32 = 0,
+
+    pub fn loaded(self: BackgroundImage) bool {
+        return self.view != null;
+    }
+
+    pub fn release(self: *BackgroundImage) void {
+        if (self.view) |v| _ = v.IUnknown.Release();
+        if (self.texture) |t| _ = t.IUnknown.Release();
+        self.* = .{};
+    }
+};
+
+// COM is initialized lazily (STA) on first WIC use. The app otherwise runs
+// without CoInitialize — D3D/D2D/DWrite/DComp don't require it — so this stays
+// scoped to the image feature. Only ever called from the UI thread.
+var wic_com_initialized: bool = false;
+
+fn ensureComInit() void {
+    if (wic_com_initialized) return;
+    // RPC_E_CHANGED_MODE (already initialized in another mode) is harmless for
+    // WIC, so the result is intentionally ignored.
+    _ = win32.CoInitializeEx(null, win32.COINIT_APARTMENTTHREADED);
+    wic_com_initialized = true;
+}
+
+// Decode a PNG/JPEG file into a GPU texture. Returns a disabled (empty)
+// BackgroundImage on any failure — a bad path or corrupt file must never crash
+// the terminal, it just renders without an image (logged once at warn).
+pub fn loadBackgroundImage(
+    device: *win32.ID3D11Device,
+    gpa: std.mem.Allocator,
+    path: []const u8,
+) BackgroundImage {
+    ensureComInit();
+
+    const wpath = std.unicode.utf8ToUtf16LeAllocZ(gpa, path) catch {
+        log.warn("background-image: failed to encode path '{s}'", .{path});
+        return .{};
+    };
+    defer gpa.free(wpath);
+
+    var factory: *win32.IWICImagingFactory = undefined;
+    if (win32.CoCreateInstance(
+        &win32.CLSID_WICImagingFactory,
+        null,
+        win32.CLSCTX_INPROC_SERVER,
+        win32.IID_IWICImagingFactory,
+        @ptrCast(&factory),
+    ) < 0) {
+        log.warn("background-image: WIC factory unavailable", .{});
+        return .{};
+    }
+    defer _ = factory.IUnknown.Release();
+
+    var decoder: ?*win32.IWICBitmapDecoder = null;
+    if (factory.CreateDecoderFromFilename(
+        wpath,
+        null,
+        win32.GENERIC_READ,
+        win32.WICDecodeMetadataCacheOnLoad,
+        &decoder,
+    ) < 0) {
+        log.warn("background-image: cannot open '{s}'", .{path});
+        return .{};
+    }
+    defer _ = decoder.?.IUnknown.Release();
+
+    var frame: ?*win32.IWICBitmapFrameDecode = null;
+    if (decoder.?.GetFrame(0, &frame) < 0) {
+        log.warn("background-image: no frame in '{s}'", .{path});
+        return .{};
+    }
+    defer _ = frame.?.IUnknown.Release();
+
+    var converter: ?*win32.IWICFormatConverter = null;
+    if (factory.CreateFormatConverter(&converter) < 0) return .{};
+    defer _ = converter.?.IUnknown.Release();
+
+    var fmt: win32.Guid = win32.GUID_WICPixelFormat32bppBGRA;
+    if (converter.?.Initialize(
+        &frame.?.IWICBitmapSource,
+        &fmt,
+        win32.WICBitmapDitherTypeNone,
+        null,
+        0.0,
+        win32.WICBitmapPaletteTypeMedianCut,
+    ) < 0) {
+        log.warn("background-image: cannot convert '{s}' to BGRA", .{path});
+        return .{};
+    }
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    if (converter.?.IWICBitmapSource.GetSize(&w, &h) < 0 or w == 0 or h == 0) return .{};
+    // Cap to a sane texture size; D3D11 guarantees 16384² support.
+    if (w > 16384 or h > 16384) {
+        log.warn("background-image: '{s}' is {}x{}, too large", .{ path, w, h });
+        return .{};
+    }
+
+    const stride: u32 = w * 4;
+    const size: usize = @as(usize, stride) * h;
+    const pixels = gpa.alloc(u8, size) catch return .{};
+    defer gpa.free(pixels);
+    if (converter.?.IWICBitmapSource.CopyPixels(null, stride, @intCast(size), @ptrCast(pixels.ptr)) < 0) {
+        log.warn("background-image: pixel copy failed for '{s}'", .{path});
+        return .{};
+    }
+
+    const desc: win32.D3D11_TEXTURE2D_DESC = .{
+        .Width = w,
+        .Height = h,
+        .MipLevels = 1,
+        .ArraySize = 1,
+        .Format = .B8G8R8A8_UNORM,
+        .SampleDesc = .{ .Count = 1, .Quality = 0 },
+        .Usage = .DEFAULT,
+        .BindFlags = .{ .SHADER_RESOURCE = 1 },
+        .CPUAccessFlags = .{},
+        .MiscFlags = .{},
+    };
+    const init_data: win32.D3D11_SUBRESOURCE_DATA = .{
+        .pSysMem = @ptrCast(pixels.ptr),
+        .SysMemPitch = stride,
+        .SysMemSlicePitch = 0,
+    };
+    var tex: *win32.ID3D11Texture2D = undefined;
+    if (device.CreateTexture2D(&desc, &init_data, &tex) < 0) {
+        log.warn("background-image: CreateTexture2D failed for '{s}'", .{path});
+        return .{};
+    }
+    var view: *win32.ID3D11ShaderResourceView = undefined;
+    if (device.CreateShaderResourceView(&tex.ID3D11Resource, null, &view) < 0) {
+        _ = tex.IUnknown.Release();
+        return .{};
+    }
+    log.info("background-image: loaded '{s}' ({}x{})", .{ path, w, h });
+    return .{ .texture = tex, .view = view, .src_w = w, .src_h = h };
+}
 
 pub const StagingTexture = struct {
     pub const Kind = enum { mask, color };

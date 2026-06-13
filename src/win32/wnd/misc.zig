@@ -105,6 +105,11 @@ fn reloadConfig(hwnd: win32.HWND) void {
     // Must be computed before the move below, otherwise global.config == new_cfg.
     const theme_changed = !std.meta.eql(global.config.theme, new_cfg.theme);
     const blur_changed = global.config.background_blur != new_cfg.background_blur;
+    const image_changed = !std.mem.eql(u8, global.config.background_image, new_cfg.background_image) or
+        global.config.background_image_opacity != new_cfg.background_image_opacity or
+        global.config.background_image_position != new_cfg.background_image_position or
+        global.config.background_image_fit != new_cfg.background_image_fit or
+        global.config.background_image_repeat != new_cfg.background_image_repeat;
     if (font_changed) {
         // Leak the previous UTF-16 family list: the renderer still holds
         // pointers into it until updateFont republishes. New list lives for
@@ -192,6 +197,11 @@ fn reloadConfig(hwnd: win32.HWND) void {
 
     if (blur_changed) {
         util.applyBlurBehind(hwnd, global.config.background_blur);
+        if (global.window) |*window| window.requestRender();
+    }
+
+    if (image_changed) {
+        global.renderer.setBackgroundImage(gpa, &global.config);
         if (global.window) |*window| window.requestRender();
     }
 }

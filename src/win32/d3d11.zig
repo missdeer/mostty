@@ -6,6 +6,7 @@ const vt = @import("vt");
 const win32 = @import("win32").everything;
 const GlyphIndexCache = @import("GlyphIndexCache.zig");
 const types = @import("types.zig");
+const Config = @import("../Config.zig");
 
 const com = @import("d3d11/com.zig");
 const gpu = @import("d3d11/gpu.zig");
@@ -220,6 +221,19 @@ band_texture: gpu.BandTexture = .{},
 // can be copied into the current flip-model back buffer. Released/reacquired
 // on swap-chain resize.
 back_buffer_tex: ?*win32.ID3D11Texture2D = null,
+
+// Background image (`background-image`). The texture is (re)loaded by
+// setBackgroundImage only when the configured path changes; placement params
+// are read every frame to recompute the fit rectangle. bg_image_path is a
+// gpa-owned copy of the loaded path, kept so reloadConfig can detect a no-op.
+// bg_sampler (linear/clamp) is lazily created on first use.
+background_image: gpu.BackgroundImage = .{},
+bg_image_path: []const u8 = &.{},
+bg_image_opacity: f32 = 1.0,
+bg_image_position: Config.BackgroundImagePosition = .center,
+bg_image_fit: Config.BackgroundImageFit = .contain,
+bg_image_repeat: bool = false,
+bg_sampler: ?*win32.ID3D11SamplerState = null,
 
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.cell_size;
@@ -645,6 +659,9 @@ pub fn deinit(self: *D3d11Renderer) void {
     self.grid_texture = null;
     if (self.scissor_rasterizer_state) |rs| _ = rs.IUnknown.Release();
     self.scissor_rasterizer_state = null;
+    self.background_image.release();
+    if (self.bg_sampler) |s| _ = s.IUnknown.Release();
+    self.bg_sampler = null;
     self.context.Flush();
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
@@ -850,6 +867,22 @@ pub fn render(
         config.scrollbar_width = sb_geom.w;
         config.scrollbar_y = sb_geom.y;
         config.scrollbar_height = sb_geom.h;
+
+        // Background image: bit0 = enabled, bit1 = repeat. The fit rectangle is
+        // computed against the cell-grid extent so it lines up exactly with the
+        // shader's terminal-space pixel coordinates (origin below the tab bar).
+        var bg_flags: u32 = 0;
+        var bg_dest: [4]f32 = .{ 0, 0, 0, 0 };
+        if (self.background_image.loaded()) {
+            bg_flags |= 1;
+            if (self.bg_image_repeat) bg_flags |= 2;
+            const container_w_f: f32 = @floatFromInt(shader_col * cs.x);
+            const container_h_f: f32 = @floatFromInt(term_shader_row * cs.y);
+            bg_dest = self.backgroundImageDest(container_w_f, container_h_f);
+        }
+        config.bg_image_flags = bg_flags;
+        config.bg_image_opacity = self.bg_image_opacity;
+        config.bg_image_dest = bg_dest;
     }
 
     // Build cell buffer from terminal state (terminal-only; the tab bar is a
@@ -1292,8 +1325,15 @@ pub fn render(
         var resources = [_]?*win32.ID3D11ShaderResourceView{
             if (cell_count > 0) self.shader_cells.cell_view else null,
             self.glyph_texture.view,
+            // t2: background image. Null when none configured — the shader
+            // gates all sampling on bg_image_flags so the null bind is inert.
+            self.background_image.view,
         };
         self.context.PSSetShaderResources(0, resources.len, &resources);
+        if (self.background_image.loaded()) {
+            const sampler = self.ensureBackgroundSampler();
+            self.context.PSSetSamplers(0, 1, @ptrCast(@constCast(&sampler)));
+        }
         self.context.VSSetShader(self.vertex_shader, null, 0);
         self.context.PSSetShader(self.pixel_shader, null, 0);
         // ClearRenderTargetView is intentionally NOT called here: the cell
@@ -1658,4 +1698,106 @@ fn ensureScissorRasterizerState(self: *D3d11Renderer) *win32.ID3D11RasterizerSta
     if (hr < 0) fatalHr("CreateRasterizerState(scissor)", hr);
     self.scissor_rasterizer_state = rs;
     return rs;
+}
+
+// Linear/clamp sampler for the background image. CLAMP is fine even when
+// tiling: the shader does its own frac() wrap and only ever samples inside
+// [0,1). Lazily created on first frame that needs it.
+fn ensureBackgroundSampler(self: *D3d11Renderer) *win32.ID3D11SamplerState {
+    if (self.bg_sampler) |s| return s;
+    const desc: win32.D3D11_SAMPLER_DESC = .{
+        .Filter = .MIN_MAG_MIP_LINEAR,
+        .AddressU = .CLAMP,
+        .AddressV = .CLAMP,
+        .AddressW = .CLAMP,
+        .MipLODBias = 0,
+        .MaxAnisotropy = 1,
+        .ComparisonFunc = .NEVER,
+        .BorderColor = .{ 0, 0, 0, 0 },
+        .MinLOD = 0,
+        .MaxLOD = win32.D3D11_FLOAT32_MAX,
+    };
+    var sampler: *win32.ID3D11SamplerState = undefined;
+    const hr = self.device.CreateSamplerState(&desc, &sampler);
+    if (hr < 0) fatalHr("CreateSamplerState(bg-image)", hr);
+    self.bg_sampler = sampler;
+    return sampler;
+}
+
+// (Re)configures the background image from the active config. The texture is
+// re-decoded only when the path actually changes (decode is comparatively
+// expensive and the file rarely moves); opacity/position/fit/repeat are cheap
+// scalars updated unconditionally. Any visible change forces a full grid redraw
+// so the persistent grid texture is rebaked. `gpa` owns bg_image_path; safe to
+// call from init and config hot-reload (both on the UI thread).
+pub fn setBackgroundImage(self: *D3d11Renderer, gpa: std.mem.Allocator, cfg: *const Config) void {
+    const path = cfg.background_image;
+    const path_changed = !std.mem.eql(u8, path, self.bg_image_path);
+    if (path_changed) {
+        self.background_image.release();
+        if (self.bg_image_path.len != 0) gpa.free(self.bg_image_path);
+        self.bg_image_path = &.{};
+        if (path.len != 0) {
+            self.background_image = gpu.loadBackgroundImage(self.device, gpa, path);
+            // Retain the path even if decode failed so an identical reload
+            // doesn't re-attempt a known-bad file on every config save.
+            self.bg_image_path = gpa.dupe(u8, path) catch &.{};
+        }
+    }
+
+    const visual_changed = path_changed or
+        self.bg_image_opacity != cfg.background_image_opacity or
+        self.bg_image_position != cfg.background_image_position or
+        self.bg_image_fit != cfg.background_image_fit or
+        self.bg_image_repeat != cfg.background_image_repeat;
+
+    self.bg_image_opacity = cfg.background_image_opacity;
+    self.bg_image_position = cfg.background_image_position;
+    self.bg_image_fit = cfg.background_image_fit;
+    self.bg_image_repeat = cfg.background_image_repeat;
+
+    if (visual_changed) self.grid_force_full = true;
+}
+
+// Computes the fitted/positioned destination rectangle of the background image
+// within a `container_w` x `container_h` pixel area (the terminal grid region
+// below the tab bar). Returns offset.xy + size.xy in that space. Pure geometry.
+fn backgroundImageDest(self: *D3d11Renderer, container_w: f32, container_h: f32) [4]f32 {
+    const sw: f32 = @floatFromInt(self.background_image.src_w);
+    const sh: f32 = @floatFromInt(self.background_image.src_h);
+    if (sw <= 0 or sh <= 0) return .{ 0, 0, 0, 0 };
+
+    var dw: f32 = sw;
+    var dh: f32 = sh;
+    switch (self.bg_image_fit) {
+        .none => {},
+        .stretch => {
+            dw = container_w;
+            dh = container_h;
+        },
+        .contain => {
+            const s = @min(container_w / sw, container_h / sh);
+            dw = sw * s;
+            dh = sh * s;
+        },
+        .cover => {
+            const s = @max(container_w / sw, container_h / sh);
+            dw = sw * s;
+            dh = sh * s;
+        },
+    }
+
+    const free_x = container_w - dw;
+    const free_y = container_h - dh;
+    const ox: f32 = switch (self.bg_image_position) {
+        .top_left, .center_left, .bottom_left => 0,
+        .top_center, .center, .bottom_center => free_x * 0.5,
+        .top_right, .center_right, .bottom_right => free_x,
+    };
+    const oy: f32 = switch (self.bg_image_position) {
+        .top_left, .top_center, .top_right => 0,
+        .center_left, .center, .center_right => free_y * 0.5,
+        .bottom_left, .bottom_center, .bottom_right => free_y,
+    };
+    return .{ ox, oy, dw, dh };
 }

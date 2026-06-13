@@ -98,6 +98,7 @@ pub fn main() !void {
         .tabbar_font_size_pt = global.config.tabbar_font_size_pt,
     };
     global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
+    global.renderer.setBackgroundImage(gpa_alloc, &global.config);
     const cell_size = global.renderer.cell_size;
     const placement = window_geom.calcWindowPlacement(
         maybe_monitor,

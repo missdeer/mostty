@@ -14,7 +14,13 @@ cbuffer GridConfig : register(b0)
     // viewport offset by this much, so SV_Position.y is RT-absolute and every
     // terminal-space calc subtracts tab_bar_height first.
     uint tab_bar_height;
-    uint2 _pad;
+    // Background image: bit0 = enabled, bit1 = repeat/tile. Both 0 disables all
+    // image sampling below.
+    uint bg_image_flags;
+    // Multiplier applied to the sampled image alpha (background-image-opacity).
+    float bg_image_opacity;
+    // Fitted image rectangle in terminal-grid pixel space: offset.xy, size.xy.
+    float4 bg_image_dest;
 }
 
 struct Cell
@@ -26,6 +32,8 @@ struct Cell
 };
 StructuredBuffer<Cell> cells : register(t0);
 Texture2D<float4> glyph_texture : register(t1);
+Texture2D<float4> bg_image : register(t2);
+SamplerState bg_sampler : register(s0);
 
 float4 VertexMain(uint id : SV_VERTEXID) : SV_POSITION
 {
@@ -99,10 +107,37 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     float3 linear_bg = to_linear(bg.rgb);
     bool invisible = (cell.attrs & (1u << 6)) != 0;
 
+    // Background image backdrop. The cell background color is composited OVER
+    // the image (both premultiplied), so the image only shows through the
+    // cell's translucent fraction (1 - bg.a): explicit opaque-bg cells hide it,
+    // matching Ghostty. back_rgb/back_a are the un-premultiplied result the rest
+    // of the shader uses in place of linear_bg / bg.a. When no image is
+    // configured this is exactly the old (linear_bg, bg.a).
+    float3 back_rgb = linear_bg;
+    float back_a = bg.a;
+    if ((bg_image_flags & 1u) != 0u && bg_image_dest.z > 0.0 && bg_image_dest.w > 0.0) {
+        float2 uv = (float2(sv_pos.x, gy_f) - bg_image_dest.xy) / bg_image_dest.zw;
+        bool inside;
+        if ((bg_image_flags & 2u) != 0u) {
+            uv = frac(uv);
+            inside = true;
+        } else {
+            inside = all(uv >= 0.0) && all(uv < 1.0);
+        }
+        if (inside) {
+            float4 img = bg_image.SampleLevel(bg_sampler, uv, 0);
+            float img_a = saturate(img.a * bg_image_opacity);
+            float3 img_lin = to_linear(img.rgb);
+            float3 back_pm = linear_bg * bg.a + img_lin * img_a * (1.0 - bg.a);
+            back_a = bg.a + img_a * (1.0 - bg.a);
+            back_rgb = (back_a > 0.0) ? (back_pm / back_a) : float3(0.0, 0.0, 0.0);
+        }
+    }
+
     if (invisible) {
-        // Skip glyph sampling entirely; render bg as-is with its alpha so the
-        // translucent default cell still lets DWM blur through.
-        return float4(linear_bg * bg.a, bg.a);
+        // Skip glyph sampling entirely; render the backdrop as-is with its alpha
+        // so the translucent default cell still lets DWM blur / the image show.
+        return float4(back_rgb * back_a, back_a);
     }
 
     uint2 glyph_cell_pos = uint2(
@@ -125,8 +160,8 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         float3 src_rgb = (src_a > 0.0)
             ? to_linear(saturate(glyph_texel.rgb / src_a)) * src_a
             : float3(0.0, 0.0, 0.0);
-        float out_a = src_a + bg.a * (1.0 - src_a);
-        float3 out_rgb = src_rgb + linear_bg * bg.a * (1.0 - src_a);
+        float out_a = src_a + back_a * (1.0 - src_a);
+        float3 out_rgb = src_rgb + back_rgb * back_a * (1.0 - src_a);
         return float4(out_rgb, out_a);
     }
 
@@ -181,8 +216,8 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         cov = float3(1.0, 1.0, 1.0) * fg.a;
     }
 
-    float3 color = linear_bg * (1.0 - cov) + linear_fg * cov;
-    float alpha = lerp(bg.a, 1.0, max(cov.r, max(cov.g, cov.b)));
+    float3 color = back_rgb * (1.0 - cov) + linear_fg * cov;
+    float alpha = lerp(back_a, 1.0, max(cov.r, max(cov.g, cov.b)));
 
     return float4(color * alpha, alpha);
 }
