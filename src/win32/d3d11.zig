@@ -675,6 +675,7 @@ pub fn render(
     selection_bg: ?u24,
     selection_fg: ?u24,
     background_opacity: f32,
+    url_highlight: ?types.UrlHighlight,
 ) void {
     const sz = win32.getClientSize(hwnd);
     const client_w: u32 = @intCast(sz.cx);
@@ -946,6 +947,18 @@ pub fn render(
             const page = &row_pin.node.data;
             const page_cells = page.getCells(row_pin.rowAndCell().row);
 
+            // URL hover underline range on this row (null if the row is outside
+            // the URL's start..end span). Multi-row URLs cover full rows in the
+            // middle and partial rows at the endpoints. Resolved once per row so
+            // the cell loop only does two compares per cell.
+            const HighlightRange = struct { sx: u32, ex: u32 };
+            const url_row_range: ?HighlightRange = if (url_highlight) |u| blk_u: {
+                if (screen_row < u.start_row or screen_row > u.end_row) break :blk_u null;
+                const sx: u32 = if (screen_row == u.start_row) u.start_col else 0;
+                const ex: u32 = if (screen_row == u.end_row) u.end_col else (shader_col - 1);
+                break :blk_u HighlightRange{ .sx = sx, .ex = ex };
+            } else null;
+
             // Per-row x-range of the selection. `null` when the row is
             // outside the selection entirely. One pointFromPin per row
             // (~60 calls/frame) instead of three per cell.
@@ -1041,6 +1054,14 @@ pub fn render(
                 }
                 if (emoji.isColorGlyphRun(codepoint, grapheme)) attrs |= gpu.cell_attr_color_glyph;
                 if (invisible) attrs |= gpu.cell_attr_invisible;
+
+                // Hover-linkified URL: paint a single underline on cells in
+                // the highlight range, but don't override an SGR-set underline.
+                if (url_row_range) |r| {
+                    if (col >= r.sx and col <= r.ex and (attrs & gpu.cell_attr_underline_mask) == 0) {
+                        attrs |= 1;
+                    }
+                }
 
                 var bg = if (is_default_bg) bg_rgba else Rgba8.fromU24(cell_bg);
                 if (faint) cell_fg = color.dimColor(cell_fg);

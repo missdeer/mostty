@@ -4,6 +4,7 @@ const vt = @import("vt");
 
 const types = @import("types.zig");
 const cp_mod = @import("child_process.zig");
+const url_hover = @import("url_hover.zig");
 const vt_stream_mod = @import("vt_stream.zig");
 
 const TabId = types.TabId;
@@ -106,6 +107,26 @@ pub const Window = struct {
     // theme through the submenu, and resynced from the config on hot-reload.
     // Null when no theme is active.
     active_theme_name: ?[]u8 = null,
+    // Currently linkified URL under the mouse, in viewport coordinates. Tab id
+    // is captured so a tab switch doesn't leak the hover onto another tab's
+    // grid. The hit itself carries the multi-row viewport range.
+    hovered_url: ?HoveredUrl = null,
+    // Last (col, row, tab) the URL hover detection looked at. Set on every
+    // WM_MOUSEMOVE that hits a grid cell and cleared whenever hovered_url is
+    // invalidated. Lets updateUrlHover short-circuit when the mouse stays
+    // inside the same cell — avoids the detectAt cost on sub-cell motion.
+    hover_cell: ?HoverCell = null,
+
+    pub const HoveredUrl = struct {
+        tab_id: TabId,
+        hit: url_hover.Hit,
+    };
+
+    pub const HoverCell = struct {
+        tab_id: TabId,
+        col: u16,
+        row: u16,
+    };
 
     pub fn active(self: *Window) *Tab {
         return self.tabs.items[self.active_index];
@@ -224,6 +245,12 @@ pub const Window = struct {
     pub fn onActiveChanged(self: *Window) void {
         self.selection_fade = 0;
         _ = win32.KillTimer(self.hwnd, types.TIMER_SELECTION_FADE);
+        // A URL hover belongs to a specific tab — switching tabs makes the
+        // cached cell coordinates point at unrelated content. Drop both the
+        // hover and the cell throttle so the next mouse move re-evaluates
+        // against the new tab.
+        self.hovered_url = null;
+        self.hover_cell = null;
         self.requestRender();
     }
 };

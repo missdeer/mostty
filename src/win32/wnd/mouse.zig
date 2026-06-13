@@ -12,6 +12,7 @@ const tab_bar = @import("../tab_bar.zig");
 const tab_mgmt = @import("../tab_mgmt.zig");
 const tooltip = @import("../tooltip.zig");
 const types = @import("../types.zig");
+const url_hover = @import("../url_hover.zig");
 const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
 
@@ -65,6 +66,136 @@ fn mouseReportTab(window: *state.Window) ?*state.Tab {
         return null;
     }
     return window.active();
+}
+
+fn clearUrlHover(window: *state.Window) void {
+    // Invalidate the cell-level throttle too so the next mouse move re-runs
+    // detection rather than short-circuiting on a stale cache.
+    window.hover_cell = null;
+    if (window.hovered_url == null) return;
+    window.hovered_url = null;
+    window.requestRender();
+}
+
+// Resolve client-area (mouse_x, mouse_y) to a viewport (col, row) on the active
+// tab. Returns null when the point is above the tab bar, left of the grid, or
+// outside the terminal's columns/rows.
+fn cellAtClient(window: *state.Window, mouse_x: i32, mouse_y: i32) ?struct { col: u16, row: u16 } {
+    const cs = global.renderer.cell_size;
+    const tbh = global.renderer.tab_bar_height;
+    const grid_y = mouse_y - tbh;
+    if (grid_y < 0 or mouse_x < 0) return null;
+    const tab = window.active();
+    const col_i = @divTrunc(mouse_x, cs.cx);
+    const row_i = @divTrunc(grid_y, cs.cy);
+    const cols_i: i32 = @intCast(tab.term.cols);
+    const rows_i: i32 = @intCast(tab.term.rows);
+    if (col_i >= cols_i or row_i >= rows_i) return null;
+    return .{ .col = @intCast(col_i), .row = @intCast(row_i) };
+}
+
+// Recompute the URL under the mouse for the active tab. Updates window state
+// (and requests a render) only when the resolved hit differs from the cached
+// one, so steady mouse movement inside a known URL doesn't churn the renderer.
+//
+// Cell-level throttle: WM_MOUSEMOVE fires per pixel; sub-cell motion can't
+// change which terminal cell is under the cursor, so we skip detectAt entirely
+// when the mouse stays in the same grid cell on the same tab.
+fn updateUrlHover(window: *state.Window, _: win32.HWND, mouse_x: i32, mouse_y: i32) void {
+    const cell = cellAtClient(window, mouse_x, mouse_y) orelse {
+        clearUrlHover(window);
+        window.hover_cell = null;
+        return;
+    };
+    const tab = window.active();
+    if (window.hover_cell) |hc| {
+        if (hc.tab_id == tab.id and hc.col == cell.col and hc.row == cell.row) return;
+    }
+    window.hover_cell = .{ .tab_id = tab.id, .col = cell.col, .row = cell.row };
+    const new_hit = url_hover.detectAt(tab.term, cell.col, cell.row);
+    if (new_hit) |h| {
+        if (window.hovered_url) |cur| {
+            if (cur.tab_id == tab.id and cur.hit.eql(&h)) return;
+        }
+        window.hovered_url = .{ .tab_id = tab.id, .hit = h };
+        window.requestRender();
+    } else {
+        clearUrlHover(window);
+    }
+}
+
+// True when the mouse (in client coordinates) currently sits on the linkified
+// URL's underlined cells. Used by the WM_SETCURSOR hand-cursor decision.
+fn mouseIsOverUrl(window: *state.Window, mouse_x: i32, mouse_y: i32) bool {
+    const h = window.hovered_url orelse return false;
+    if (h.tab_id != window.active().id) return false;
+    const cell = cellAtClient(window, mouse_x, mouse_y) orelse return false;
+    const cols: u16 = std.math.cast(u16, window.active().term.cols) orelse return false;
+    if (cols == 0) return false;
+    return h.hit.contains(cell.row, cell.col, cols - 1);
+}
+
+fn openUrl(hwnd: win32.HWND, url: []const u8) bool {
+    var stack_buf: [url_hover.MAX_URL_LEN * 2 + 2]u16 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(&stack_buf));
+    const url_w = util.utf16ZAllocConst(fba.allocator(), url) catch {
+        std.log.err("url_hover: utf16 alloc failed for url len={d}", .{url.len});
+        return false;
+    };
+    const result = win32.ShellExecuteW(
+        hwnd,
+        win32.L("open"),
+        url_w,
+        null,
+        null,
+        @bitCast(win32.SW_SHOWNORMAL),
+    );
+    const code = if (result) |hr| @intFromPtr(hr) else 0;
+    if (code <= 32) {
+        std.log.err("url_hover: ShellExecuteW failed, code={d}", .{code});
+        return false;
+    }
+    return true;
+}
+
+// Re-detects the URL at the given client-coords on the active tab. Used by
+// the double-click handler because the first click of the dblclk pair sets
+// mouse_capture = .selecting, and any sub-pixel mouse motion between the
+// down/up/dblclk events clears window.hovered_url through the capture branch.
+fn detectUrlAtClient(window: *state.Window, mouse_x: i32, mouse_y: i32) ?url_hover.Hit {
+    const cell = cellAtClient(window, mouse_x, mouse_y) orelse return null;
+    return url_hover.detectAt(window.active().term, cell.col, cell.row);
+}
+
+// Re-runs URL detection at the cached hover cell against the CURRENT viewport
+// contents. Called from the render path before reading window.hovered_url so a
+// single hook covers every state-change that triggers a repaint — PTY output,
+// keyboard-driven viewport snap-back, resize, config reload, etc. — without
+// scattering invalidation calls across handlers.
+//
+// Updates window.hovered_url in place but does NOT call window.requestRender:
+// the caller is already mid-render and would just queue a redundant frame.
+pub fn revalidateHoverForActiveTab(window: *state.Window) void {
+    const hc = window.hover_cell orelse return;
+    const tab = window.active();
+    if (hc.tab_id != tab.id) return;
+    const cols: u16 = std.math.cast(u16, tab.term.cols) orelse return;
+    const rows: u16 = std.math.cast(u16, tab.term.rows) orelse return;
+    if (hc.col >= cols or hc.row >= rows) {
+        // Resize shrunk the grid past the cached cell; drop everything.
+        window.hovered_url = null;
+        window.hover_cell = null;
+        return;
+    }
+    const new_hit = url_hover.detectAt(tab.term, hc.col, hc.row);
+    if (new_hit) |h| {
+        if (window.hovered_url) |cur| {
+            if (cur.tab_id == tab.id and cur.hit.eql(&h)) return;
+        }
+        window.hovered_url = .{ .tab_id = tab.id, .hit = h };
+    } else if (window.hovered_url != null) {
+        window.hovered_url = null;
+    }
 }
 
 fn currentMods() mouse_report.Mods {
@@ -126,6 +257,9 @@ fn reportButtonDown(
         window.mouse_capture = .mouse_report;
         window.mouse_report_tab_id = tab.id;
         _ = win32.SetCapture(hwnd);
+        // Entering capture: drop any URL underline so a click-and-hold doesn't
+        // leave a stale highlight visible until the user moves the mouse.
+        clearUrlHover(window);
     }
     return true;
 }
@@ -223,6 +357,7 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
                 window_geom.scrollbarDragTo(window.active(), mouse_yf - track_height / 2.0, win_h, track_height);
             }
             _ = win32.SetCapture(hwnd);
+            clearUrlHover(window);
             window.requestRender();
         }
     } else {
@@ -237,6 +372,7 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
             screen.select(sel) catch util.oom(error.OutOfMemory);
             window.mouse_capture = .selecting;
             _ = win32.SetCapture(hwnd);
+            clearUrlHover(window);
             window.requestRender();
         }
     }
@@ -412,6 +548,30 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
     // so the user-visible behavior matches the no-DBLCLKS baseline there.
     if (mouse_y < tbh or mouse_x >= grid_w) return onLButtonDown(hwnd, wparam, lparam);
 
+    // Hovered URL: a double-click on the underlined cells opens the link via
+    // ShellExecuteW instead of selecting the word. Re-detect against the
+    // click position rather than reading window.hovered_url — the first
+    // click of the double-click sets mouse_capture = .selecting which the
+    // intervening WM_MOUSEMOVE clears the cached hover through.
+    // Shift-double-click falls through to the normal word-selection path
+    // so the user can still copy the URL text.
+    if (!util.isShiftDown()) {
+        if (detectUrlAtClient(window, mouse_x, mouse_y)) |h| {
+            if (openUrl(hwnd, h.url())) {
+                // Drop the .selecting capture set by the preceding LBUTTONDOWN
+                // and the lingering selection so the URL stays visually a link,
+                // not a selection.
+                if (window.mouse_capture == .selecting) {
+                    window.mouse_capture = .none;
+                    _ = win32.ReleaseCapture();
+                }
+                window.active().term.screens.active.clearSelection();
+                window.requestRender();
+                return 0;
+            }
+        }
+    }
+
     // Mouse-reporting TUIs expect a real button press for the second click;
     // WM_LBUTTONDBLCLK arrives in place of WM_LBUTTONDOWN, so without this
     // forwarding the application would see only one of the two clicks.
@@ -527,6 +687,11 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     const scroll_lines: isize = -@as(isize, notches) * 3;
     const screen = tab.term.screens.active;
     screen.scroll(.{ .delta_row = scroll_lines });
+    // Don't clearUrlHover here. The mouse hasn't moved, so hover_cell still
+    // points at the cell physically under the cursor. The render-path
+    // revalidation in renderWindow will re-detect against whatever scrolled
+    // into that cell on the next paint — smooth highlight updates during a
+    // wheel scroll without forcing the user to wiggle the mouse.
     window.requestRender();
     return 0;
 }
@@ -553,6 +718,7 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
     // Capture in progress takes priority over tab-bar hover.
     if (window.mouse_capture != .none) {
         tooltip.hide(window);
+        clearUrlHover(window);
         const grid_mouse_y = mouse_y - tbh;
         switch (window.mouse_capture) {
             .none => {},
@@ -587,6 +753,7 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
 
     // Tab bar hover
     if (mouse_y < tbh) {
+        clearUrlHover(window);
         const cell_count = window_geom.computeGridCellCount(hwnd, cs);
         const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
         if (!util.hitEql(window.tab_bar_hover, hit)) {
@@ -613,12 +780,21 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
     }
     tooltip.hide(window);
 
-    if (reportMotion(window, hwnd, mouse_x, mouse_y, true)) return 0;
+    if (reportMotion(window, hwnd, mouse_x, mouse_y, true)) {
+        clearUrlHover(window);
+        return 0;
+    }
 
     const in_scrollbar = mouse_x >= grid_w;
     if (in_scrollbar != window.mouse_in_scrollbar) {
         window.mouse_in_scrollbar = in_scrollbar;
         window.requestRender();
+    }
+
+    if (in_scrollbar) {
+        clearUrlHover(window);
+    } else {
+        updateUrlHover(window, hwnd, mouse_x, mouse_y);
     }
     return 0;
 }
@@ -643,7 +819,25 @@ pub fn onMouseLeave(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.L
         window.requestRender();
     }
     tooltip.hide(window);
+    clearUrlHover(window);
     return 0;
+}
+
+// Hand cursor when the mouse sits on a linkified URL. Returns null for any
+// other situation so DefWindowProc falls back to the WNDCLASS arrow.
+pub fn onSetCursor(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
+    // Hit-test code from LOWORD(lparam). Only the client-area code should
+    // trigger the hand — over the non-client border we want the resize/etc
+    // cursors that Windows picks.
+    const hit_code: u16 = @truncate(@as(usize, @bitCast(lparam)));
+    if (hit_code != win32.HTCLIENT) return null;
+    const window = global_mod.windowFromHwnd(hwnd);
+    var pt: win32.POINT = undefined;
+    if (0 == win32.GetCursorPos(&pt)) return null;
+    if (0 == win32.ScreenToClient(hwnd, &pt)) return null;
+    if (!mouseIsOverUrl(window, pt.x, pt.y)) return null;
+    _ = win32.SetCursor(win32.LoadCursorW(null, win32.IDC_HAND));
+    return 1;
 }
 
 pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {

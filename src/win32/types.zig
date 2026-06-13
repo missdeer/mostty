@@ -93,3 +93,13 @@ pub const TabBarDraw = struct {
     new_tab_col: ?u32,
     new_tab_hovered: bool,
 };
+
+// Hovered URL highlight range. Inclusive viewport coordinates spanning one or
+// more soft-wrapped rows. The start row begins at start_col, end row ends at
+// end_col; any row strictly between covers the full row width.
+pub const UrlHighlight = struct {
+    start_row: u16,
+    start_col: u16,
+    end_row: u16,
+    end_col: u16,
+};
