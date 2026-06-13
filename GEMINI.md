@@ -81,8 +81,8 @@ There is no separate lint step. The Windows build requires the MSVC ABI (`build.
 ## Build Command for Developer
 
 - Use `cmd.exe /c "D:\zig-x86_64-windows-0.15.2\zig.exe build --global-cache-dir D:\zig-cache"` to build the project.
-- MUST wrap the build command by `cmd.exe /c`
-- Use `D:\zig-cache` as the build cache
+- Use `D:\zig-cache` as the build cache.
+- Don't always wrap commands by `cmd.exe /c`, run it directly except the **build command**.
 
 # Architecture
 
