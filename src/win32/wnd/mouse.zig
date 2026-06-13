@@ -243,6 +243,101 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     return 0;
 }
 
+// Default word-boundary codepoints. Conservative on purpose: dots, slashes,
+// dashes, underscores, '$' and ':' stay non-boundary so URLs, file paths,
+// and shell variables (`https://x/y`, `$HOME`, `key:value` literals) select
+// as a single token. '@' IS a boundary so shell prompts like
+// `user@host MINGW64 /path` split as user / host / MINGW64 / path
+// (matches xterm/ghostty default — trade-off: `user@example.com` and
+// scoped npm packages split too).
+//
+// CJK punctuation block: without these, an entire Chinese/Japanese sentence
+// would select as one "word" because the CJK ideographs themselves are
+// non-boundary. We include the fullwidth analogues of the ASCII boundaries
+// plus the ideographic comma/period/quotation brackets so a Chinese sentence
+// double-click selects a phrase, not the whole line.
+const WORD_BOUNDARIES = [_]u21{
+    0,      ' ',    '\t',   '\'',   '"',    '`',    '|',    ';',
+    ',',    '(',    ')',    '[',    ']',    '{',    '}',    '<',
+    '>',    '@',    0x2502, // '│' TUI pane separator
+    // CJK / fullwidth punctuation
+    0x3000, // 　 ideographic space
+    0x3001, // 、 ideographic comma
+    0x3002, // 。 ideographic full stop
+    0x3008, 0x3009, // 〈〉
+    0x300A, 0x300B, // 《》
+    0x300C, 0x300D, // 「」
+    0x300E, 0x300F, // 『』
+    0x3010, 0x3011, // 【】
+    0xFF01, // ！
+    0xFF08, 0xFF09, // （）
+    0xFF0C, // ，
+    0xFF1A, // ：
+    0xFF1B, // ；
+    0xFF1F, // ？
+    0x2018, 0x2019, // '' smart single quotes
+    0x201C, 0x201D, // "" smart double quotes
+    0x00B7, // · Latin middle dot (Chinese names: 奥利弗·特威斯特)
+    0x30FB, // ・ katakana middle dot (Japanese lists / loanword separators)
+};
+
+pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
+    const window = global_mod.windowFromHwnd(hwnd);
+    const mouse_x: i32 = win32.xFromLparam(lparam);
+    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const tbh = global.renderer.tab_bar_height;
+    const cs = global.renderer.cell_size;
+    const client_size = win32.getClientSize(hwnd);
+    const sb_px = d3d11.scrollbarWidth(win32.dpiFromHwnd(hwnd));
+    const grid_w = client_size.cx -| @as(i32, sb_px);
+
+    // CS_DBLCLKS replaces the second WM_LBUTTONDOWN of a fast double-click
+    // with WM_LBUTTONDBLCLK. Outside the grid (tab bar / scrollbar) word
+    // selection is meaningless, but silently dropping the event would lose
+    // the second tab activation / scrollbar jump. Delegate to onLButtonDown
+    // so the user-visible behavior matches the no-DBLCLKS baseline there.
+    if (mouse_y < tbh or mouse_x >= grid_w) return onLButtonDown(hwnd, wparam, lparam);
+
+    // Mouse-reporting TUIs expect a real button press for the second click;
+    // WM_LBUTTONDBLCLK arrives in place of WM_LBUTTONDOWN, so without this
+    // forwarding the application would see only one of the two clicks.
+    // Shift bypasses reporting (same convention as the single-click path).
+    if (!util.isShiftDown() and reportButtonDown(window, hwnd, mouse_x, mouse_y, .left)) return 0;
+
+    const grid_mouse_y = mouse_y - tbh;
+    const screen = window.active().term.screens.active;
+    const col: usize = @intCast(@divTrunc(@max(mouse_x, 0), cs.cx));
+    const row: usize = @intCast(@divTrunc(@max(grid_mouse_y, 0), cs.cy));
+    var pin = screen.pages.pin(.{ .viewport = .{ .x = @intCast(col), .y = @intCast(row) } }) orelse return 0;
+
+    // Wide CJK chars occupy two columns: a primary cell holding the codepoint
+    // and a spacer_tail to its right whose codepoint is 0. A click on the
+    // right half lands on the spacer_tail, where selectWord short-circuits
+    // (hasText() is false) — without this we'd fall back to a single-cell
+    // selection on the spacer. Step one column left to hit the real cell.
+    if (pin.rowAndCell().cell.wide == .spacer_tail and pin.x > 0) {
+        pin.x -= 1;
+    }
+
+    // selectWord returns null on an empty cell. Fall back to a single-cell
+    // selection in that case so the click still feels responsive.
+    const sel = screen.selectWord(pin, &WORD_BOUNDARIES) orelse vt.Selection.init(pin, pin, false);
+    screen.clearSelection();
+    screen.select(sel) catch util.oom(error.OutOfMemory);
+
+    // Cancel any in-progress fade from the prior single-click release so the
+    // freshly-expanded selection doesn't immediately start dimming.
+    window.selection_fade = 0;
+    _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
+
+    // Re-capture so the upcoming WM_LBUTTONUP runs the .selecting branch and
+    // copies the word to the clipboard — same exit path as a normal drag.
+    window.mouse_capture = .selecting;
+    _ = win32.SetCapture(hwnd);
+    window.requestRender();
+    return 0;
+}
+
 pub fn onLButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
     const mouse_x: i32 = win32.xFromLparam(lparam);

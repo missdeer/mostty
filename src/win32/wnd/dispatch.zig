@@ -27,8 +27,15 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     // mouse
     .{ .msg = win32.WM_LBUTTONDOWN, .handler = &mouse.onLButtonDown },
     .{ .msg = win32.WM_LBUTTONUP, .handler = &mouse.onLButtonUp },
+    .{ .msg = win32.WM_LBUTTONDBLCLK, .handler = &mouse.onLButtonDblClk },
     .{ .msg = win32.WM_MBUTTONDOWN, .handler = &mouse.onMButtonDown },
     .{ .msg = win32.WM_MBUTTONUP, .handler = &mouse.onMButtonUp },
+    // CS_DBLCLKS (enabled on the window class for left-click word-select)
+    // also suppresses the second WM_RBUTTONDOWN / WM_MBUTTONDOWN of a fast
+    // double-click in favor of the *DBLCLK variants. Forward them back to
+    // the down handlers so the second paste / mouse-report press isn't lost.
+    .{ .msg = win32.WM_RBUTTONDBLCLK, .handler = &mouse.onRButtonDown },
+    .{ .msg = win32.WM_MBUTTONDBLCLK, .handler = &mouse.onMButtonDown },
     .{ .msg = win32.WM_MOUSEWHEEL, .handler = &mouse.onMouseWheel },
     .{ .msg = win32.WM_MOUSEMOVE, .handler = &mouse.onMouseMove },
     .{ .msg = win32.WM_MOUSELEAVE, .handler = &mouse.onMouseLeave },

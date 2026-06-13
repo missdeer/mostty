@@ -29,6 +29,7 @@ This fork adds several Windows-side enhancements on top of upstream:
 - Drag-and-drop from Explorer: dropped files are pasted as space-separated, double-quoted paths into the active tab (works under elevation via UIPI message filters).
 - IME composition and candidate windows track the caret cell instead of opening at the screen corner; the position re-pins if PTY output scrolls mid-composition.
 - Multi-line clipboard paste preserves line breaks by normalizing CRLF and bare LF to CR (matches xterm bracketed-paste, alacritty/kitty/foot).
+- Double-click selects the word under the cursor and copies it to the clipboard; boundary set tuned so URLs/paths/`$VAR`/`key:value` stay one token while `user@host` splits, with CJK-aware punctuation (sentences split at `，。！？「」` etc.) and wide-char right-half clicks resolved to the primary cell.
 - Render hot-path performance pass: coalesced `InvalidateRect` via a `render_pending` flag, per-frame LRU dampening in the glyph cache, per-render selection-bounds precompute (replaces per-cell page walks), and a pow-free shader gamma decode approximation kept close to DirectWrite's gamma 2.2 rendering params.
 - Automated Windows builds via GitHub Actions, plus repository assistant tooling/docs updates for contributors.
 

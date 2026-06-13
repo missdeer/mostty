@@ -111,7 +111,10 @@ pub fn main() !void {
     {
         const wc = win32.WNDCLASSEXW{
             .cbSize = @sizeOf(win32.WNDCLASSEXW),
-            .style = .{},
+            // CS_DBLCLKS: required for WM_LBUTTONDBLCLK to be delivered;
+            // without it the second click of a double-click arrives as a
+            // plain WM_LBUTTONDOWN and word-selection can't be distinguished.
+            .style = .{ .DBLCLKS = 1 },
             .lpfnWndProc = WndProc,
             .cbClsExtra = 0,
             .cbWndExtra = 0,
