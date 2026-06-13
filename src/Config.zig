@@ -179,6 +179,11 @@ color_overrides: ColorOverrides = .{},
 // show through under non-themed cells; cells with an explicit `bg_color_*`
 // stay opaque so highlighted regions remain readable.
 background_opacity: f32 = 0.94,
+// Whether DWM blur-behind is enabled on the window. On Windows 10/11 this is
+// what makes the alpha channel of translucent cells composite with the
+// desktop wallpaper / lower windows. Turning it off makes background-opacity
+// < 1 effectively black under most modern Windows compositors.
+background_blur: bool = true,
 
 // Render-throttle frame interval (ms). Two independent caps because the
 // "right" cadence differs: local D3D presents are nearly free at 60 FPS,
@@ -260,6 +265,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var tabbar_font_family: []const u8 = &.{};
     var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
+    var background_blur: bool = true;
     var render_interval_local_ms: u32 = 16;
     var render_interval_remote_ms: u32 = 33;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
@@ -402,6 +408,11 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             background_opacity = n;
+        } else if (std.mem.eql(u8, key, "background-blur")) {
+            background_blur = parseBool(value) orelse {
+                std.log.warn("config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
+                continue;
+            };
         } else if (std.mem.eql(u8, key, "font-codepoint-map")) {
             parseCodepointMap(a, value, &codepoint_maps) catch {
                 std.log.warn("config: {s}:{}: invalid font-codepoint-map '{s}'", .{ source_name, line_no, value });
@@ -447,10 +458,37 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .theme_name = theme_name,
         .color_overrides = overrides,
         .background_opacity = background_opacity,
+        .background_blur = background_blur,
         .render_interval_local_ms = render_interval_local_ms,
         .render_interval_remote_ms = render_interval_remote_ms,
         .arena = arena,
     };
+}
+
+// Accepts Ghostty's bool forms (case-insensitive): `true/yes/t/y/1` →
+// true, `false/no/f/n/0` → false. An integer ≥ 0 (Ghostty's macOS-only blur
+// radius) is folded down to a bool here: 0 → false, anything positive →
+// true. Ghostty's macOS-only glass variants (`macos-glass-regular`,
+// `macos-glass-clear`) also map to true so a shared Ghostty config doesn't
+// warn-and-default to the wrong value on Windows. Caller already trims
+// `value`. Returns null on anything else so the caller can log and discard.
+fn parseBool(value: []const u8) ?bool {
+    if (value.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "t") or
+        std.ascii.eqlIgnoreCase(value, "y") or
+        std.ascii.eqlIgnoreCase(value, "macos-glass-regular") or
+        std.ascii.eqlIgnoreCase(value, "macos-glass-clear")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "false") or
+        std.ascii.eqlIgnoreCase(value, "no") or
+        std.ascii.eqlIgnoreCase(value, "f") or
+        std.ascii.eqlIgnoreCase(value, "n")) return false;
+    if (std.fmt.parseInt(i32, value, 10)) |n| {
+        if (n < 0) return null;
+        return n > 0;
+    } else |_| {}
+    return null;
 }
 
 // 1..1000 ms: 1 ms is effectively "no throttle" (a single GetTickCount tick),

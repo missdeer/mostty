@@ -170,16 +170,7 @@ pub fn main() !void {
         const hr = win32.DwmExtendFrameIntoClientArea(hwnd, &margins);
         if (hr < 0) std.log.warn("DwmExtendFrameIntoClientArea failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
-    {
-        const bb = win32.DWM_BLURBEHIND{
-            .dwFlags = 0x1 | 0x4,
-            .fEnable = 1,
-            .hRgnBlur = null,
-            .fTransitionOnMaximized = 1,
-        };
-        const hr = win32.DwmEnableBlurBehindWindow(hwnd, &bb);
-        if (hr < 0) std.log.warn("DwmEnableBlurBehindWindow failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
-    }
+    util.applyBlurBehind(hwnd, global.config.background_blur);
 
     win32.DragAcceptFiles(hwnd, 1);
     // UIPI: when mostty runs elevated, Explorer (a lower-integrity process)

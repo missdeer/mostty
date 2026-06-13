@@ -72,6 +72,23 @@ pub fn hitEql(a: ?types.TabHit, b: types.TabHit) bool {
     };
 }
 
+// Toggle DWM blur-behind. With fEnable=1 the compositor honors the window's
+// per-pixel alpha so background-opacity < 1 lets the desktop show through
+// (with a soft Aero-style blur on Win11 builds that still support it).
+// fEnable=0 cancels the blur-behind region; translucent pixels then composite
+// as plain black under most modern Windows compositors. This is the legacy
+// Vista-era API, not Mica/Acrylic via DWMWA_SYSTEMBACKDROP_TYPE.
+pub fn applyBlurBehind(hwnd: win32.HWND, enable: bool) void {
+    const bb = win32.DWM_BLURBEHIND{
+        .dwFlags = 0x1 | 0x4, // DWM_BB_ENABLE | DWM_BB_TRANSITIONONMAXIMIZED
+        .fEnable = if (enable) 1 else 0,
+        .hRgnBlur = null,
+        .fTransitionOnMaximized = 1,
+    };
+    const hr = win32.DwmEnableBlurBehindWindow(hwnd, &bb);
+    if (hr < 0) std.log.warn("DwmEnableBlurBehindWindow failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+}
+
 pub fn globalUnlock(hmem: isize) void {
     win32.SetLastError(.NO_ERROR);
     if (0 == win32.GlobalUnlock(hmem)) {
