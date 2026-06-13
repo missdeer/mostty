@@ -162,8 +162,22 @@ pub fn onDpiChanged(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     if (dpi != win32.hiword(wparam)) @panic("unexpected hiword dpi");
     if (dpi != win32.loword(wparam)) @panic("unexpected loword dpi");
     global.renderer.updateDpi(dpi);
-    const rect: *win32.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
-    util.setWindowPosRect(hwnd, rect.*);
+    const suggested: *win32.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    // While fullscreen, the OS suggests a windowed-shaped rect for the new
+    // DPI, which would visually un-fullscreen the window without clearing
+    // fullscreen_saved_style — desyncing the toggle state. Snap to the new
+    // monitor's rcMonitor instead so fullscreen stays sticky across DPI moves.
+    const rect: win32.RECT = blk: {
+        if (window.fullscreen_saved_style != null) {
+            if (win32.MonitorFromWindow(hwnd, win32.MONITOR_DEFAULTTONEAREST)) |monitor| {
+                var mi: win32.MONITORINFO = undefined;
+                mi.cbSize = @sizeOf(win32.MONITORINFO);
+                if (0 != win32.GetMonitorInfoW(monitor, &mi)) break :blk mi.rcMonitor;
+            }
+        }
+        break :blk suggested.*;
+    };
+    util.setWindowPosRect(hwnd, rect);
     window.bounds = null;
     window.requestRender();
     return 0;

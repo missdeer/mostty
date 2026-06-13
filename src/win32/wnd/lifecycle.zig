@@ -30,6 +30,7 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     }
     if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
         _ = win32.AppendMenuW(menu, win32.MF_SEPARATOR, 0, null);
+        _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_TOGGLE_FULLSCREEN, win32.L("Full screen\tAlt+Enter"));
         if (win32.CreatePopupMenu()) |sub| {
             window.theme_submenu = sub;
             // Cast HMENU to the uintptr id slot AppendMenuW expects for MF_POPUP.

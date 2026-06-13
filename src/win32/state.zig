@@ -102,6 +102,11 @@ pub const Window = struct {
     // attached, so Windows destroys it with the parent — no manual cleanup.
     // Items are rebuilt on each WM_INITMENUPOPUP.
     theme_submenu: ?win32.HMENU = null,
+    // Set while the window is in fullscreen: original GWL_STYLE bits and
+    // WINDOWPLACEMENT captured at enter time. Both being non-null is the
+    // canonical "we're fullscreen" predicate; restoring clears them.
+    fullscreen_saved_style: ?u32 = null,
+    fullscreen_saved_placement: ?win32.WINDOWPLACEMENT = null,
     // Name of the theme currently applied in this session (gpa-owned). Seeded
     // from the parsed config's `theme = X`, replaced when the user picks a
     // theme through the submenu, and resynced from the config on hot-reload.

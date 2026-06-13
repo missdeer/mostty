@@ -242,11 +242,93 @@ pub fn onSysCommand(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?wi
         openSettingsFile(hwnd);
         return 0;
     }
+    if (masked == types.IDM_TOGGLE_FULLSCREEN) {
+        toggleFullscreen(hwnd);
+        return 0;
+    }
     if (masked >= types.IDM_THEME_BASE and masked < types.IDM_THEME_END) {
         applyThemePickById(hwnd, masked);
         return 0;
     }
     return null; // delegate the rest (Move/Size/Close/...) to DefWindowProcW
+}
+
+// Borderless-fullscreen toggle (the Raymond Chen recipe). Going in we save
+// GWL_STYLE + WINDOWPLACEMENT, strip WS_OVERLAPPEDWINDOW, add WS_POPUP, and
+// size to the monitor's rcMonitor — covering the taskbar so the shell auto-
+// hides it. Coming back out we restore both, then SWP_FRAMECHANGED forces
+// WM_NCCALCSIZE so the non-client area redraws. WM_WINDOWPOSCHANGED naturally
+// fires from both SetWindowPos calls, so the existing handler re-syncs the
+// grid + ConPTY size without explicit plumbing here.
+pub fn toggleFullscreen(hwnd: win32.HWND) void {
+    const window = global_mod.windowFromHwnd(hwnd);
+
+    if (window.fullscreen_saved_style != null and window.fullscreen_saved_placement != null) {
+        const style_bits = window.fullscreen_saved_style.?;
+        const placement = window.fullscreen_saved_placement.?;
+        _ = win32.SetWindowLongPtrW(hwnd, win32.GWL_STYLE, @as(isize, @bitCast(@as(usize, style_bits))));
+        _ = win32.SetWindowPlacement(hwnd, &placement);
+        _ = win32.SetWindowPos(hwnd, null, 0, 0, 0, 0, .{
+            .NOMOVE = 1,
+            .NOSIZE = 1,
+            .NOZORDER = 1,
+            .NOOWNERZORDER = 1,
+            .DRAWFRAME = 1, // == SWP_FRAMECHANGED
+        });
+        window.fullscreen_saved_style = null;
+        window.fullscreen_saved_placement = null;
+        if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
+            _ = win32.CheckMenuItem(menu, @intCast(types.IDM_TOGGLE_FULLSCREEN), 0); // MF_BYCOMMAND | MF_UNCHECKED
+        }
+        return;
+    }
+
+    var placement: win32.WINDOWPLACEMENT = std.mem.zeroes(win32.WINDOWPLACEMENT);
+    placement.length = @sizeOf(win32.WINDOWPLACEMENT);
+    if (0 == win32.GetWindowPlacement(hwnd, &placement)) {
+        std.log.warn("GetWindowPlacement failed, error={f}", .{win32.GetLastError()});
+        return;
+    }
+
+    const monitor = win32.MonitorFromWindow(hwnd, win32.MONITOR_DEFAULTTONEAREST) orelse {
+        std.log.warn("MonitorFromWindow failed, error={f}", .{win32.GetLastError()});
+        return;
+    };
+    var mi: win32.MONITORINFO = undefined;
+    mi.cbSize = @sizeOf(win32.MONITORINFO);
+    if (0 == win32.GetMonitorInfoW(monitor, &mi)) {
+        std.log.warn("GetMonitorInfo failed, error={f}", .{win32.GetLastError()});
+        return;
+    }
+
+    const orig_style: u32 = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, win32.GWL_STYLE))))));
+    const ws_overlapped: u32 = @bitCast(win32.WS_OVERLAPPEDWINDOW);
+    const ws_popup: u32 = @bitCast(win32.WS_POPUP);
+    // Preserve WS_SYSMENU so Alt+Space still opens the system menu (and from
+    // there the user can toggle Full screen back off without the keyboard
+    // shortcut). Clear WS_MAXIMIZE / WS_MINIMIZE so the WM doesn't treat the
+    // popup as a maximized window and reconstrain it to rcWork.
+    const ws_sysmenu: u32 = @bitCast(win32.WS_SYSMENU);
+    const ws_maximize: u32 = @bitCast(win32.WS_MAXIMIZE);
+    const ws_minimize: u32 = @bitCast(win32.WS_MINIMIZE);
+    const new_style: u32 = (orig_style & ~(ws_overlapped | ws_maximize | ws_minimize)) | ws_popup | ws_sysmenu;
+
+    window.fullscreen_saved_style = orig_style;
+    window.fullscreen_saved_placement = placement;
+
+    _ = win32.SetWindowLongPtrW(hwnd, win32.GWL_STYLE, @as(isize, @bitCast(@as(usize, new_style))));
+    _ = win32.SetWindowPos(
+        hwnd,
+        null, // HWND_TOP
+        mi.rcMonitor.left,
+        mi.rcMonitor.top,
+        mi.rcMonitor.right - mi.rcMonitor.left,
+        mi.rcMonitor.bottom - mi.rcMonitor.top,
+        .{ .NOOWNERZORDER = 1, .DRAWFRAME = 1 }, // DRAWFRAME == SWP_FRAMECHANGED
+    );
+    if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
+        _ = win32.CheckMenuItem(menu, @intCast(types.IDM_TOGGLE_FULLSCREEN), 8); // MF_BYCOMMAND | MF_CHECKED
+    }
 }
 
 // Rebuilds the Theme submenu when it's about to be displayed. Other popups

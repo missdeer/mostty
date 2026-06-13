@@ -49,6 +49,8 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = win32.WM_RBUTTONUP, .handler = &mouse.onRButtonUp },
     // keyboard
     .{ .msg = win32.WM_KEYDOWN, .handler = &keyboard.onKeyDown },
+    .{ .msg = win32.WM_SYSKEYDOWN, .handler = &keyboard.onSysKeyDown },
+    .{ .msg = win32.WM_SYSCHAR, .handler = &keyboard.onSysChar },
     .{ .msg = win32.WM_CHAR, .handler = &keyboard.onChar },
     // paint / sizing / dpi
     .{ .msg = win32.WM_ERASEBKGND, .handler = &paint.onEraseBkgnd },

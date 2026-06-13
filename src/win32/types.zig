@@ -49,6 +49,7 @@ pub const CONFIG_RELOAD_DEBOUNCE_MS: u32 = 150;
 // System-menu command id. Must be < 0xF000 (system range) and a multiple of
 // 16, since DefWindowProc masks WM_SYSCOMMAND wparam with 0xFFF0.
 pub const IDM_OPEN_SETTINGS: usize = 0x0010;
+pub const IDM_TOGGLE_FULLSCREEN: usize = 0x0020;
 
 // Theme submenu IDs occupy 0x1000..0x5000 in steps of 16: clear of
 // IDM_OPEN_SETTINGS and the system range (>=0xF000). The Theme menu is

@@ -2,6 +2,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 
 const global_mod = @import("../global.zig");
+const misc = @import("misc.zig");
 const paste = @import("../paste.zig");
 const state = @import("../state.zig");
 const tab_mgmt = @import("../tab_mgmt.zig");
@@ -170,6 +171,32 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
         );
     }
     return 0;
+}
+
+// Alt+Enter toggles fullscreen. We claim it from WM_SYSKEYDOWN so Alt+Enter
+// never reaches the PTY. Ignore auto-repeats (lparam bit 30 = previous key
+// state) so a held chord doesn't flip-flop. Anything else (Alt+F4, Alt+Space,
+// ...) falls through to DefWindowProcW via the null return.
+pub fn onSysKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
+    // Strictly plain Alt+Enter: Ctrl+Alt+Enter / Shift+Alt+Enter are reserved
+    // for the PTY / app shortcuts.
+    if (wparam == @intFromEnum(win32.VK_RETURN) and
+        util.isAltDown() and !util.isCtrlDown() and !util.isShiftDown())
+    {
+        const prev_down = (@as(usize, @bitCast(lparam)) >> 30) & 1 != 0;
+        if (!prev_down) misc.toggleFullscreen(hwnd);
+        return 0;
+    }
+    return null;
+}
+
+// TranslateMessage turns WM_SYSKEYDOWN(VK_RETURN+Alt) into WM_SYSCHAR('\r'+Alt).
+// If we let DefWindowProcW see that, it interprets it as an unmatched Alt-menu
+// mnemonic and MessageBeep()s. Swallow plain Alt+Enter here too; Alt+Space and
+// friends still fall through.
+pub fn onSysChar(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    if (wparam == '\r') return 0;
+    return null;
 }
 
 pub fn onChar(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
