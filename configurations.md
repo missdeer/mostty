@@ -302,6 +302,55 @@ Note: this is the legacy `DwmEnableBlurBehindWindow` API, not Mica / Acrylic
 via `DWMWA_SYSTEMBACKDROP_TYPE`. Hot-reloads — toggling the key re-invokes
 the DWM call and triggers a repaint.
 
+### `maximize`
+
+Whether new windows start maximized. Accepted values (case-insensitive):
+`true` / `yes` / `t` / `y`, `false` / `no` / `f` / `n`, or a non-negative
+integer (`0` → off, `>0` → on).
+
+```
+maximize = true
+```
+
+Default: `false`. Applied after the initial `ShowWindow`; combine with
+`fullscreen = true` to have toggling fullscreen off restore the maximized
+state rather than a normal-sized window.
+
+**Hot-reload:** no (startup only). Editing the key on a running window does
+not maximize/restore it — use the title-bar maximize button or `Win+Up`.
+
+### `fullscreen`
+
+Whether new windows start in borderless fullscreen (the same mode reached via
+**Full screen** in the system menu / `Alt+Enter`).
+
+```
+fullscreen = true
+```
+
+Default: `false`. Accepted values (case-insensitive) mirror Ghostty's
+`fullscreen` enum so a shared Ghostty config does not warn:
+
+- `true` / `yes` / `t` / `y` → on
+- `false` / `no` / `f` / `n` → off
+- `non-native` / `non-native-visible-menu` / `non-native-padded-notch`
+  (Ghostty's macOS-only variants) → on
+
+Mostty has a single borderless mode, so every "enabled" variant collapses to
+the same toggle. Unlike `background-blur`, bare integers and the
+`macos-glass-*` enums are **not** accepted here — they belong to a different
+Ghostty key and accepting them would silently misroute a typo.
+
+**Hot-reload:** no (startup only). Use `Alt+Enter` or **Full screen** in the
+system menu to toggle at runtime.
+
+**Background opacity / blur in fullscreen.** Because Mostty's fullscreen is a
+DWM-composited borderless popup (not exclusive / "native" fullscreen),
+`background-opacity` and `background-blur` keep working unchanged — the
+desktop / lower windows continue to show through translucent cells. This
+differs from Ghostty on macOS, where native fullscreen forces opacity off
+because the OS swaps the background for a flat gray.
+
 ### `render-interval-local-ms` / `render-interval-remote-ms`
 
 Minimum interval (in milliseconds) between rendered frames. Mostty coalesces

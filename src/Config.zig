@@ -185,6 +185,16 @@ background_opacity: f32 = 0.94,
 // < 1 effectively black under most modern Windows compositors.
 background_blur: bool = true,
 
+// Start each new window maximized. Applied after the initial ShowWindow.
+// When `fullscreen` is also true, fullscreen takes effect on top of this so
+// toggling fullscreen back off restores a maximized window, not a normal one.
+maximize: bool = false,
+// Start each new window in (borderless) fullscreen. Ghostty's macOS-only
+// `non-native*` variants map to true here — mostty has a single borderless
+// mode (the Raymond Chen recipe) so the distinction is meaningless on Windows
+// and shared Ghostty configs shouldn't warn.
+fullscreen: bool = false,
+
 // Render-throttle frame interval (ms). Two independent caps because the
 // "right" cadence differs: local D3D presents are nearly free at 60 FPS,
 // while a remote/RDP session pays per-frame for the encoded delta over the
@@ -266,6 +276,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
     var background_blur: bool = true;
+    var maximize: bool = false;
+    var fullscreen: bool = false;
     var render_interval_local_ms: u32 = 16;
     var render_interval_remote_ms: u32 = 33;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
@@ -413,6 +425,16 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 std.log.warn("config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
                 continue;
             };
+        } else if (std.mem.eql(u8, key, "maximize")) {
+            maximize = parseStrictBool(value) orelse {
+                std.log.warn("config: {s}:{}: invalid maximize '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
+                continue;
+            };
+        } else if (std.mem.eql(u8, key, "fullscreen")) {
+            fullscreen = parseFullscreen(value) orelse {
+                std.log.warn("config: {s}:{}: invalid fullscreen '{s}' (expect true/false or non-native*)", .{ source_name, line_no, value });
+                continue;
+            };
         } else if (std.mem.eql(u8, key, "font-codepoint-map")) {
             parseCodepointMap(a, value, &codepoint_maps) catch {
                 std.log.warn("config: {s}:{}: invalid font-codepoint-map '{s}'", .{ source_name, line_no, value });
@@ -459,6 +481,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .color_overrides = overrides,
         .background_opacity = background_opacity,
         .background_blur = background_blur,
+        .maximize = maximize,
+        .fullscreen = fullscreen,
         .render_interval_local_ms = render_interval_local_ms,
         .render_interval_remote_ms = render_interval_remote_ms,
         .arena = arena,
@@ -488,6 +512,51 @@ fn parseBool(value: []const u8) ?bool {
         if (n < 0) return null;
         return n > 0;
     } else |_| {}
+    return null;
+}
+
+// `parseBool` minus `background-blur`'s compat values (`macos-glass-*`). For
+// keys whose Ghostty type is a plain bool (e.g. `maximize`), where accepting
+// blur-specific strings would just silently swallow a typo.
+fn parseStrictBool(value: []const u8) ?bool {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(trimmed, "true") or
+        std.ascii.eqlIgnoreCase(trimmed, "yes") or
+        std.ascii.eqlIgnoreCase(trimmed, "t") or
+        std.ascii.eqlIgnoreCase(trimmed, "y")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false") or
+        std.ascii.eqlIgnoreCase(trimmed, "no") or
+        std.ascii.eqlIgnoreCase(trimmed, "f") or
+        std.ascii.eqlIgnoreCase(trimmed, "n")) return false;
+    if (std.fmt.parseInt(i32, trimmed, 10)) |n| {
+        if (n < 0) return null;
+        return n > 0;
+    } else |_| {}
+    return null;
+}
+
+// Ghostty's `fullscreen` enum: `true`/`false` plus macOS-only `non-native`,
+// `non-native-visible-menu`, `non-native-padded-notch`. mostty has a single
+// borderless fullscreen mode (the Raymond Chen recipe) so every "enabled"
+// variant collapses to true — keeps shared Ghostty configs from warning.
+// Intentionally narrower than `parseBool`: `macos-glass-*` and bare integers
+// are not valid `fullscreen` values in Ghostty and would silently misroute
+// a typo here, so they're rejected.
+fn parseFullscreen(value: []const u8) ?bool {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(trimmed, "true") or
+        std.ascii.eqlIgnoreCase(trimmed, "yes") or
+        std.ascii.eqlIgnoreCase(trimmed, "t") or
+        std.ascii.eqlIgnoreCase(trimmed, "y") or
+        std.ascii.eqlIgnoreCase(trimmed, "non-native") or
+        std.ascii.eqlIgnoreCase(trimmed, "non-native-visible-menu") or
+        std.ascii.eqlIgnoreCase(trimmed, "non-native-padded-notch")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false") or
+        std.ascii.eqlIgnoreCase(trimmed, "no") or
+        std.ascii.eqlIgnoreCase(trimmed, "f") or
+        std.ascii.eqlIgnoreCase(trimmed, "n")) return false;
     return null;
 }
 
@@ -1144,6 +1213,81 @@ test "parse env: value may contain '=', empty value allowed, duplicate names kep
     try std.testing.expectEqualStrings("first", cfg.env[2].value);
     try std.testing.expectEqualStrings("DUP", cfg.env[3].name);
     try std.testing.expectEqualStrings("second", cfg.env[3].value);
+}
+
+test "parseFullscreen: accepts bools and non-native variants, rejects glass and ints" {
+    try std.testing.expectEqual(@as(?bool, true), parseFullscreen("true"));
+    try std.testing.expectEqual(@as(?bool, true), parseFullscreen("YES"));
+    try std.testing.expectEqual(@as(?bool, false), parseFullscreen("false"));
+    try std.testing.expectEqual(@as(?bool, false), parseFullscreen("n"));
+    try std.testing.expectEqual(@as(?bool, true), parseFullscreen("non-native"));
+    try std.testing.expectEqual(@as(?bool, true), parseFullscreen("non-native-visible-menu"));
+    try std.testing.expectEqual(@as(?bool, true), parseFullscreen("non-native-padded-notch"));
+    try std.testing.expectEqual(@as(?bool, true), parseFullscreen("  Non-Native  "));
+    // Narrower than parseBool: `macos-glass-*` and bare integers belong to
+    // `background-blur`, not `fullscreen` — reject so typos don't misroute.
+    try std.testing.expectEqual(@as(?bool, null), parseFullscreen("macos-glass-regular"));
+    try std.testing.expectEqual(@as(?bool, null), parseFullscreen("1"));
+    try std.testing.expectEqual(@as(?bool, null), parseFullscreen("0"));
+    try std.testing.expectEqual(@as(?bool, null), parseFullscreen(""));
+    try std.testing.expectEqual(@as(?bool, null), parseFullscreen("garbage"));
+}
+
+test "parseStrictBool: accepts bools/integers, rejects glass and garbage" {
+    try std.testing.expectEqual(@as(?bool, true), parseStrictBool("true"));
+    try std.testing.expectEqual(@as(?bool, true), parseStrictBool("YES"));
+    try std.testing.expectEqual(@as(?bool, true), parseStrictBool("1"));
+    try std.testing.expectEqual(@as(?bool, true), parseStrictBool("42"));
+    try std.testing.expectEqual(@as(?bool, false), parseStrictBool("false"));
+    try std.testing.expectEqual(@as(?bool, false), parseStrictBool("0"));
+    // background-blur compat values are not in scope here.
+    try std.testing.expectEqual(@as(?bool, null), parseStrictBool("macos-glass-regular"));
+    try std.testing.expectEqual(@as(?bool, null), parseStrictBool(""));
+    try std.testing.expectEqual(@as(?bool, null), parseStrictBool("garbage"));
+    try std.testing.expectEqual(@as(?bool, null), parseStrictBool("-1"));
+}
+
+test "parse maximize/fullscreen wire through to Config fields" {
+    {
+        const src =
+            \\maximize = true
+            \\fullscreen = non-native-padded-notch
+        ;
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expect(cfg.maximize);
+        try std.testing.expect(cfg.fullscreen);
+    }
+    {
+        // Defaults when keys are absent.
+        var cfg = parse(std.testing.allocator, "", "test");
+        defer cfg.deinit();
+        try std.testing.expect(!cfg.maximize);
+        try std.testing.expect(!cfg.fullscreen);
+    }
+    {
+        // Invalid fullscreen value: warn-and-skip, leave default false.
+        const src = "fullscreen = macos-glass-regular\n";
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expect(!cfg.fullscreen);
+    }
+    {
+        // `maximize` rejects background-blur compat values too — those would
+        // be accidental surface only because both keys are bools at heart.
+        const src = "maximize = macos-glass-regular\n";
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expect(!cfg.maximize);
+    }
+    {
+        // Integer forms work for maximize (mirrors background-blur radius
+        // syntax that some Ghostty users hand-edit).
+        const src = "maximize = 1\n";
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expect(cfg.maximize);
+    }
 }
 
 test "font-thicken/font-shaping-break are silently ignored" {

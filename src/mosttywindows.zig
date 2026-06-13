@@ -181,7 +181,15 @@ pub fn main() !void {
     _ = win32.ChangeWindowMessageFilterEx(hwnd, 0x0049, win32.MSGFLT_ALLOW, null); // WM_COPYGLOBALDATA
 
     if (0 == win32.UpdateWindow(hwnd)) win32.panicWin32("UpdateWindow", win32.GetLastError());
-    _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
+    // Show maximized first when configured so that toggling fullscreen off
+    // later restores the maximized state, not a normal-sized window — the
+    // toggle snapshots WINDOWPLACEMENT at entry.
+    const show_cmd: win32.SHOW_WINDOW_CMD = if (global.config.maximize)
+        win32.SW_SHOWMAXIMIZED
+    else
+        .{ .SHOWNORMAL = 1 };
+    _ = win32.ShowWindow(hwnd, show_cmd);
+    if (global.config.fullscreen) wnd_misc.toggleFullscreen(hwnd);
 
     const HWND_TOP: ?win32.HWND = null;
     _ = win32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, .{ .NOMOVE = 1, .NOSIZE = 1 });
@@ -256,6 +264,7 @@ const state = @import("win32/state.zig");
 const types = @import("win32/types.zig");
 const util = @import("win32/util.zig");
 const window_geom = @import("win32/window_geom.zig");
+const wnd_misc = @import("win32/wnd/misc.zig");
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
