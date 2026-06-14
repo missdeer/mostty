@@ -86,6 +86,8 @@ There is no separate lint step. The Windows build requires the MSVC ABI (`build.
 
 # Architecture
 
+> For the full architecture & workflow reference (module layout, threading model, startup sequence, message dispatch, ConPTY/VT pipeline, rendering pipeline, render throttle, hot-reload, key data flows, invariants), see **`ARCHITECTURE.md`** at the repo root. The summary below is the quick-orientation map; consult `ARCHITECTURE.md` whenever a change touches more than one module or you need to verify an invariant.
+
 Mostty is a Windows-only terminal emulator that wraps `libghostty-vt` (the VT parser/state machine from Ghostty, imported as the `vt` module) and provides its own windowing + rendering layer:
 
 | Target  | Entry point             | Window/IO                            | Rendering             |
