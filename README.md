@@ -5,7 +5,7 @@
 </p>
 </h1>
 
-A native terminal emulator with libghostty at its core.
+A fast, lightweight native terminal emulator with libghostty at its core. Currently designed and implemented for Windows 10/11 only.
 
 > Forked from [marler8997/mite](https://github.com/marler8997/mite).
 >
