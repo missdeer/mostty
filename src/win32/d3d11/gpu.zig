@@ -261,19 +261,6 @@ pub const BackgroundImage = struct {
     }
 };
 
-// COM is initialized lazily (STA) on first WIC use. The app otherwise runs
-// without CoInitialize — D3D/D2D/DWrite/DComp don't require it — so this stays
-// scoped to the image feature. Only ever called from the UI thread.
-var wic_com_initialized: bool = false;
-
-fn ensureComInit() void {
-    if (wic_com_initialized) return;
-    // RPC_E_CHANGED_MODE (already initialized in another mode) is harmless for
-    // WIC, so the result is intentionally ignored.
-    _ = win32.CoInitializeEx(null, win32.COINIT_APARTMENTTHREADED);
-    wic_com_initialized = true;
-}
-
 // CPU-side decoded image. Owned by `gpa`; pixels are BGRA, stride = w*4.
 // Produced by `decodeBackground` and consumed by `uploadBackground`. The two
 // halves are split so the WIC decode (which can take 100ms+ for a multi-MB
@@ -286,9 +273,9 @@ pub const DecodedBackground = struct {
 };
 
 // Pure-CPU WIC decode. Does not touch D3D and does not initialize COM —
-// callers handle COM init for their own apartment (the UI thread uses
-// `ensureComInit`; worker threads CoInitializeEx themselves). Returns null on
-// any failure; a bad path or corrupt file must never crash the terminal.
+// callers handle COM init for their own apartment (the decode worker thread
+// calls CoInitializeEx itself). Returns null on any failure; a bad path or
+// corrupt file must never crash the terminal.
 pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8) ?DecodedBackground {
     const wpath = std.unicode.utf8ToUtf16LeAllocZ(gpa, path) catch {
         log.warn("background-image: failed to encode path '{s}'", .{path});
@@ -402,22 +389,6 @@ pub fn uploadBackground(
         return .{};
     }
     return .{ .texture = tex, .view = view, .src_w = decoded.w, .src_h = decoded.h };
-}
-
-// Synchronous decode + upload. Used at startup before the window/message
-// pump exists, so a brief stall is acceptable. Hot-reload uses the async
-// worker path in d3d11.zig instead.
-pub fn loadBackgroundImage(
-    device: *win32.ID3D11Device,
-    gpa: std.mem.Allocator,
-    path: []const u8,
-) BackgroundImage {
-    ensureComInit();
-    const decoded = decodeBackground(gpa, path) orelse return .{};
-    defer gpa.free(decoded.pixels);
-    const img = uploadBackground(device, decoded);
-    if (img.loaded()) log.info("background-image: loaded '{s}' ({}x{})", .{ path, decoded.w, decoded.h });
-    return img;
 }
 
 pub const StagingTexture = struct {

@@ -98,7 +98,6 @@ pub fn main() !void {
         .tabbar_font_size_pt = global.config.tabbar_font_size_pt,
     };
     global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
-    global.renderer.setBackgroundImage(gpa_alloc, &global.config);
     const cell_size = global.renderer.cell_size;
     const placement = window_geom.calcWindowPlacement(
         maybe_monitor,
@@ -147,6 +146,12 @@ pub fn main() !void {
         win32.GetModuleHandleW(null),
         null,
     ) orelse win32.panicWin32("CreateWindow", win32.GetLastError());
+
+    // Kick the background-image WIC decode onto a worker thread so the
+    // 100ms+ decode runs in parallel with DWM setup / ShowWindow rather
+    // than blocking the window's first paint. The worker posts
+    // WM_APP_BG_IMAGE_DECODED once the message pump (below) starts spinning.
+    global.renderer.reloadBackgroundImage(gpa_alloc, &global.config, hwnd);
 
     {
         const dark_value: c_int = 1;

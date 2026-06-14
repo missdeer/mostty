@@ -223,10 +223,10 @@ band_texture: gpu.BandTexture = .{},
 back_buffer_tex: ?*win32.ID3D11Texture2D = null,
 
 // Background image (`background-image`). The texture is (re)loaded by
-// setBackgroundImage only when the configured path changes; placement params
-// are read every frame to recompute the fit rectangle. bg_image_path is a
-// gpa-owned copy of the loaded path, kept so reloadConfig can detect a no-op.
-// bg_sampler (linear/clamp) is lazily created on first use.
+// reloadBackgroundImage only when the configured path changes; placement
+// params are read every frame to recompute the fit rectangle. bg_image_path
+// is a gpa-owned copy of the loaded path, kept so reloadConfig can detect a
+// no-op. bg_sampler (linear/clamp) is lazily created on first use.
 background_image: gpu.BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
 bg_image_opacity: f32 = 1.0,
@@ -1730,42 +1730,6 @@ fn ensureBackgroundSampler(self: *D3d11Renderer) *win32.ID3D11SamplerState {
     return sampler;
 }
 
-// Synchronous (re)configure of the background image from the active config.
-// Used at startup, before the window/message pump exists; a brief WIC stall
-// here is acceptable. Hot-reload goes through `reloadBackgroundImage` to keep
-// large-image decode off the UI thread.
-pub fn setBackgroundImage(self: *D3d11Renderer, gpa: std.mem.Allocator, cfg: *const Config) void {
-    const path = cfg.background_image;
-    const path_changed = !std.mem.eql(u8, path, self.bg_image_path);
-    if (path_changed) {
-        self.background_image.release();
-        if (self.bg_image_path.len != 0) gpa.free(self.bg_image_path);
-        self.bg_image_path = &.{};
-        if (path.len != 0) {
-            // Dupe before decode: if OOM struck after a successful decode,
-            // bg_image_path would stay empty and the next reload would
-            // diff empty vs. path and re-decode for nothing.
-            self.bg_image_path = gpa.dupe(u8, path) catch return;
-            // Retain the path even if decode failed so an identical reload
-            // doesn't re-attempt a known-bad file on every config save.
-            self.background_image = gpu.loadBackgroundImage(self.device, gpa, path);
-        }
-    }
-
-    const visual_changed = path_changed or
-        self.bg_image_opacity != cfg.background_image_opacity or
-        self.bg_image_position != cfg.background_image_position or
-        self.bg_image_fit != cfg.background_image_fit or
-        self.bg_image_repeat != cfg.background_image_repeat;
-
-    self.bg_image_opacity = cfg.background_image_opacity;
-    self.bg_image_position = cfg.background_image_position;
-    self.bg_image_fit = cfg.background_image_fit;
-    self.bg_image_repeat = cfg.background_image_repeat;
-
-    if (visual_changed) self.grid_force_full = true;
-}
-
 // Result payload posted from the WIC decode worker back to the UI thread via
 // WM_APP_BG_IMAGE_DECODED. The pointer travels through lParam; the handler
 // owns the struct (and its pixels + path) and must call `deinit`.
@@ -1788,12 +1752,12 @@ pub const BgImageDecoded = struct {
     }
 };
 
-// Async counterpart to `setBackgroundImage` used by the config hot-reload
-// path. Updates cheap scalars and the cached path synchronously, then — if
-// the path changed — kicks the WIC decode onto a worker thread so a 100ms+
-// decode no longer hangs the message loop. The currently-displayed image
-// stays visible until the worker delivers the new one, avoiding a brief
-// "no image" flash mid-reload.
+// Async (re)configure of the background image. Used by both cold-start
+// (right after CreateWindowExW) and config hot-reload. Updates cheap scalars
+// and the cached path synchronously, then — if the path changed — kicks the
+// WIC decode onto a worker thread so a 100ms+ decode no longer hangs the
+// message loop. The currently-displayed image stays visible until the worker
+// delivers the new one, avoiding a brief "no image" flash mid-reload.
 pub fn reloadBackgroundImage(
     self: *D3d11Renderer,
     gpa: std.mem.Allocator,
