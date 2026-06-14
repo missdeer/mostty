@@ -274,19 +274,25 @@ fn ensureComInit() void {
     wic_com_initialized = true;
 }
 
-// Decode a PNG/JPEG file into a GPU texture. Returns a disabled (empty)
-// BackgroundImage on any failure — a bad path or corrupt file must never crash
-// the terminal, it just renders without an image (logged once at warn).
-pub fn loadBackgroundImage(
-    device: *win32.ID3D11Device,
-    gpa: std.mem.Allocator,
-    path: []const u8,
-) BackgroundImage {
-    ensureComInit();
+// CPU-side decoded image. Owned by `gpa`; pixels are BGRA, stride = w*4.
+// Produced by `decodeBackground` and consumed by `uploadBackground`. The two
+// halves are split so the WIC decode (which can take 100ms+ for a multi-MB
+// image) can run on a worker thread while only texture upload stays on the UI
+// thread with the D3D device.
+pub const DecodedBackground = struct {
+    pixels: []u8,
+    w: u32,
+    h: u32,
+};
 
+// Pure-CPU WIC decode. Does not touch D3D and does not initialize COM —
+// callers handle COM init for their own apartment (the UI thread uses
+// `ensureComInit`; worker threads CoInitializeEx themselves). Returns null on
+// any failure; a bad path or corrupt file must never crash the terminal.
+pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8) ?DecodedBackground {
     const wpath = std.unicode.utf8ToUtf16LeAllocZ(gpa, path) catch {
         log.warn("background-image: failed to encode path '{s}'", .{path});
-        return .{};
+        return null;
     };
     defer gpa.free(wpath);
 
@@ -299,7 +305,7 @@ pub fn loadBackgroundImage(
         @ptrCast(&factory),
     ) < 0) {
         log.warn("background-image: WIC factory unavailable", .{});
-        return .{};
+        return null;
     }
     defer _ = factory.IUnknown.Release();
 
@@ -312,19 +318,19 @@ pub fn loadBackgroundImage(
         &decoder,
     ) < 0) {
         log.warn("background-image: cannot open '{s}'", .{path});
-        return .{};
+        return null;
     }
     defer _ = decoder.?.IUnknown.Release();
 
     var frame: ?*win32.IWICBitmapFrameDecode = null;
     if (decoder.?.GetFrame(0, &frame) < 0) {
         log.warn("background-image: no frame in '{s}'", .{path});
-        return .{};
+        return null;
     }
     defer _ = frame.?.IUnknown.Release();
 
     var converter: ?*win32.IWICFormatConverter = null;
-    if (factory.CreateFormatConverter(&converter) < 0) return .{};
+    if (factory.CreateFormatConverter(&converter) < 0) return null;
     defer _ = converter.?.IUnknown.Release();
 
     var fmt: win32.Guid = win32.GUID_WICPixelFormat32bppBGRA;
@@ -337,30 +343,40 @@ pub fn loadBackgroundImage(
         win32.WICBitmapPaletteTypeMedianCut,
     ) < 0) {
         log.warn("background-image: cannot convert '{s}' to BGRA", .{path});
-        return .{};
+        return null;
     }
 
     var w: u32 = 0;
     var h: u32 = 0;
-    if (converter.?.IWICBitmapSource.GetSize(&w, &h) < 0 or w == 0 or h == 0) return .{};
+    if (converter.?.IWICBitmapSource.GetSize(&w, &h) < 0 or w == 0 or h == 0) return null;
     // Cap to a sane texture size; D3D11 guarantees 16384² support.
     if (w > 16384 or h > 16384) {
         log.warn("background-image: '{s}' is {}x{}, too large", .{ path, w, h });
-        return .{};
+        return null;
     }
 
     const stride: u32 = w * 4;
     const size: usize = @as(usize, stride) * h;
-    const pixels = gpa.alloc(u8, size) catch return .{};
-    defer gpa.free(pixels);
+    const pixels = gpa.alloc(u8, size) catch return null;
+    errdefer gpa.free(pixels);
     if (converter.?.IWICBitmapSource.CopyPixels(null, stride, @intCast(size), @ptrCast(pixels.ptr)) < 0) {
         log.warn("background-image: pixel copy failed for '{s}'", .{path});
-        return .{};
+        return null;
     }
 
+    return .{ .pixels = pixels, .w = w, .h = h };
+}
+
+// Upload a `DecodedBackground` to a GPU texture + SRV. Must run on the thread
+// that owns `device`. Returns a disabled BackgroundImage on failure.
+pub fn uploadBackground(
+    device: *win32.ID3D11Device,
+    decoded: DecodedBackground,
+) BackgroundImage {
+    const stride: u32 = decoded.w * 4;
     const desc: win32.D3D11_TEXTURE2D_DESC = .{
-        .Width = w,
-        .Height = h,
+        .Width = decoded.w,
+        .Height = decoded.h,
         .MipLevels = 1,
         .ArraySize = 1,
         .Format = .B8G8R8A8_UNORM,
@@ -371,13 +387,13 @@ pub fn loadBackgroundImage(
         .MiscFlags = .{},
     };
     const init_data: win32.D3D11_SUBRESOURCE_DATA = .{
-        .pSysMem = @ptrCast(pixels.ptr),
+        .pSysMem = @ptrCast(decoded.pixels.ptr),
         .SysMemPitch = stride,
         .SysMemSlicePitch = 0,
     };
     var tex: *win32.ID3D11Texture2D = undefined;
     if (device.CreateTexture2D(&desc, &init_data, &tex) < 0) {
-        log.warn("background-image: CreateTexture2D failed for '{s}'", .{path});
+        log.warn("background-image: CreateTexture2D failed", .{});
         return .{};
     }
     var view: *win32.ID3D11ShaderResourceView = undefined;
@@ -385,8 +401,23 @@ pub fn loadBackgroundImage(
         _ = tex.IUnknown.Release();
         return .{};
     }
-    log.info("background-image: loaded '{s}' ({}x{})", .{ path, w, h });
-    return .{ .texture = tex, .view = view, .src_w = w, .src_h = h };
+    return .{ .texture = tex, .view = view, .src_w = decoded.w, .src_h = decoded.h };
+}
+
+// Synchronous decode + upload. Used at startup before the window/message
+// pump exists, so a brief stall is acceptable. Hot-reload uses the async
+// worker path in d3d11.zig instead.
+pub fn loadBackgroundImage(
+    device: *win32.ID3D11Device,
+    gpa: std.mem.Allocator,
+    path: []const u8,
+) BackgroundImage {
+    ensureComInit();
+    const decoded = decodeBackground(gpa, path) orelse return .{};
+    defer gpa.free(decoded.pixels);
+    const img = uploadBackground(device, decoded);
+    if (img.loaded()) log.info("background-image: loaded '{s}' ({}x{})", .{ path, decoded.w, decoded.h });
+    return img;
 }
 
 pub const StagingTexture = struct {

@@ -2,6 +2,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 
 const Config = @import("../../Config.zig");
+const d3d11 = @import("../d3d11.zig");
 const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const paste = @import("../paste.zig");
@@ -200,8 +201,15 @@ fn reloadConfig(hwnd: win32.HWND) void {
         if (global.window) |*window| window.requestRender();
     }
 
+    // Reload unconditionally (no "image_changed" gate around the call):
+    // comparing old vs new *config* would miss the retry case where a
+    // previous reload failed pre-spawn — `bg_image_path` is stale relative
+    // to the just-published config, and the renderer is the only state
+    // that knows. The reload is a cheap eql + scalar copy when nothing has
+    // changed. The repaint is still gated: an async path swap triggers its
+    // own requestRender from the WM_APP_BG_IMAGE_DECODED handler.
+    global.renderer.reloadBackgroundImage(gpa, &global.config, hwnd);
     if (image_changed) {
-        global.renderer.setBackgroundImage(gpa, &global.config);
         if (global.window) |*window| window.requestRender();
     }
 }
@@ -597,4 +605,16 @@ pub fn onAppChildProcessData(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARA
     window.notePtyBytes(read_msg.len);
     window.requestRender();
     return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
+}
+
+// PostMessage'd by the background-image decode worker. lParam owns a
+// `BgImageDecoded` heap struct (path + pixels). The renderer applies it if
+// the request id still matches the latest reload; either way we free here.
+pub fn onAppBgImageDecoded(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
+    const result: *d3d11.BgImageDecoded = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    const gpa = global.gpa.allocator();
+    defer result.deinit(gpa);
+    global.renderer.applyDecodedBackgroundImage(result);
+    if (global.window) |*window| window.requestRender();
+    return 0;
 }

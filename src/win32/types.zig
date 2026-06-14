@@ -38,6 +38,11 @@ pub const WM_APP_CHILD_PROCESS_DATA = win32.WM_APP + 0;
 pub const WM_APP_CHILD_PROCESS_DATA_RESULT = 0x1bb502b6;
 pub const WM_APP_CLOSE_TAB = win32.WM_APP + 1;
 pub const WM_APP_CONFIG_CHANGED = win32.WM_APP + 2;
+// Posted by the background-image decode worker to the UI thread once a new
+// image has been WIC-decoded to CPU pixels. lParam carries an owning pointer
+// to a `BgImageDecoded` heap struct; the handler uploads it to a GPU texture
+// and frees the struct + pixels.
+pub const WM_APP_BG_IMAGE_DECODED = win32.WM_APP + 3;
 pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;
