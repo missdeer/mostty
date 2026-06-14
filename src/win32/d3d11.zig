@@ -1742,10 +1742,13 @@ pub fn setBackgroundImage(self: *D3d11Renderer, gpa: std.mem.Allocator, cfg: *co
         if (self.bg_image_path.len != 0) gpa.free(self.bg_image_path);
         self.bg_image_path = &.{};
         if (path.len != 0) {
-            self.background_image = gpu.loadBackgroundImage(self.device, gpa, path);
+            // Dupe before decode: if OOM struck after a successful decode,
+            // bg_image_path would stay empty and the next reload would
+            // diff empty vs. path and re-decode for nothing.
+            self.bg_image_path = gpa.dupe(u8, path) catch return;
             // Retain the path even if decode failed so an identical reload
             // doesn't re-attempt a known-bad file on every config save.
-            self.bg_image_path = gpa.dupe(u8, path) catch &.{};
+            self.background_image = gpu.loadBackgroundImage(self.device, gpa, path);
         }
     }
 
