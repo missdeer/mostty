@@ -4,6 +4,7 @@ const vt = @import("vt");
 
 const types = @import("types.zig");
 const cp_mod = @import("child_process.zig");
+const pty_ring_mod = @import("pty_ring.zig");
 const url_hover = @import("url_hover.zig");
 const vt_stream_mod = @import("vt_stream.zig");
 
@@ -30,9 +31,16 @@ pub const Tab = struct {
     // messages targeted at this tab id are dropped (but the handler
     // still returns the magic result so the reader's assertion holds).
     closing: bool = false,
-    // Atomic stop flag read by the reader thread after each SendMessage.
-    // Set together with CancelIoEx in the close sequence.
+    // Atomic stop flag read by the reader thread at every loop iteration
+    // and after waking from a full-ring wait. Set together with CancelIoEx
+    // and SetEvent(pty_ring.wake_event) in the close sequence.
     reader_stop: std.atomic.Value(bool) = .init(false),
+    // SPSC byte ring between the reader thread (producer) and the UI
+    // thread (consumer). Initialized in newTab before the reader spawns
+    // and deinit'd in destroyTab AFTER thread.join — the reader holds
+    // `&tab.pty_ring`, which is stable because Tab is heap-allocated and
+    // never moves.
+    pty_ring: pty_ring_mod.PtyRing = undefined,
 };
 
 pub const Window = struct {

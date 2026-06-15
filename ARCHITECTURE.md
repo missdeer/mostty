@@ -87,7 +87,7 @@ Mostty is a single-process, multi-thread program:
 | Thread | Purpose | Notes |
 | --- | --- | --- |
 | UI thread | Win32 message loop, all D3D11/D2D rendering, all VT stream parsing, all Terminal mutation | The only thread that touches `vt.Terminal` |
-| Reader thread (per tab) | Blocks in `ReadFile` on the ConPTY output pipe; `SendMessage` hands bytes to the UI thread | Spawned in `child_process.startConPtyWin32` (before `CreatePseudoConsole`), joined in `tab_mgmt.destroyTab` |
+| Reader thread (per tab) | Blocks in `ReadFile` on the ConPTY output pipe; memcpy's bytes into `Tab.pty_ring` (SPSC) and `PostMessageW`s a wake-up | Spawned in `child_process.startConPtyWin32` (before `CreatePseudoConsole`), joined in `tab_mgmt.destroyTab` |
 | Config-watch thread (1) | Blocks in `ReadDirectoryChangesW`, posts `WM_APP_CONFIG_CHANGED` | Detached |
 | Background-image decode (transient) | WIC decode of `background-image` on hot-reload or first paint | Detached, result posted via `WM_APP_BG_IMAGE_DECODED` |
 
@@ -95,15 +95,21 @@ Ownership rules:
 
 - `vt.Terminal`, the title buffer, `high_surrogate`, and all GPU upload state
   are touched only on the UI thread.
-- Reader → UI hand-off is **synchronous** (`SendMessage`, not `PostMessage`).
-  The handler returns a magic value (`WM_APP_CHILD_PROCESS_DATA_RESULT =
-  0x1bb502b6`) so the reader can `assert` the message wasn't silently dropped
-  during teardown.
-- Tab close uses `reader_stop` (`std.atomic.Value(bool)`) + `CancelIoEx` to
-  unblock the reader, then a drain loop (`MsgWaitForMultipleObjects` on the
-  thread handle + queue) before joining and freeing the `Tab` — so any
-  in-flight `SendMessage` from the reader completes against a still-valid
-  `Tab`.
+- Reader → UI hand-off is **asynchronous** via a per-tab SPSC byte ring
+  (`src/win32/pty_ring.zig`) plus `PostMessageW(WM_APP_CHILD_PROCESS_DATA,
+  wparam=tab_id)`. The reader memcpy's `ReadFile` output into the ring;
+  the UI thread drains the whole ring per wake-up. Notification is
+  edge-triggered via an atomic `posted` bool: at most one wake-up message
+  is in flight per tab. When the ring is full the reader parks on the
+  ring's auto-reset `wake_event`; the UI thread signals that event on
+  every drain.
+- Tab close uses `reader_stop` (`std.atomic.Value(bool)`) + `CancelIoEx`
+  (unblocks `ReadFile`) + `SetEvent(pty_ring.wake_event)` (unblocks a
+  full-ring writer), then a direct `thread.join` — no UI message pump
+  needed, because the reader no longer calls into the UI thread
+  synchronously. Stale `WM_APP_CHILD_PROCESS_DATA` posts that race with
+  teardown resolve via `findById(tab_id) → null` and drop harmlessly;
+  tab ids are monotonic and never reused.
 
 ---
 
@@ -238,10 +244,13 @@ Handlers by family:
     `Window.selection_fade`; `TIMER_CONFIG_RELOAD` debounces and runs
     `reloadConfig`; `TIMER_TEXT_BLINK` ticks SGR blink phase;
     `TIMER_RENDER_FRAME` is the render throttle (see §6).
-  - `WM_APP_CHILD_PROCESS_DATA` is the reader-thread → UI hand-off:
-    feeds the byte slice to `Tab.vt_stream.nextSlice`, increments the
-    per-second PTY byte counter, calls `requestRender`, and **returns
-    `WM_APP_CHILD_PROCESS_DATA_RESULT`**.
+  - `WM_APP_CHILD_PROCESS_DATA` (`wparam = tab_id`) is the reader-thread →
+    UI wake-up. Handler clears `Tab.pty_ring.posted`, drains the ring into
+    `Tab.vt_stream.nextSlice` (up to two contiguous slices), `SetEvent`s
+    the ring's `wake_event` (resumes a full-ring writer), and — only if
+    bytes were drained — increments the per-second PTY byte counter and
+    calls `requestRender`. Posts for a now-closed tab resolve to
+    `findById → null` and return 0.
   - `WM_APP_CONFIG_CHANGED` arms `TIMER_CONFIG_RELOAD` so multiple
     in-burst editor saves collapse into one reload (`CONFIG_RELOAD_DEBOUNCE_MS = 150`).
   - `WM_APP_BG_IMAGE_DECODED` accepts the heap-owned decoded pixels from
@@ -262,15 +271,26 @@ Handlers by family:
 `newTab`/`newTabWithLauncher`:
 
 1. Bounds-check against `MAX_TABS = 32`.
-2. Allocate `Tab` (gpa).
-3. Pick the grid size (`window_geom.computeGridCellCount`).
-4. `ChildProcess.startConPtyWin32`:
+2. Allocate `Tab` (gpa); run the `tab.* = .{...}` field-default block.
+3. Init `tab.pty_ring` (1 MiB byte buffer + auto-reset `wake_event`) — must
+   come **after** the field-default block, otherwise `pty_ring` is
+   re-stamped with `undefined`.
+4. Pick the grid size (`window_geom.computeGridCellCount`).
+5. `ChildProcess.startConPtyWin32`, taking `&tab.pty_ring`:
    - Create input pipe (PTY-read / our-write) and output pipe (our-read /
      PTY-write) with inheritable handles.
-   - Spawn `readConsoleThread` (`std.Thread`) on `our_read` — it blocks in
-     `ReadFile` until the PTY produces bytes or `CancelIoEx` wakes it. The
-     thread is created **before** `CreatePseudoConsole` so the `errdefer
-     thread.join()` chain unwinds cleanly if any later step fails.
+   - Spawn `readConsoleThread` (`std.Thread`) on `our_read`. It can park
+     in `ReadFile` (interruptible by `CancelIoEx`) or in
+     `WaitForSingleObject(pty_ring.wake_event)` when the ring is full.
+     The thread is created **before** `CreatePseudoConsole`. The
+     accompanying `errdefer` block doesn't just `thread.join()` — it
+     stops the reader (`reader_stop.store(true)`), wakes both park points
+     (`SetEvent(wake_event)` + `CancelIoEx`), and — when fired before
+     `CreatePseudoConsole` takes pipe ownership — closes `pty_write` /
+     `pty_read` directly so a reader caught between its stop-check and
+     `ReadFile` gets `BROKEN_PIPE` instead of hanging the join. After
+     `CreatePseudoConsole` succeeds the PTY owns those handles and the
+     LIFO-earlier `ClosePseudoConsole` errdefer handles the close.
    - `CreatePseudoConsole(size, pty_read, pty_write, 0)` → `HPCON`; close
      the PTY-side pipe ends now that the PTY owns them.
    - Build a process attribute list with
@@ -280,48 +300,72 @@ Handlers by family:
      unless overridden.
    - `CreateProcessW(CREATE_SUSPENDED)` so the job object can be applied,
      then `ResumeThread`.
-5. Allocate `vt.Terminal` (page allocator) at the chosen size and apply
+6. Allocate `vt.Terminal` (page allocator) at the chosen size and apply
    theme colors.
-6. Wrap it in `vt_stream.Handler` with effects callbacks (`title_changed`,
+7. Wrap it in `vt_stream.Handler` with effects callbacks (`title_changed`,
    `write_pty`, `device_attributes`, `xtversion`, `size`).
-7. Append, set active, `Window.onActiveChanged` (resets viewport, clears
+8. Append, set active, `Window.onActiveChanged` (resets viewport, clears
    selection, drops URL hover, requests render).
 
 `destroyTab`:
 
-1. `tab.closing = true` (drops future reader payloads at the handler).
-2. `tab.reader_stop.store(true, ...)` + `CancelIoEx(read_handle)` to unblock
-   the reader.
-3. **Drain loop**: `MsgWaitForMultipleObjects` on `[thread, queue]` until the
-   thread handle signals; while waiting, pump messages so any in-flight
-   `SendMessage` from the reader can complete. Without this drain, freeing
-   the `Tab` while a reader `SendMessage` is on the UI thread queue would
-   wake up against a freed `vt.Terminal`.
-4. `closePty()` (closes the our-write side and `ClosePseudoConsole`s the
-   `HPCON`) — this is what makes the reader's `ReadFile` return
-   `ERROR_BROKEN_PIPE` once the child has consumed any in-flight output.
-5. `thread.join()` the reader.
-6. Close the read pipe, the job (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` kills
-   any orphans the child spawned), and the process handle — in that order.
-7. Deinit `vt_stream`, `term_arena`, `vt.Terminal`.
-8. If the window has no tabs left, `PostMessage(WM_QUIT)`; else
+1. `tab.closing = true` (the UI handler still drains the ring with a
+   no-op cb to keep the reader productive, but skips `vt_stream`).
+2. Unhook from `window.tabs`. Queued `WM_APP_CHILD_PROCESS_DATA` posts
+   for this tab id will resolve via `findById → null` and drop; tab ids
+   are monotonic and never reused.
+3. Stop the reader. Three wake mechanisms used together:
+   - `reader_stop.store(true, .release)`
+   - `CancelIoEx(read)` — unblocks an in-flight `ReadFile`.
+   - `SetEvent(pty_ring.wake_event)` — unblocks a `WaitForSingleObject`
+     on a full ring.
+   - `closePty()` — closes the our-write side and `ClosePseudoConsole`s
+     the `HPCON`. Belt-and-suspenders against the narrow race where the
+     reader is between its loop-top stop-check and the `ReadFile` call:
+     `CancelIoEx` is then a no-op (no I/O pending), but the closed PTY
+     makes `ReadFile` return `BROKEN_PIPE` as soon as the reader enters
+     it.
+4. `thread.join()` the reader — direct, no UI message pump.
+5. Close the read pipe, the job (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+   kills any orphans the child spawned), and the process handle.
+6. Deinit `vt_stream`, `term_arena`, `vt.Terminal`, then `pty_ring`
+   (last — the reader thread held `&tab.pty_ring` until join).
+7. If the window has no tabs left, `PostMessage(WM_QUIT)`; else
    `onActiveChanged`.
 
 ### 5.2 Reader thread (`child_process.zig:readConsoleThread`)
 
 ```
 loop:
-  ReadFile(read, buf, 4096, &n, null)
+  if reader_stop.load(.acquire): exit
+  ReadFile(read, buf[65536], &n, null)
     on ERROR_BROKEN_PIPE | ERROR_HANDLE_EOF      → exit (child died)
     on ERROR_OPERATION_ABORTED                   → exit (CancelIoEx)
+  if !pty_ring.write(buf[0..n]): exit            // stop tripped while ring-full
+  if pty_ring.posted.swap(true, .acq_rel) == false:
+    while PostMessageW(hwnd, WM_APP_CHILD_PROCESS_DATA, tab_id, 0) == 0:
+      if reader_stop.load(.acquire):
+        pty_ring.posted.store(false, .release); exit  // tail bytes dropped
+      log warn (attempt 1, then every 100)
+      Sleep(1 ms)                                // queue saturation backoff
   if reader_stop.load(.acquire): exit
-  msg = ReadMsg{ tab_id, ptr, n }
-  result = SendMessageW(hwnd, WM_APP_CHILD_PROCESS_DATA, @intFromPtr(&msg), 0)
-  std.debug.assert(result == WM_APP_CHILD_PROCESS_DATA_RESULT)
 ```
 
-Magic-value assertion is the contract: silent drops during teardown are
-treated as a bug.
+`PtyRing.write` copies into the ring in up to two `@memcpy`s (wrap split),
+then `head.store(.release)` publishes. When the ring is full it parks on
+the auto-reset `wake_event` and re-checks `reader_stop` at the top of
+every loop iteration. The `posted.swap` is sequenced after `write`
+returns, so any observer of `posted == true` sees the published `head`
+via the matching `head.load(.acquire)` in `drain`.
+
+`PostMessageW` failure has two modes: (a) transient — the per-thread
+message queue saturated at its 10 000-message limit; (b) terminal — the
+window is being destroyed. Resetting `posted = false` and falling
+through (an earlier reviewer suggestion) would strand the just-published
+bytes with no wake-up in flight, and the reader would later deadlock on
+a full ring. Retry-until-stop, with `Sleep(1 ms)` between attempts, is
+the only safe option: (a) clears within a frame once the UI drains; (b)
+is paired with `reader_stop` being set by `destroyTab`.
 
 ### 5.3 `vt.Stream` wrapper (`vt_stream.zig`) and effects (`tab_mgmt.zig`)
 
@@ -351,14 +395,19 @@ The flow per chunk of PTY bytes is:
 
 ```
 ReadFile bytes
-  → SendMessage(WM_APP_CHILD_PROCESS_DATA)
-    → Tab.vt_stream.nextSlice(slice)
-      → vt.Stream parser dispatches: print, control, CSI, OSC, DCS, ...
-        → Handler effects mutate Tab.term (screen state)
-        → write-PTY replies (CSI 18 t etc.) go back via ChildProcess
-    → window.notePtyBytes(n)
-    → window.requestRender()
-  → return WM_APP_CHILD_PROCESS_DATA_RESULT to the reader
+  → PtyRing.write (memcpy into ring; blocks on wake_event when full)
+  → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, wparam=tab_id)
+[on UI thread, later — drain coalesces multiple reader writes]
+  → posted.store(false, .release)
+  → PtyRing.drain → up to two contiguous slices passed to
+       Tab.vt_stream.nextSlice
+       → vt.Stream parser dispatches: print, control, CSI, OSC, DCS, ...
+         → Handler effects mutate Tab.term (screen state)
+         → write-PTY replies (CSI 18 t etc.) go back via ChildProcess
+  → SetEvent(pty_ring.wake_event)  (resumes a full-ring writer)
+  → if bytes drained > 0:
+       window.notePtyBytes(n)
+       window.requestRender()
 ```
 
 ---
@@ -620,11 +669,14 @@ funnels through `reloadConfig` so `light:A, dark:B` themes flip live.
 shell stdout
   → ConPTY pipe
   → readConsoleThread (per tab)
-  → SendMessage(WM_APP_CHILD_PROCESS_DATA, &ReadMsg)
-  → vt_stream.nextSlice → vt.Stream parser → Handler effects
-  → mutate Tab.term
-  → notePtyBytes / requestRender
-  → reader unblocks (handler returns magic value)
+      → PtyRing.write (memcpy, blocks on wake_event if full)
+      → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, tab_id)
+[UI thread, asynchronously]
+  → onAppChildProcessData
+      → pty_ring.posted.store(false)
+      → drain → vt_stream.nextSlice (up to two contiguous slices)
+      → SetEvent(pty_ring.wake_event)
+      → notePtyBytes / requestRender (only if bytes > 0)
 [later, on render throttle expiry]
   → WM_PAINT
   → render.renderWindow
@@ -647,21 +699,29 @@ WM_CHAR
 
 ```
 newTab:
-  alloc Tab
-  startConPtyWin32 (creates pipes → spawns readConsoleThread →
-                    CreatePseudoConsole → CreateProcessW → ResumeThread)
+  alloc Tab (field-default block)
+  init tab.pty_ring (1 MiB buf + auto-reset wake_event)  — AFTER tab.* = .{...}
+  startConPtyWin32 (creates pipes → spawns readConsoleThread holding
+                    &tab.pty_ring → CreatePseudoConsole → CreateProcessW →
+                    ResumeThread). Startup-error cleanup wakes the reader
+                    (reader_stop + SetEvent + CancelIoEx) before join.
   alloc vt.Terminal → wrap in vt_stream.Handler with tab_mgmt effects
   append, set active, onActiveChanged, requestRender
 
 destroyTab:
-  closing = true                  (handler drops further payloads)
-  unhook from window.tabs         (re-entrant findById returns null)
-  reader_stop.store(true) + CancelIoEx(read)
-  MsgWaitForMultipleObjects drain (pump WM_SENDMESSAGE until thread signals)
-  closePty()                      (close our_write + ClosePseudoConsole)
-  thread.join()
+  closing = true                         (handler drains no-op until we run)
+  unhook from window.tabs                (queued posts findById → null)
+  reader_stop.store(true)
+  CancelIoEx(read)                       (unblocks ReadFile)
+  SetEvent(pty_ring.wake_event)          (unblocks full-ring writer)
+  closePty()                             (close our_write + ClosePseudoConsole;
+                                          guarantees BROKEN_PIPE on our_read
+                                          if reader was between stop-check
+                                          and ReadFile when CancelIoEx fired)
+  thread.join()                          (direct — no UI message pump)
   close read pipe, job, process handle
   deinit vt_stream, Terminal, arenas
+  deinit pty_ring                        (AFTER join — reader owned &pty_ring)
   if tabs.len == 0: PostMessage(WM_QUIT)
 ```
 
@@ -697,12 +757,36 @@ WM_LBUTTONUP
 
 - **Never index tabs by position across messages.** Tabs can close
   mid-flight. Use `findById` / `findIndexById`.
-- **Reader-thread `SendMessage` must return the magic value.** That's how
-  we detect silent drops during teardown.
-- **`tab.closing` is set together with `reader_stop` + `CancelIoEx`.**
-  The drain loop pumps messages until the reader thread exits.
+- **While the per-tab ring is non-empty, a `WM_APP_CHILD_PROCESS_DATA`
+  post is either in flight or about to be sent.** The reader maintains
+  this via an edge-triggered `posted.swap(true, .acq_rel)` after every
+  successful `PtyRing.write` (which itself did `head.store(.release)`).
+  If `PostMessageW` fails it is retried in a `Sleep(1 ms)` loop until it
+  succeeds or `reader_stop` is observed; only on stop does the reader
+  reset `posted = false` and exit (the ring's tail bytes are dropped
+  intentionally, matching the close-time tail-output semantics).
+  Resetting `posted = false` and falling through would leak bytes with
+  no wake-up coming.
+- **The UI handler clears `pty_ring.posted` BEFORE drain.** Writes that
+  land during drain re-arm `posted` and post a fresh wake-up; the
+  resulting redundant message sees `drain() == 0` and short-circuits
+  before `notePtyBytes` / `requestRender`.
+- **`tab.closing` is set together with `reader_stop` + `CancelIoEx` +
+  `SetEvent(pty_ring.wake_event)` + `closePty()`, in that order, BEFORE
+  `thread.join`.** The two wake calls cover the reader's two visible
+  park points (`ReadFile` and `WaitForSingleObject` on a full ring);
+  `closePty` closes the race window where the reader is between its
+  loop-top stop-check and the `ReadFile` syscall — `CancelIoEx` is a
+  no-op there, but a closed PTY makes `ReadFile` return `BROKEN_PIPE`
+  on entry. The startup `errdefer` chain in `startConPtyWin32` uses the
+  same trio for the same reason.
+- **`PtyRing` lifetime: init in `newTab` AFTER the `tab.* = .{...}`
+  field-default block (which would otherwise overwrite it), deinit in
+  `destroyTab` AFTER `thread.join`.** The reader thread holds
+  `&tab.pty_ring`, which is stable for that window because `Tab` is
+  heap-allocated and never moves.
 - **`vt.Terminal` is UI-thread-only.** No locks; the contract is enforced
-  by the single-consumer hand-off.
+  by the single-consumer ring drain.
 - **`high_surrogate` is per-tab.** Switching the active tab between the
   high and low `WM_CHAR` would otherwise smear the surrogate.
 - **`render_timer_armed` must not be set if `SetTimer` failed** — that

@@ -3,12 +3,13 @@ const win32 = @import("win32").everything;
 const types = @import("types.zig");
 const util = @import("util.zig");
 const err_mod = @import("error.zig");
+const pty_ring_mod = @import("pty_ring.zig");
 const Config = @import("../Config.zig");
 
 const Error = err_mod.Error;
 const GridPos = types.GridPos;
 const TabId = types.TabId;
-const ReadMsg = types.ReadMsg;
+const PtyRing = pty_ring_mod.PtyRing;
 
 pub const ChildProcess = struct {
     pty: ?Pty,
@@ -196,10 +197,10 @@ pub const ChildProcess = struct {
         working_directory: ?[*:0]const u16,
         hwnd: win32.HWND,
         hwnd_msg: u32,
-        hwnd_msg_result: win32.LRESULT,
         cell_count: GridPos,
         tab_id: TabId,
         stop_flag: *std.atomic.Value(bool),
+        ring: *PtyRing,
         extra_env: []const Config.EnvEntry,
     ) error{Error}!ChildProcess {
         var sec_attr: win32.SECURITY_ATTRIBUTES = .{
@@ -235,9 +236,31 @@ pub const ChildProcess = struct {
         const thread = std.Thread.spawn(
             .{},
             readConsoleThread,
-            .{ hwnd, hwnd_msg, hwnd_msg_result, our_read, tab_id, stop_flag },
+            .{ hwnd, hwnd_msg, our_read, tab_id, stop_flag, ring },
         ) catch |e| return out_err.setZig("CreateReadConsoleThread", e);
-        errdefer thread.join();
+        // Plain `thread.join()` would deadlock here. Three park points to
+        // cover before joining:
+        //   - WaitForSingleObject on ring.wake_event (full ring) → SetEvent
+        //   - ReadFile on our_read (in-flight)                   → CancelIoEx
+        //   - between stop_flag check and ReadFile                → close
+        //     the PTY's write end so ReadFile returns BROKEN_PIPE when
+        //     reader finally enters it (CancelIoEx is a no-op if no I/O
+        //     is pending). After CreatePseudoConsole succeeds the PTY owns
+        //     pty_write/pty_read, so the close happens via the later
+        //     ClosePseudoConsole errdefer (which fires BEFORE this block
+        //     in LIFO order). This block only owns the close when the
+        //     error fires before CreatePseudoConsole.
+        errdefer {
+            stop_flag.store(true, .release);
+            _ = win32.SetEvent(ring.wake_event);
+            _ = win32.CancelIoEx(our_read, null);
+            if (!pty_handles_closed) {
+                win32.closeHandle(pty_write);
+                win32.closeHandle(pty_read);
+                pty_handles_closed = true;
+            }
+            thread.join();
+        }
 
         var hpcon: win32.HPCON = undefined;
         {
@@ -384,10 +407,10 @@ pub const ChildProcess = struct {
     fn readConsoleThread(
         hwnd: win32.HWND,
         hwnd_msg: u32,
-        hwnd_msg_result: win32.LRESULT,
         read: win32.HANDLE,
         tab_id: TabId,
         stop_flag: *std.atomic.Value(bool),
+        ring: *PtyRing,
     ) void {
         while (true) {
             if (stop_flag.load(.acquire)) return;
@@ -413,17 +436,44 @@ pub const ChildProcess = struct {
                 else => |e| std.debug.panic("readConsoleThread: handle error {f}", .{e}),
             };
             if (read_len == 0) return;
-            var msg: ReadMsg = .{
-                .tab_id = tab_id,
-                .data = &buffer,
-                .len = read_len,
-            };
-            std.debug.assert(hwnd_msg_result == win32.SendMessageW(
-                hwnd,
-                hwnd_msg,
-                @intFromPtr(&msg),
-                0,
-            ));
+            // ring.write returns false only when stop_flag tripped during a
+            // full-ring wait (i.e. destroyTab is tearing us down). Exit then.
+            if (!ring.write(buffer[0..read_len])) return;
+            // Edge-triggered wake. ring.write performed head.store(.release)
+            // before returning; posted.swap(.acq_rel) is sequenced after that
+            // store in program order so any UI thread that observes
+            // posted=true will, on the matching head.load(.acquire), see the
+            // bytes we just published.
+            if (ring.posted.swap(true, .acq_rel) == false) {
+                // Retry on PostMessage failure. The two failure modes are
+                // (a) transient — the per-thread message queue saturated at
+                // its 10 000-message limit, (b) terminal — the window is
+                // being destroyed. (a) clears within milliseconds once the
+                // UI thread drains; (b) is paired with stop_flag being set
+                // by destroyTab. Resetting `posted` and continuing the
+                // outer loop (Codex's original suggestion) would strand the
+                // already-published bytes in the ring with no wake-up in
+                // flight, and the reader would later deadlock on a full
+                // ring. Retry-until-stop is the only safe option.
+                var attempt: u32 = 0;
+                while (0 == win32.PostMessageW(hwnd, hwnd_msg, @intCast(tab_id), 0)) {
+                    if (stop_flag.load(.acquire)) {
+                        // Tab is closing; the ring's tail bytes are
+                        // intentionally dropped (matches the documented
+                        // close-time tail-output semantics).
+                        ring.posted.store(false, .release);
+                        return;
+                    }
+                    attempt += 1;
+                    if (attempt == 1 or attempt % 100 == 0) {
+                        std.log.warn(
+                            "PostMessageW(CHILD_PROCESS_DATA) failed (tab {}, attempt {}): {f}",
+                            .{ tab_id, attempt, win32.GetLastError() },
+                        );
+                    }
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                }
+            }
             if (stop_flag.load(.acquire)) return;
         }
     }

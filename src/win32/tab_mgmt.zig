@@ -6,6 +6,7 @@ const Config = @import("../Config.zig");
 const cp_mod = @import("child_process.zig");
 const err_mod = @import("error.zig");
 const global_mod = @import("global.zig");
+const pty_ring_mod = @import("pty_ring.zig");
 const state = @import("state.zig");
 const tooltip = @import("tooltip.zig");
 const types = @import("types.zig");
@@ -125,6 +126,14 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         .term_arena = .init(std.heap.page_allocator),
         .vt_stream = undefined,
     };
+    // Init the SPSC ring AFTER the field-default block (which would otherwise
+    // overwrite `pty_ring` with `undefined`). The reader thread spawned by
+    // startConPtyWin32 takes `&tab.pty_ring` — stable because Tab is
+    // heap-allocated and freed only after destroyTab joins the reader.
+    tab.pty_ring = pty_ring_mod.PtyRing.init(global.gpa.allocator(), &tab.reader_stop) catch |e| switch (e) {
+        error.OutOfMemory => util.oom(error.OutOfMemory),
+        error.CreateEventFailed => win32.panicWin32("CreateEventW (pty_ring)", win32.GetLastError()),
+    };
     window.next_tab_id += 1;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -153,10 +162,10 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         working_directory,
         window.hwnd,
         types.WM_APP_CHILD_PROCESS_DATA,
-        types.WM_APP_CHILD_PROCESS_DATA_RESULT,
         cell_count,
         tab.id,
         &tab.reader_stop,
+        &tab.pty_ring,
         global.config.env,
     ) catch {
         // User-configurable launchers can fail (bad path, missing exe, etc.);
@@ -165,6 +174,7 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         // because that's a system-level problem.
         if (launcher != null) {
             std.log.err("launcher '{s}' failed to start: {f}", .{ launcher.?.label, err });
+            tab.pty_ring.deinit(global.gpa.allocator());
             tab.term_arena.deinit();
             global.gpa.allocator().destroy(tab);
             return;
@@ -247,12 +257,11 @@ pub fn destroyAllTabs(window: *Window) void {
 }
 
 pub fn destroyTab(window: *Window, tab: *Tab) void {
-    // Mark closing so any in-flight reader-thread SendMessage during the
-    // pump-while-wait below drops its payload (the handler still returns
-    // the magic value). Also unhook from window.tabs before any pump or
-    // free: queued WM_APP_CLOSE_TAB for this tab won't re-enter
-    // destroyTab once findById returns null, and the eventual free can't
-    // be observed via findIndexById from a re-entrant message.
+    // Unhook from window.tabs before stopping the reader: a queued
+    // WM_APP_CHILD_PROCESS_DATA fired by the reader before we joined will
+    // resolve via findById(tab_id) → null and drop harmlessly (tab ids are
+    // monotonic and never reused). closing=true is set first to also short-
+    // circuit any handler that does find the tab in-between.
     tab.closing = true;
     tooltip.hide(window);
     const removed_idx_opt = window.findIndexById(tab.id);
@@ -267,39 +276,25 @@ pub fn destroyTab(window: *Window, tab: *Tab) void {
         }
     }
 
+    // Stop the reader. Three wake mechanisms:
+    //   1. CancelIoEx     — interrupts ReadFile (if reader is parked there)
+    //   2. SetEvent       — wakes WaitForSingleObject on the ring's
+    //                       wake_event (if ring was full)
+    //   3. closePty       — closes the ConPTY + our_write side, guaranteeing
+    //                       ReadFile returns BROKEN_PIPE even if CancelIoEx
+    //                       lost a race (reader hadn't entered ReadFile yet).
+    // (1) and (2) are fast wakes; (3) is the belt-and-suspenders guarantee
+    // against the narrow window where reader is between the stop_flag check
+    // at the top of the loop and the ReadFile call.
     tab.reader_stop.store(true, .release);
     _ = win32.CancelIoEx(tab.child_process.read, null);
-
-    const thread_handle: win32.HANDLE = tab.child_process.thread.getHandle();
-    while (true) {
-        var handles = [_]win32.HANDLE{thread_handle};
-        const r = win32.MsgWaitForMultipleObjects(
-            1,
-            &handles,
-            0,
-            win32.INFINITE,
-            win32.QS_SENDMESSAGE,
-        );
-        if (r == 0) break; // thread exited
-        if (r == 1) {
-            var msg: win32.MSG = undefined;
-            while (win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE) > 0) {
-                if (msg.message == win32.WM_QUIT) {
-                    _ = win32.PostQuitMessage(@intCast(msg.wParam));
-                    break;
-                }
-                _ = win32.TranslateMessage(&msg);
-                _ = win32.DispatchMessageW(&msg);
-            }
-            continue;
-        }
-        if (r == @intFromEnum(win32.WAIT_FAILED)) {
-            win32.panicWin32("MsgWaitForMultipleObjects (destroyTab)", win32.GetLastError());
-        }
-    }
-
+    _ = win32.SetEvent(tab.pty_ring.wake_event);
     tab.child_process.closePty();
+
+    // Direct join: the reader no longer SendMessages to the UI thread, so
+    // there is no in-flight cross-thread call to drain via PeekMessage.
     tab.child_process.thread.join();
+
     win32.closeHandle(tab.child_process.read);
     win32.closeHandle(tab.child_process.job);
     win32.closeHandle(tab.child_process.process_handle);
@@ -307,6 +302,8 @@ pub fn destroyTab(window: *Window, tab: *Tab) void {
     tab.vt_stream.deinit();
     tab.term_arena.deinit();
     std.heap.page_allocator.destroy(tab.term);
+    // Ring deinit AFTER thread.join — reader holds &tab.pty_ring until exit.
+    tab.pty_ring.deinit(global.gpa.allocator());
     global.gpa.allocator().destroy(tab);
 
     if (window.tabs.items.len == 0) {

@@ -12,7 +12,8 @@ const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
 
 const Error = err_mod.Error;
-const ReadMsg = types.ReadMsg;
+const Tab = state.Tab;
+const TabId = types.TabId;
 const Window = state.Window;
 const global = global_mod.global;
 
@@ -595,16 +596,40 @@ pub fn onWtsSessionChange(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARA
 }
 
 pub fn onAppChildProcessData(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
-    const read_msg: *const ReadMsg = @ptrFromInt(wparam);
-    // Always return the magic value, even when dropping payload.
-    if (global.window == null) return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
+    if (global.window == null) return 0;
     const window = &global.window.?;
-    const tab = window.findById(read_msg.tab_id) orelse return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
-    if (tab.closing) return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
-    tab.vt_stream.nextSlice(read_msg.data[0..read_msg.len]);
-    window.notePtyBytes(read_msg.len);
-    window.requestRender();
-    return types.WM_APP_CHILD_PROCESS_DATA_RESULT;
+    const tab_id: TabId = @intCast(wparam);
+    const tab = window.findById(tab_id) orelse return 0;
+    // Clear the edge-trigger guard BEFORE drain so any reader write during
+    // drain re-arms a fresh post. The redundant wake-up that may result
+    // sees an empty ring and short-circuits via drain()==0 below.
+    tab.pty_ring.posted.store(false, .release);
+    if (tab.closing) {
+        // closeTabByIndex sets closing=true and PostMessages WM_APP_CLOSE_TAB;
+        // until destroyTab runs, the reader is still alive and producing.
+        // Drain anyway (no-op cb) to keep tail advanced — drain() internally
+        // SetEvents wake_event, so a full-ring reader resumes — but skip
+        // vt_stream so we don't mutate state that destroyTab is about to
+        // tear down.
+        _ = tab.pty_ring.drain({}, struct {
+            fn cb(_: void, _: []const u8) void {}
+        }.cb);
+        return 0;
+    }
+    var byte_count: usize = 0;
+    const Ctx = struct { tab: *Tab, n: *usize };
+    var ctx = Ctx{ .tab = tab, .n = &byte_count };
+    _ = tab.pty_ring.drain(&ctx, struct {
+        fn cb(c: *Ctx, slice: []const u8) void {
+            c.tab.vt_stream.nextSlice(slice);
+            c.n.* += slice.len;
+        }
+    }.cb);
+    if (byte_count > 0) {
+        window.notePtyBytes(@intCast(byte_count));
+        window.requestRender();
+    }
+    return 0;
 }
 
 // PostMessage'd by the background-image decode worker. lParam owns a

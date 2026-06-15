@@ -28,14 +28,11 @@ pub const GridPos = struct {
     row: u16,
 };
 
-pub const ReadMsg = struct {
-    tab_id: TabId,
-    data: [*]const u8,
-    len: u32,
-};
-
+// Posted (PostMessageW) by the per-tab PTY reader thread when bytes have
+// been deposited into the tab's PtyRing. wparam = TabId (the bytes live in
+// the ring, not in this message). Edge-triggered: at most one of these is
+// in flight per tab at a time (see PtyRing.posted).
 pub const WM_APP_CHILD_PROCESS_DATA = win32.WM_APP + 0;
-pub const WM_APP_CHILD_PROCESS_DATA_RESULT = 0x1bb502b6;
 pub const WM_APP_CLOSE_TAB = win32.WM_APP + 1;
 pub const WM_APP_CONFIG_CHANGED = win32.WM_APP + 2;
 // Posted by the background-image decode worker to the UI thread once a new
