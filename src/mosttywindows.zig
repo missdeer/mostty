@@ -147,6 +147,12 @@ pub fn main() !void {
         null,
     ) orelse win32.panicWin32("CreateWindow", win32.GetLastError());
 
+    // Start the glyph raster worker now that the renderer sits at its final
+    // address and we have an HWND to PostMessage results back to. Submit
+    // callsites only fire from the render path (well after this point), so
+    // there's no race between startup and the first job.
+    global.renderer.setWorkerHwnd(gpa_alloc, hwnd);
+
     // Kick the background-image WIC decode onto a worker thread so the
     // 100ms+ decode runs in parallel with DWM setup / ShowWindow rather
     // than blocking the window's first paint. The worker posts

@@ -14,6 +14,7 @@ const color = @import("d3d11/color.zig");
 const emoji = @import("d3d11/emoji.zig");
 const font_mod = @import("d3d11/font.zig");
 const glyph_mod = @import("d3d11/glyph.zig");
+const glyph_worker_mod = @import("d3d11/glyph_worker.zig");
 const tabbar_paint = @import("d3d11/tabbar_paint.zig");
 const bg_image = @import("d3d11/background_image.zig");
 const swap_chain_mod = @import("d3d11/swap_chain.zig");
@@ -24,6 +25,7 @@ const grid = @import("d3d11/grid.zig");
 // Re-exported so external callers (window message handlers) stay agnostic
 // to the internal module layout.
 pub const BgImageDecoded = bg_image.BgImageDecoded;
+pub const RasterResult = glyph_worker_mod.RasterResult;
 
 const log = std.log.scoped(.d3d);
 
@@ -220,6 +222,10 @@ bg_sampler: ?*win32.ID3D11SamplerState = null,
 // stale image. Only ever read/written from the UI thread.
 bg_image_req_id: u32 = 0,
 
+// Async DirectWrite raster worker. Started during init(); hwnd is bound
+// later via setWorkerHwnd(). Stage A: infra only — no submit sites yet.
+glyph_worker: glyph_worker_mod.Worker = undefined,
+
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.cell_size;
     return font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);
@@ -377,6 +383,7 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
 }
 
 pub fn deinit(self: *D3d11Renderer) void {
+    self.glyph_worker.shutdown();
     if (comptime debug_stats_enabled) {
         const total = self.stats.rows_uploaded + self.stats.rows_skipped;
         const skip_pct: f64 = if (total == 0) 0.0 else @as(f64, @floatFromInt(self.stats.rows_skipped)) / @as(f64, @floatFromInt(total)) * 100.0;
@@ -806,6 +813,28 @@ fn maybeLogDiag(self: *D3d11Renderer, client_w: u32, client_h: u32, cols: u32, r
     self.diag_tabbar_paints = 0;
     self.diag_rows_uploaded = 0;
     self.diag_rows_skipped = 0;
+}
+
+// Starts the glyph raster worker thread and binds its result-delivery HWND.
+// Called once from mosttywindows.zig after CreateWindowExW returns — the
+// renderer is at its final address by then, so the thread can safely capture
+// `&self.glyph_worker`. No glyph jobs can be submitted before this point;
+// `submit` callsites live behind the per-frame render path that only runs
+// after the window exists.
+pub fn setWorkerHwnd(self: *D3d11Renderer, gpa: std.mem.Allocator, hwnd: win32.HWND) void {
+    self.glyph_worker.start(gpa, self.dwrite_factory) catch |e| {
+        log.warn("glyph raster worker spawn failed: {s}; falling back to UI-thread raster", .{@errorName(e)});
+        return;
+    };
+    self.glyph_worker.setHwnd(hwnd);
+}
+
+pub fn applyGlyphResult(self: *D3d11Renderer, result: *RasterResult) void {
+    // Stage A: no atlas upload yet. Stage C wires the slot state machine and
+    // UpdateSubresource path. Drop the result for now so the handler still
+    // closes the loop cleanly.
+    _ = self;
+    _ = result;
 }
 
 pub fn reloadBackgroundImage(

@@ -43,6 +43,12 @@ pub const WM_APP_CONFIG_CHANGED = win32.WM_APP + 2;
 // to a `BgImageDecoded` heap struct; the handler uploads it to a GPU texture
 // and frees the struct + pixels.
 pub const WM_APP_BG_IMAGE_DECODED = win32.WM_APP + 3;
+// Posted by the glyph raster worker thread once a single-cell glyph has been
+// rendered to a CPU BGRA buffer. lParam carries an owning pointer to a
+// `glyph_worker.RasterResult` heap struct; the handler validates generation
+// + slot identity, uploads to the atlas texture, marks the cache slot ready,
+// and frees the struct + bytes.
+pub const WM_APP_GLYPH_READY = win32.WM_APP + 4;
 pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;

@@ -75,6 +75,7 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = types.WM_APP_CHILD_PROCESS_DATA, .handler = &misc.onAppChildProcessData },
     .{ .msg = types.WM_APP_CONFIG_CHANGED, .handler = &misc.onAppConfigChanged },
     .{ .msg = types.WM_APP_BG_IMAGE_DECODED, .handler = &misc.onAppBgImageDecoded },
+    .{ .msg = types.WM_APP_GLYPH_READY, .handler = &misc.onAppGlyphReady },
 };
 
 comptime {
