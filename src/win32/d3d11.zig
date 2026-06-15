@@ -222,9 +222,20 @@ bg_sampler: ?*win32.ID3D11SamplerState = null,
 // stale image. Only ever read/written from the UI thread.
 bg_image_req_id: u32 = 0,
 
-// Async DirectWrite raster worker. Started during init(); hwnd is bound
-// later via setWorkerHwnd(). Stage A: infra only — no submit sites yet.
+// Async DirectWrite raster worker. The struct stays `undefined` until
+// `setWorkerHwnd` calls `Worker.start` and flips `glyph_worker_started`.
+// Every code path that touches `glyph_worker` (submit, shutdown) must
+// gate on the flag — reading any field before start is UB.
 glyph_worker: glyph_worker_mod.Worker = undefined,
+glyph_worker_started: bool = false,
+
+// Monotonic counter bumped whenever the glyph cache / atlas is rebuilt
+// (font reload, DPI change, atlas resize). In-flight raster jobs carry
+// the value captured at submit time; results whose cache_gen no longer
+// matches are dropped before touching the atlas. The slot's per-Node
+// gen guards in-cache slot reuse — cache_gen covers the orthogonal case
+// of the whole cache being thrown out.
+cache_gen: u32 = 0,
 
 pub fn cellSizeForDpi(self: *D3d11Renderer, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.cell_size;
@@ -383,7 +394,7 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
 }
 
 pub fn deinit(self: *D3d11Renderer) void {
-    self.glyph_worker.shutdown();
+    if (self.glyph_worker_started) self.glyph_worker.shutdown();
     if (comptime debug_stats_enabled) {
         const total = self.stats.rows_uploaded + self.stats.rows_skipped;
         const skip_pct: f64 = if (total == 0) 0.0 else @as(f64, @floatFromInt(self.stats.rows_skipped)) / @as(f64, @floatFromInt(total)) * 100.0;
@@ -826,15 +837,44 @@ pub fn setWorkerHwnd(self: *D3d11Renderer, gpa: std.mem.Allocator, hwnd: win32.H
         log.warn("glyph raster worker spawn failed: {s}; falling back to UI-thread raster", .{@errorName(e)});
         return;
     };
+    self.glyph_worker_started = true;
     self.glyph_worker.setHwnd(hwnd);
 }
 
-pub fn applyGlyphResult(self: *D3d11Renderer, result: *RasterResult) void {
-    // Stage A: no atlas upload yet. Stage C wires the slot state machine and
-    // UpdateSubresource path. Drop the result for now so the handler still
-    // closes the loop cleanly.
-    _ = self;
-    _ = result;
+// Called by the WM_APP_GLYPH_READY handler. Validates the result against
+// the renderer-level `cache_gen` (covers full cache rebuilds) and the
+// cache's per-slot `gen` (covers in-cache slot reuse) before uploading the
+// BGRA bytes into the atlas slot's pixel rectangle. Returns true iff the
+// upload happened, so the dispatcher knows whether to requestRender. The
+// caller still owns `result` and frees it after we return.
+pub fn applyGlyphResult(self: *D3d11Renderer, result: *RasterResult) bool {
+    if (result.cache_gen != self.cache_gen) return false;
+    if (self.glyph_cache == null) return false;
+    const cache = &self.glyph_cache.?;
+    if (!cache.markReady(result.slot, result.slot_gen, result.key)) return false;
+
+    const cs = self.cell_size_xy;
+    const tex_cell_count = gpu.getTextureMaxCellCount(cs);
+    const pos = gpu.cellPosFromIndex(result.slot, tex_cell_count.x);
+    const dst_x: u32 = @as(u32, cs.x) * pos.x;
+    const dst_y: u32 = @as(u32, cs.y) * pos.y;
+    const dst_box: win32.D3D11_BOX = .{
+        .left = dst_x,
+        .top = dst_y,
+        .front = 0,
+        .right = dst_x + result.w,
+        .bottom = dst_y + result.h,
+        .back = 1,
+    };
+    self.context.UpdateSubresource(
+        &self.glyph_texture.obj.?.ID3D11Resource,
+        0,
+        &dst_box,
+        @ptrCast(result.bytes.ptr),
+        result.w * 4,
+        0,
+    );
+    return true;
 }
 
 pub fn reloadBackgroundImage(

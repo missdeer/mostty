@@ -10,6 +10,7 @@ const emoji = @import("emoji.zig");
 const sprite = @import("../sprite.zig");
 const GlyphIndexCache = @import("../GlyphIndexCache.zig");
 const font = @import("font.zig");
+const glyph_worker = @import("glyph_worker.zig");
 
 const D3d11Renderer = @import("../d3d11.zig");
 const CellXY = gpu.CellXY;
@@ -33,6 +34,11 @@ pub fn setupGlyphAtlas(self: *D3d11Renderer) gpu.AtlasFrame {
     self.glyph_cache_cell_size = cs;
 
     if (!tex_retained or !cache_valid) {
+        // Bump BEFORE deinit so any in-flight raster results targeting the
+        // old atlas slots are rejected by applyGlyphResult's cache_gen guard
+        // — even if the new cache happens to reuse the same slot index for
+        // a different key.
+        self.cache_gen +%= 1;
         if (self.glyph_cache) |*c| {
             c.deinit(self.glyph_cache_arena.allocator());
             _ = self.glyph_cache_arena.reset(.retain_capacity);
@@ -70,9 +76,38 @@ pub fn generateGlyph(
 ) u32 {
     const cs = self.cell_size_xy;
     const key = GlyphIndexCache.Key.init(codepoint, grapheme, half, style);
+    const arena = self.glyph_cache_arena.allocator();
 
-    switch (cache.reserve(self.glyph_cache_arena.allocator(), key) catch com.oom(error.OutOfMemory)) {
-        .newly_reserved => |reserved| {
+    // U+0020 single regular IS the placeholder returned for in-flight rasters
+    // of other glyphs. It must reach the atlas synchronously — going through
+    // the async worker would mean "we don't have a placeholder yet because
+    // we ARE the placeholder still being computed". One sync raster per
+    // cache lifetime; after that it's a pure cache hit.
+    const is_blank = codepoint == ' ' and grapheme.len == 0 and half == .single and style == .regular;
+
+    switch (cache.reserve(arena, key) catch com.oom(error.OutOfMemory)) {
+        .ready => |idx| return idx,
+        .already_pending => {
+            if (is_blank) {
+                // Unreachable in practice: the .newly_reserved_pending branch
+                // below sync-rasters + markReady for the blank glyph before
+                // returning, so the next reserve of ' ' hits .ready.
+                std.debug.assert(false);
+                return 0;
+            }
+            return blankGlyphSlot(self, cache, tex_cell_count);
+        },
+        .no_slot => {
+            if (is_blank) {
+                // Cache fully saturated with pendings on the very first frame
+                // before the blank glyph could land. The renderer's other
+                // codepaths can't proceed without a blank slot; bail to slot 0
+                // and let next frame's drained queue try again.
+                return 0;
+            }
+            return blankGlyphSlot(self, cache, tex_cell_count);
+        },
+        .newly_reserved_pending => |reserved| {
             const pos = gpu.cellPosFromIndex(reserved.index, tex_cell_count.x);
             const coord: CellXY = .{ .x = cs.x * pos.x, .y = cs.y * pos.y };
 
@@ -96,16 +131,85 @@ pub fn generateGlyph(
                         break :sprite_path;
                     },
                 };
+                std.debug.assert(cache.markReady(reserved.index, reserved.slot_gen, key));
                 return reserved.index;
             }
 
-            const staging = renderGlyphToStaging(self, codepoint, grapheme, style, half != .single);
-            const src_left: u32 = if (half == .wide_right) cs.x else 0;
-            copyStagingHalfToAtlas(self, staging, src_left, coord);
-            return reserved.index;
+            // Sync DirectWrite path for: (1) the placeholder glyph itself
+            // (`is_blank`), to break the chicken-and-egg with the async
+            // placeholder strategy; (2) any glyph at all when the raster
+            // worker failed to spawn, so the renderer still produces
+            // correct pixels (just on the UI thread, like pre-Stage-C).
+            if (is_blank or !self.glyph_worker_started) {
+                const staging = renderGlyphToStaging(self, codepoint, grapheme, style, false);
+                copyStagingHalfToAtlas(self, staging, 0, coord);
+                std.debug.assert(cache.markReady(reserved.index, reserved.slot_gen, key));
+                return reserved.index;
+            }
+
+            if (submitRasterJob(self, key, codepoint, grapheme, reserved.index, reserved.slot_gen, style)) {
+                return blankGlyphSlot(self, cache, tex_cell_count);
+            }
+            // Queue rejected (worker saturated): roll back the slot and
+            // placeholder. Next frame's row diff retries this codepoint —
+            // if the queue has drained by then the raster lands a frame later.
+            cache.unreserve(reserved.index, reserved.slot_gen);
+            return blankGlyphSlot(self, cache, tex_cell_count);
         },
-        .already_reserved => |index| return index,
     }
+}
+
+fn blankGlyphSlot(self: *D3d11Renderer, cache: *GlyphIndexCache, tex_cell_count: CellXY) u32 {
+    return generateGlyph(self, cache, tex_cell_count, ' ', &.{}, .single, .regular);
+}
+
+// Build a heap-owned RasterJob and hand it to the worker. AddRefs the COM
+// objects the worker needs (the worker Releases them after the raster, or in
+// `RasterJob.destroy` if the queue rejects); dupes the grapheme onto the
+// worker's gpa so it survives the UI-thread arena reset.
+fn submitRasterJob(
+    self: *D3d11Renderer,
+    key: GlyphIndexCache.Key,
+    codepoint: u21,
+    grapheme: []const u21,
+    slot: u32,
+    slot_gen: u32,
+    style: GlyphIndexCache.Style,
+) bool {
+    const gpa = self.glyph_worker.gpa;
+    const job = gpa.create(glyph_worker.RasterJob) catch return false;
+    const grapheme_dup: []u21 = if (grapheme.len == 0)
+        &.{}
+    else
+        gpa.dupe(u21, grapheme) catch {
+            gpa.destroy(job);
+            return false;
+        };
+    const text_format = self.text_formats[@intFromEnum(style)];
+    _ = text_format.IUnknown.AddRef();
+    _ = self.rendering_params.IUnknown.AddRef();
+    job.* = .{
+        .key = key,
+        .codepoint = codepoint,
+        .grapheme = grapheme_dup,
+        .is_wide = false,
+        .is_color = emoji.isColorGlyphRun(codepoint, grapheme),
+        .is_ambiguous = sprite.isAmbiguousOverflow(codepoint),
+        .slot = slot,
+        .slot_gen = slot_gen,
+        .cache_gen = self.cache_gen,
+        .cs = self.cell_size_xy,
+        .text_format = text_format,
+        .rendering_params = self.rendering_params,
+    };
+    if (!self.glyph_worker.submit(job)) {
+        // submit() didn't consume the job — destroy locally. `destroy`
+        // Releases the COM refs and frees the dupe, mirroring the worker's
+        // own success-path cleanup.
+        job.destroy(gpa);
+        return false;
+    }
+    return true;
 }
 
 // Reserve and populate both halves of a wide glyph using a single raster.
@@ -124,71 +228,116 @@ pub fn generateWidePair(
 ) struct { left: u32, right: u32 } {
     const cs = self.cell_size_xy;
     const arena = self.glyph_cache_arena.allocator();
-    // Reserve left first. The unconditional `cache.touch(left_index)` below
-    // is load-bearing: `reserve`'s per-frame dampening can skip moveToBack
-    // for a hit whose slot was already promoted earlier this frame, so left
-    // may sit near the LRU front. Without the touch, the upcoming right
-    // reserve's miss path would evict `self.front` and could clobber left's
-    // own slot, leaving left_index pointing at right's pixels.
+    // Wide-pair stays fully synchronous: one DirectWrite raster fills both
+    // halves, so there's no win to splitting them across the worker. The
+    // touch + reserve dance below mirrors the pre-async version; with the
+    // new state machine we additionally track `slot_gen` for each newly
+    // reserved half so we can mark them ready after the synchronous raster
+    // (otherwise the slots would stay pending forever and the LRU victim
+    // search would skip them on the next miss).
+
+    const Half = struct {
+        index: u32,
+        slot_gen: ?u32 = null, // present iff this half just transitioned to pending
+    };
+
     const left_res = cache.reserve(arena, .init(codepoint, grapheme, .wide_left, style)) catch com.oom(error.OutOfMemory);
-    const left_index = switch (left_res) {
-        .newly_reserved => |r| r.index,
-        .already_reserved => |idx| idx,
+    const left: Half = switch (left_res) {
+        .ready => |idx| .{ .index = idx },
+        .newly_reserved_pending => |r| .{ .index = r.index, .slot_gen = r.slot_gen },
+        // Pending wide_left is unreachable in Stage 1 (no async wide path),
+        // but defend: the slot exists and its pixels will eventually arrive.
+        .already_pending => |idx| .{ .index = idx },
+        .no_slot => return .{
+            .left = blankGlyphSlot(self, cache, tex_cell_count),
+            .right = blankGlyphSlot(self, cache, tex_cell_count),
+        },
     };
-    const left_miss = switch (left_res) {
-        .newly_reserved => true,
-        .already_reserved => false,
-    };
-    cache.touch(left_index);
+    // Force-promote the left slot. `reserve`'s per-frame dampening can leave a
+    // hit near the LRU front, and the upcoming right-miss eviction would then
+    // clobber left's own slot, leaving left_index pointing at right's pixels.
+    cache.touch(left.index);
 
     const right_res = cache.reserve(arena, .init(codepoint, grapheme, .wide_right, style)) catch com.oom(error.OutOfMemory);
-    const right_index = switch (right_res) {
-        .newly_reserved => |r| r.index,
-        .already_reserved => |idx| idx,
-    };
-    const right_miss = switch (right_res) {
-        .newly_reserved => true,
-        .already_reserved => false,
+    const right: Half = switch (right_res) {
+        .ready => |idx| .{ .index = idx },
+        .newly_reserved_pending => |r| .{ .index = r.index, .slot_gen = r.slot_gen },
+        .already_pending => |idx| .{ .index = idx },
+        .no_slot => {
+            // Left was already taken; if we leave it pending the slot
+            // leaks forever (wide pair is sync, no async result will
+            // arrive to mark it ready, and the LRU victim search will
+            // keep skipping it). Roll left back to empty before bailing.
+            if (left.slot_gen) |g| cache.unreserve(left.index, g);
+            return .{
+                .left = blankGlyphSlot(self, cache, tex_cell_count),
+                .right = blankGlyphSlot(self, cache, tex_cell_count),
+            };
+        },
     };
 
-    if (!left_miss and !right_miss) return .{ .left = left_index, .right = right_index };
+    const left_miss = left.slot_gen != null;
+    const right_miss = right.slot_gen != null;
+    if (!left_miss and !right_miss) return .{ .left = left.index, .right = right.index };
 
     // Sprite fast path: render the full 2*cs.x tile once, upload missing
     // halves. Failure modes mirror generateGlyph: OOM fatal, other errors
     // fall through to DirectWrite so the reserved slots still receive
     // pixels (otherwise stale evictee bytes would show).
     if (grapheme.len == 0 and sprite.hasCodepoint(codepoint)) {
-        const left_arg: ?u32 = if (left_miss) left_index else null;
-        const right_arg: ?u32 = if (right_miss) right_index else null;
+        const left_arg: ?u32 = if (left_miss) left.index else null;
+        const right_arg: ?u32 = if (right_miss) right.index else null;
         uploadSpriteWidePairToAtlas(self, codepoint, tex_cell_count, left_arg, right_arg) catch |err| switch (err) {
             error.OutOfMemory => com.oom(error.OutOfMemory),
             else => {
                 std.log.warn("sprite render U+{X} failed ({s}); falling back to DirectWrite", .{ codepoint, @errorName(err) });
                 const staging = renderGlyphToStaging(self, codepoint, grapheme, style, true);
                 if (left_miss) {
-                    const pos = gpu.cellPosFromIndex(left_index, tex_cell_count.x);
+                    const pos = gpu.cellPosFromIndex(left.index, tex_cell_count.x);
                     copyStagingHalfToAtlas(self, staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
                 }
                 if (right_miss) {
-                    const pos = gpu.cellPosFromIndex(right_index, tex_cell_count.x);
+                    const pos = gpu.cellPosFromIndex(right.index, tex_cell_count.x);
                     copyStagingHalfToAtlas(self, staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
                 }
             },
         };
-        return .{ .left = left_index, .right = right_index };
+        markPairReady(cache, codepoint, grapheme, style, left, right);
+        return .{ .left = left.index, .right = right.index };
     }
 
     const staging = renderGlyphToStaging(self, codepoint, grapheme, style, true);
     if (left_miss) {
-        const pos = gpu.cellPosFromIndex(left_index, tex_cell_count.x);
+        const pos = gpu.cellPosFromIndex(left.index, tex_cell_count.x);
         copyStagingHalfToAtlas(self, staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
     }
     if (right_miss) {
-        const pos = gpu.cellPosFromIndex(right_index, tex_cell_count.x);
+        const pos = gpu.cellPosFromIndex(right.index, tex_cell_count.x);
         copyStagingHalfToAtlas(self, staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
     }
 
-    return .{ .left = left_index, .right = right_index };
+    markPairReady(cache, codepoint, grapheme, style, left, right);
+    return .{ .left = left.index, .right = right.index };
+}
+
+// Clear pending on the halves that we just synchronously rasterized. Halves
+// that were already ready carry `slot_gen == null` and are skipped.
+fn markPairReady(
+    cache: *GlyphIndexCache,
+    codepoint: u21,
+    grapheme: []const u21,
+    style: GlyphIndexCache.Style,
+    left: anytype,
+    right: anytype,
+) void {
+    if (left.slot_gen) |g| {
+        const key: GlyphIndexCache.Key = .init(codepoint, grapheme, .wide_left, style);
+        std.debug.assert(cache.markReady(left.index, g, key));
+    }
+    if (right.slot_gen) |g| {
+        const key: GlyphIndexCache.Key = .init(codepoint, grapheme, .wide_right, style);
+        std.debug.assert(cache.markReady(right.index, g, key));
+    }
 }
 
 // Render `codepoint` into the staging texture. The staging is always 2 cells

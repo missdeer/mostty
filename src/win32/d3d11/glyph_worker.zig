@@ -38,7 +38,7 @@ pub const RasterJob = struct {
     text_format: *win32.IDWriteTextFormat,
     rendering_params: *win32.IDWriteRenderingParams,
 
-    fn destroy(self: *RasterJob, gpa: std.mem.Allocator) void {
+    pub fn destroy(self: *RasterJob, gpa: std.mem.Allocator) void {
         _ = self.text_format.IUnknown.Release();
         _ = self.rendering_params.IUnknown.Release();
         if (self.grapheme.len != 0) gpa.free(self.grapheme);

@@ -213,6 +213,11 @@ pub fn rebuildAndAssign(self: *D3d11Renderer, dpi: u32, eff: Effective) void {
 // Drop the glyph atlas LRU and reset the arena that backs it. Called after
 // any font/DPI change so glyphs re-rasterize at the new face/size.
 pub fn invalidateGlyphCache(self: *D3d11Renderer) void {
+    // Bump before tearing down: in-flight raster jobs captured the old
+    // cache_gen at submit time; applyGlyphResult will reject them before
+    // they land in the new atlas (font/DPI change resizes cells, so a
+    // stale upload would write past slot boundaries).
+    self.cache_gen +%= 1;
     if (self.glyph_cache) |*c| {
         c.deinit(self.glyph_cache_arena.allocator());
         self.glyph_cache = null;

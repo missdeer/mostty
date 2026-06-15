@@ -622,11 +622,15 @@ pub fn onAppBgImageDecoded(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM)
 // PostMessage'd by the glyph raster worker once a cell glyph has been rendered
 // into a CPU BGRA buffer. lParam owns a `RasterResult` heap struct; the
 // renderer validates generation + slot identity and uploads to the atlas.
-// Stage A: applyGlyphResult is a no-op; we just free.
+// On a successful upload, kick a repaint so the next frame's row diff swaps
+// the placeholder glyph_index for the real slot.
 pub fn onAppGlyphReady(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const result: *d3d11.RasterResult = @ptrFromInt(@as(usize, @bitCast(lparam)));
     const gpa = global.gpa.allocator();
     defer result.deinit(gpa);
-    global.renderer.applyGlyphResult(result);
+    const uploaded = global.renderer.applyGlyphResult(result);
+    if (uploaded) {
+        if (global.window) |*window| window.requestRender();
+    }
     return 0;
 }
