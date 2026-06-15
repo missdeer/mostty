@@ -108,15 +108,12 @@ pub fn generateGlyph(
     }
 }
 
-// Reserve and populate both halves of a wide glyph using a single DirectWrite
-// render. Calling generateGlyph separately for wide_left / wide_right would
-// run CreateTextLayout + DrawTextLayout twice with identical staging output —
-// only the half copied out differs. One render + up-to-two copies cuts the
-// first-paint cost for CJK / emoji when either half is uncached.
-//
-// Sprite codepoints fall back to per-half generateGlyph: the sprite path has
-// its own scratch-buffer layout, and folding both halves there is left to a
-// separate change to keep this one minimal.
+// Reserve and populate both halves of a wide glyph using a single raster.
+// Calling generateGlyph separately for wide_left / wide_right would run the
+// underlying renderer (DirectWrite CreateTextLayout+DrawTextLayout, or
+// sprite.render) twice with identical pixels — only the half copied out
+// differs. One render + up-to-two copies cuts the first-paint cost for CJK,
+// emoji, and sprite wide tiles when either half is uncached.
 pub fn generateWidePair(
     self: *D3d11Renderer,
     cache: *GlyphIndexCache,
@@ -125,13 +122,6 @@ pub fn generateWidePair(
     grapheme: []const u21,
     style: GlyphIndexCache.Style,
 ) struct { left: u32, right: u32 } {
-    if (grapheme.len == 0 and sprite.hasCodepoint(codepoint)) {
-        return .{
-            .left = generateGlyph(self, cache, tex_cell_count, codepoint, grapheme, .wide_left, style),
-            .right = generateGlyph(self, cache, tex_cell_count, codepoint, grapheme, .wide_right, style),
-        };
-    }
-
     const cs = self.cell_size_xy;
     const arena = self.glyph_cache_arena.allocator();
     // Reserve left first. The unconditional `cache.touch(left_index)` below
@@ -161,16 +151,41 @@ pub fn generateWidePair(
         .already_reserved => false,
     };
 
-    if (left_miss or right_miss) {
-        const staging = renderGlyphToStaging(self, codepoint, grapheme, style, true);
-        if (left_miss) {
-            const pos = gpu.cellPosFromIndex(left_index, tex_cell_count.x);
-            copyStagingHalfToAtlas(self, staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
-        }
-        if (right_miss) {
-            const pos = gpu.cellPosFromIndex(right_index, tex_cell_count.x);
-            copyStagingHalfToAtlas(self, staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
-        }
+    if (!left_miss and !right_miss) return .{ .left = left_index, .right = right_index };
+
+    // Sprite fast path: render the full 2*cs.x tile once, upload missing
+    // halves. Failure modes mirror generateGlyph: OOM fatal, other errors
+    // fall through to DirectWrite so the reserved slots still receive
+    // pixels (otherwise stale evictee bytes would show).
+    if (grapheme.len == 0 and sprite.hasCodepoint(codepoint)) {
+        const left_arg: ?u32 = if (left_miss) left_index else null;
+        const right_arg: ?u32 = if (right_miss) right_index else null;
+        uploadSpriteWidePairToAtlas(self, codepoint, tex_cell_count, left_arg, right_arg) catch |err| switch (err) {
+            error.OutOfMemory => com.oom(error.OutOfMemory),
+            else => {
+                std.log.warn("sprite render U+{X} failed ({s}); falling back to DirectWrite", .{ codepoint, @errorName(err) });
+                const staging = renderGlyphToStaging(self, codepoint, grapheme, style, true);
+                if (left_miss) {
+                    const pos = gpu.cellPosFromIndex(left_index, tex_cell_count.x);
+                    copyStagingHalfToAtlas(self, staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+                }
+                if (right_miss) {
+                    const pos = gpu.cellPosFromIndex(right_index, tex_cell_count.x);
+                    copyStagingHalfToAtlas(self, staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+                }
+            },
+        };
+        return .{ .left = left_index, .right = right_index };
+    }
+
+    const staging = renderGlyphToStaging(self, codepoint, grapheme, style, true);
+    if (left_miss) {
+        const pos = gpu.cellPosFromIndex(left_index, tex_cell_count.x);
+        copyStagingHalfToAtlas(self, staging, 0, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+    }
+    if (right_miss) {
+        const pos = gpu.cellPosFromIndex(right_index, tex_cell_count.x);
+        copyStagingHalfToAtlas(self, staging, cs.x, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
     }
 
     return .{ .left = left_index, .right = right_index };
@@ -506,6 +521,70 @@ fn uploadSpriteToAtlas(
         .front = 0,
         .right = coord.x + cs.x,
         .bottom = coord.y + cs.y,
+        .back = 1,
+    };
+    self.context.UpdateSubresource(
+        &self.glyph_texture.obj.?.ID3D11Resource,
+        0,
+        &dst_box,
+        @ptrCast(src_ptr),
+        src_row_pitch,
+        0,
+    );
+}
+
+// Wide-pair sprite upload: rasterize the full 2*cs.x tile once into scratch,
+// then upload one or both halves to the atlas slots identified by
+// left_cell_index / right_cell_index. Either may be null to skip that half
+// (cache-hit case). Mirrors uploadSpriteToAtlas's allocator + error contract:
+// OOM propagates as OutOfMemory; other sprite.render failures propagate so
+// the caller can fall back to DirectWrite without leaving stale slot pixels.
+fn uploadSpriteWidePairToAtlas(
+    self: *D3d11Renderer,
+    codepoint: u21,
+    tex_cell_count: CellXY,
+    left_cell_index: ?u32,
+    right_cell_index: ?u32,
+) !void {
+    std.debug.assert(left_cell_index != null or right_cell_index != null);
+    const cs = self.cell_size_xy;
+    const sprite_cell_w: u32 = @as(u32, cs.x) * 2;
+    const sprite_cell_h: u32 = cs.y;
+
+    var scratch_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer scratch_arena.deinit();
+    const arena_alloc = scratch_arena.allocator();
+
+    const scratch = try arena_alloc.alloc(u8, sprite_cell_w * sprite_cell_h * 4);
+    const metrics = sprite.buildMetrics(sprite_cell_w, sprite_cell_h);
+    const rendered = try sprite.render(arena_alloc, codepoint, sprite_cell_w, sprite_cell_h, metrics, scratch);
+    std.debug.assert(rendered);
+
+    const src_row_pitch: u32 = sprite_cell_w * 4;
+    if (left_cell_index) |idx| {
+        const pos = gpu.cellPosFromIndex(idx, tex_cell_count.x);
+        uploadAtlasHalfFromScratch(self, scratch.ptr, src_row_pitch, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+    }
+    if (right_cell_index) |idx| {
+        const pos = gpu.cellPosFromIndex(idx, tex_cell_count.x);
+        const src_ptr: [*]const u8 = scratch.ptr + (@as(u32, cs.x) * 4);
+        uploadAtlasHalfFromScratch(self, src_ptr, src_row_pitch, .{ .x = cs.x * pos.x, .y = cs.y * pos.y });
+    }
+}
+
+fn uploadAtlasHalfFromScratch(
+    self: *D3d11Renderer,
+    src_ptr: [*]const u8,
+    src_row_pitch: u32,
+    dst_coord: CellXY,
+) void {
+    const cs = self.cell_size_xy;
+    const dst_box: win32.D3D11_BOX = .{
+        .left = dst_coord.x,
+        .top = dst_coord.y,
+        .front = 0,
+        .right = dst_coord.x + cs.x,
+        .bottom = dst_coord.y + cs.y,
         .back = 1,
     };
     self.context.UpdateSubresource(

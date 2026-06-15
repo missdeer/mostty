@@ -391,7 +391,7 @@ pub const ChildProcess = struct {
     ) void {
         while (true) {
             if (stop_flag.load(.acquire)) return;
-            var buffer: [4096]u8 = undefined;
+            var buffer: [65536]u8 = undefined;
             var read_len: u32 = undefined;
             if (0 == win32.ReadFile(
                 read,
