@@ -247,8 +247,14 @@ fn ensureRt(
 
     var bitmap: *win32.IWICBitmap = undefined;
     {
+        // D2D's CreateWicBitmapRenderTarget only accepts two pairings:
+        //   * 32bppPBGRA + PREMULTIPLIED  (color/emoji)
+        //   * 32bppBGR   + IGNORE         (opaque mask, ClearType)
+        // Picking 32bppBGRA + IGNORE returns WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT
+        // (0x88982F80). The mask path treats the staging texture as opaque
+        // anyway — alpha is unused for ClearType coverage in BGR.
         var fmt: win32.Guid = switch (kind) {
-            .mask => win32.GUID_WICPixelFormat32bppBGRA,
+            .mask => win32.GUID_WICPixelFormat32bppBGR,
             .color => win32.GUID_WICPixelFormat32bppPBGRA,
         };
         const hr = wic_factory.CreateBitmap(

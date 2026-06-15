@@ -394,7 +394,15 @@ pub fn updateFont(self: *D3d11Renderer, font_config: FontConfig) void {
 }
 
 pub fn deinit(self: *D3d11Renderer) void {
-    if (self.glyph_worker_started) self.glyph_worker.shutdown();
+    if (self.glyph_worker_started) {
+        self.glyph_worker.shutdown();
+        // The worker thread is joined; no new WM_APP_GLYPH_READY can be
+        // posted. Drain any results that were posted before shutdown ran
+        // but never dispatched (e.g. a renderer teardown that beats the
+        // message loop to the punch), otherwise each one leaks its
+        // heap-owned `RasterResult` + bytes.
+        drainGlyphReadyQueue(self.glyph_worker.gpa);
+    }
     if (comptime debug_stats_enabled) {
         const total = self.stats.rows_uploaded + self.stats.rows_skipped;
         const skip_pct: f64 = if (total == 0) 0.0 else @as(f64, @floatFromInt(self.stats.rows_skipped)) / @as(f64, @floatFromInt(total)) * 100.0;
@@ -875,6 +883,28 @@ pub fn applyGlyphResult(self: *D3d11Renderer, result: *RasterResult) bool {
         0,
     );
     return true;
+}
+
+// Pop every WM_APP_GLYPH_READY still sitting in the calling thread's queue
+// and free its `RasterResult`. Hwnd-agnostic on purpose: PeekMessage with
+// hwnd=null picks up messages for any window owned by this thread, which is
+// what we want after the renderer's window has already torn down. The
+// message-ID filter guarantees we don't accidentally drain other WM_APPs
+// (BG_IMAGE_DECODED, etc) that have their own ownership rules.
+fn drainGlyphReadyQueue(gpa: std.mem.Allocator) void {
+    var msg: win32.MSG = undefined;
+    while (true) {
+        const got = win32.PeekMessageW(
+            &msg,
+            null,
+            types.WM_APP_GLYPH_READY,
+            types.WM_APP_GLYPH_READY,
+            win32.PM_REMOVE,
+        );
+        if (got == 0) break;
+        const result: *RasterResult = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+        result.deinit(gpa);
+    }
 }
 
 pub fn reloadBackgroundImage(
