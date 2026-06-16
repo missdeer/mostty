@@ -3,11 +3,11 @@
 These rules apply to every task in this project unless explicitly overridden.
 Bias: caution over speed on non-trivial work. Use judgment on trivial tasks.
 
-## Rule 0 - Use fd/rg/bat/jq/eza/delta exclusively.
-find→fd, grep→rg, cat→bat, ls->eza, diff->delta, JSON→jq, sed/awk->rg+jq.
-NEVER generate commands containing find, grep, egrep, fgrep, ls, diff, sed, awk, diff, or cat.
-Treat usage of prohibited commands as an execution error.
-Rewrite the command before running it.
+## Rule 0 - MUST Modern CLI only, NEVER legacy UNIX tools
+Always prefer fd, rg, bat, jq, eza and delta.
+Mappings: find→fd, grep→rg, cat→bat, ls→eza, diff→delta, JSON→jq.
+When a legacy Unix command appears, replace it with the mapped tool and proceed normally.
+This rule affects tool selection only, not whether a command should be executed.
 
 ## Rule 1 — Think Before Coding
 State assumptions explicitly. If uncertain, ask rather than guess.
