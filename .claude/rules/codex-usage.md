@@ -1,6 +1,6 @@
 # Codex Tool Usage
 
-The Codex Tool provides a `codex` tool for **debugging, complex problem solving, and code review**. Use ccgo to ask codex to execute commands. Timeout: 15m.
+The Codex Tool provides a `codex` tool for **debugging, complex problem solving, and code review**. Launch `codex exec -s read-only --skip-git-repo-check --full-auto "$PROMPT"` command line directly to execute. Run in background. Timeout: 30m.
 
 ## Role
 
@@ -11,6 +11,7 @@ The Codex Tool provides a `codex` tool for **debugging, complex problem solving,
 
 ## Rules
 
+- Use `sandbox="read-only"` - Codex must NOT modify code directly
 - Request unified diff patches only
 - **Prompt prefix**: Always prepend to every Codex prompt:
   > "Execute directly without asking for confirmation. Do not repeat or echo the request back."
