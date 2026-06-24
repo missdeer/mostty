@@ -50,6 +50,7 @@ pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;
 pub const TIMER_RENDER_FRAME: usize = 4;
+pub const TIMER_PTY_DRAIN: usize = 5;
 // Coalesce the burst of change notifications an editor emits on save (and let
 // it finish writing / release its lock) before re-reading the config.
 pub const CONFIG_RELOAD_DEBOUNCE_MS: u32 = 150;

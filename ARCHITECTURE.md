@@ -98,11 +98,14 @@ Ownership rules:
 - Reader → UI hand-off is **asynchronous** via a per-tab SPSC byte ring
   (`src/win32/pty_ring.zig`) plus `PostMessageW(WM_APP_CHILD_PROCESS_DATA,
   wparam=tab_id)`. The reader memcpy's `ReadFile` output into the ring;
-  the UI thread drains the whole ring per wake-up. Notification is
-  edge-triggered via an atomic `posted` bool: at most one wake-up message
-  is in flight per tab. When the ring is full the reader parks on the
-  ring's auto-reset `wake_event`; the UI thread signals that event on
-  every drain.
+  the UI thread drains bounded 256-byte slices for a small initial budget
+  (~2 ms) and arms a short `TIMER_PTY_DRAIN` continuation while data
+  remains. Continuations use a larger backlog budget (~8 ms) so the UI
+  stays responsive without starving PTY throughput.
+  Notification is edge-triggered via an atomic `posted` bool: at most one
+  wake-up chain is in flight per tab. When the ring is full the reader
+  parks on the ring's auto-reset `wake_event`; the UI thread signals that
+  event on every drain.
 - Tab close uses `reader_stop` (`std.atomic.Value(bool)`) + `CancelIoEx`
   (unblocks `ReadFile`) + `SetEvent(pty_ring.wake_event)` (unblocks a
   full-ring writer), then a direct `thread.join` — no UI message pump
@@ -243,14 +246,18 @@ Handlers by family:
   - `WM_TIMER` dispatches by id: `TIMER_SELECTION_FADE` decays
     `Window.selection_fade`; `TIMER_CONFIG_RELOAD` debounces and runs
     `reloadConfig`; `TIMER_TEXT_BLINK` ticks SGR blink phase;
-    `TIMER_RENDER_FRAME` is the render throttle (see §6).
+    `TIMER_RENDER_FRAME` is the render throttle (see §6);
+    `TIMER_PTY_DRAIN` continues bounded PTY backlog drains.
   - `WM_APP_CHILD_PROCESS_DATA` (`wparam = tab_id`) is the reader-thread →
-    UI wake-up. Handler clears `Tab.pty_ring.posted`, drains the ring into
-    `Tab.vt_stream.nextSlice` (up to two contiguous slices), `SetEvent`s
-    the ring's `wake_event` (resumes a full-ring writer), and — only if
-    bytes were drained — increments the per-second PTY byte counter and
-    calls `requestRender`. Posts for a now-closed tab resolve to
-    `findById → null` and return 0.
+    UI wake-up. Handler repeatedly drains at most 256 bytes from the ring
+    into `Tab.vt_stream.nextSlice` until the initial ~2 ms budget is spent,
+    `SetEvent`s the ring's `wake_event` (resumes a full-ring writer), and
+    — only if bytes were drained — increments the per-second PTY byte
+    counter and calls `requestRender`. If data remains, it arms
+    `TIMER_PTY_DRAIN`; timer continuations use an ~8 ms budget so large
+    bursts yield back to the message pump without dropping to tiny
+    throughput. Posts for a now-closed tab resolve to `findById → null`
+    and return 0.
   - `WM_APP_CONFIG_CHANGED` arms `TIMER_CONFIG_RELOAD` so multiple
     in-burst editor saves collapse into one reload (`CONFIG_RELOAD_DEBOUNCE_MS = 150`).
   - `WM_APP_BG_IMAGE_DECODED` accepts the heap-owned decoded pixels from
@@ -398,8 +405,9 @@ ReadFile bytes
   → PtyRing.write (memcpy into ring; blocks on wake_event when full)
   → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, wparam=tab_id)
 [on UI thread, later — drain coalesces multiple reader writes]
-  → posted.store(false, .release)
-  → PtyRing.drain → up to two contiguous slices passed to
+  → PtyRing.drainMax(256 B) loop, capped at ~2 ms for initial wake-ups
+    or ~8 ms for TIMER_PTY_DRAIN backlog continuations
+    → up to two contiguous slices passed to
        Tab.vt_stream.nextSlice
        → vt.Stream parser dispatches: print, control, CSI, OSC, DCS, ...
          → Handler effects mutate Tab.term (screen state)
@@ -408,6 +416,8 @@ ReadFile bytes
   → if bytes drained > 0:
        window.notePtyBytes(n)
        window.requestRender()
+  → if ring still has data: keep posted=true and arm TIMER_PTY_DRAIN
+    else clear posted=false and re-check for a write raced under posted=true
 ```
 
 ---
@@ -673,10 +683,10 @@ shell stdout
       → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, tab_id)
 [UI thread, asynchronously]
   → onAppChildProcessData
-      → pty_ring.posted.store(false)
-      → drain → vt_stream.nextSlice (up to two contiguous slices)
+      → drainMax(256 B) loop → vt_stream.nextSlice (up to two contiguous slices)
       → SetEvent(pty_ring.wake_event)
       → notePtyBytes / requestRender (only if bytes > 0)
+      → arm TIMER_PTY_DRAIN or clear/re-check pty_ring.posted
 [later, on render throttle expiry]
   → WM_PAINT
   → render.renderWindow
@@ -767,10 +777,12 @@ WM_LBUTTONUP
   intentionally, matching the close-time tail-output semantics).
   Resetting `posted = false` and falling through would leak bytes with
   no wake-up coming.
-- **The UI handler clears `pty_ring.posted` BEFORE drain.** Writes that
-  land during drain re-arm `posted` and post a fresh wake-up; the
-  resulting redundant message sees `drain() == 0` and short-circuits
-  before `notePtyBytes` / `requestRender`.
+- **The UI handler drains PTY data in bounded batches.** If the ring still
+  has data after a batch, it keeps `pty_ring.posted = true` and arms a
+  timer continuation; otherwise it clears `posted = false` and immediately
+  re-checks the ring. That final re-check covers the race where the reader
+  wrote while `posted` was still true and therefore did not post its own
+  wake-up.
 - **`tab.closing` is set together with `reader_stop` + `CancelIoEx` +
   `SetEvent(pty_ring.wake_event)` + `closePty()`, in that order, BEFORE
   `thread.join`.** The two wake calls cover the reader's two visible

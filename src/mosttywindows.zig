@@ -1,6 +1,20 @@
 pub const panic = std.debug.FullPanic(panic_mod.panicHandler);
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = logFn,
+};
+
 pub const WndProc = dispatch.WndProc;
+
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    diag.log(level, scope, format, args);
+}
 
 // Subsystem=Windows + MSVC ABI pulls libcmt's exe_winmain.obj as the startup,
 // which calls WinMain instead of the Zig-style `main`. We can't suppress
@@ -26,6 +40,8 @@ fn winMain(
 }
 
 pub fn main() !void {
+    diag.init();
+
     const opt: struct {
         window_placement: window_geom.WindowPlacementOptions = .{},
     } = .{};
@@ -268,6 +284,7 @@ pub fn main() !void {
 const Config = @import("Config.zig");
 const config_watch = @import("win32/config_watch.zig");
 const d3d11 = @import("win32/d3d11.zig");
+const diag = @import("win32/diag.zig");
 const dispatch = @import("win32/wnd/dispatch.zig");
 const global_mod = @import("win32/global.zig");
 const icons_mod = @import("win32/icons.zig");

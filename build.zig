@@ -30,8 +30,12 @@ pub fn build(b: *std.Build) void {
     };
     const optimize = b.standardOptimizeOption(.{});
 
-    const vt = b.dependency("ghostty", .{}).module("ghostty-vt");
-    const z2d = b.dependency("z2d", .{}).module("z2d");
+    const dep_opts = .{
+        .target = target,
+        .optimize = optimize,
+    };
+    const vt = b.dependency("ghostty", dep_opts).module("ghostty-vt");
+    const z2d = b.dependency("z2d", dep_opts).module("z2d");
 
     const main = b.path("src/mosttywindows.zig");
     const exe = b.addExecutable(.{

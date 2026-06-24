@@ -2,6 +2,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 
 const Config = @import("../Config.zig");
+const diag = @import("diag.zig");
 const d3d11 = @import("d3d11.zig");
 const icons_mod = @import("icons.zig");
 const state = @import("state.zig");
@@ -21,6 +22,7 @@ pub fn windowFromHwnd(hwnd: win32.HWND) *state.Window {
 
 pub fn flushMessages() void {
     var msg: win32.MSG = undefined;
+    var last_dispatch_ms: u64 = win32.GetTickCount64();
     while (true) {
         const result = win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE);
         if (result < 0) win32.panicWin32("PeekMessage", win32.GetLastError());
@@ -28,6 +30,14 @@ pub fn flushMessages() void {
         if (msg.message == win32.WM_QUIT) onWmQuit(msg.wParam);
         _ = win32.TranslateMessage(&msg);
         _ = win32.DispatchMessageW(&msg);
+        if (diag.isEnabled()) {
+            const now = win32.GetTickCount64();
+            const elapsed = now -| last_dispatch_ms;
+            if (elapsed >= 100) {
+                std.log.info("message dispatch: msg=0x{x} elapsed_ms={}", .{ msg.message, elapsed });
+            }
+            last_dispatch_ms = now;
+        }
     }
 }
 

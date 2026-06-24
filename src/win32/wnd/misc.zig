@@ -3,6 +3,7 @@ const win32 = @import("win32").everything;
 
 const Config = @import("../../Config.zig");
 const d3d11 = @import("../d3d11.zig");
+const diag = @import("../diag.zig");
 const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const paste = @import("../paste.zig");
@@ -16,6 +17,11 @@ const Tab = state.Tab;
 const TabId = types.TabId;
 const Window = state.Window;
 const global = global_mod.global;
+
+const PTY_DRAIN_CHUNK_BYTES: usize = 256;
+const PTY_DRAIN_INITIAL_BUDGET_US: u64 = 2_000;
+const PTY_DRAIN_BACKLOG_BUDGET_US: u64 = 8_000;
+const PTY_DRAIN_CONTINUATION_MS: u32 = 1;
 
 // Bounded retries when a config reload hits a transiently-locked file (editor
 // mid-save). Reset to 0 on every successful reload.
@@ -48,6 +54,10 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         if (window.render_pending) {
             win32.invalidateHwnd(hwnd);
         }
+    }
+    if (wparam == types.TIMER_PTY_DRAIN) {
+        _ = win32.KillTimer(hwnd, types.TIMER_PTY_DRAIN);
+        drainPendingPtyTabs();
     }
     return 0;
 }
@@ -600,11 +610,13 @@ pub fn onAppChildProcessData(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARA
     const window = &global.window.?;
     const tab_id: TabId = @intCast(wparam);
     const tab = window.findById(tab_id) orelse return 0;
-    // Clear the edge-trigger guard BEFORE drain so any reader write during
-    // drain re-arms a fresh post. The redundant wake-up that may result
-    // sees an empty ring and short-circuits via drain()==0 below.
-    tab.pty_ring.posted.store(false, .release);
+    drainPtyTab(window, tab, PTY_DRAIN_INITIAL_BUDGET_US);
+    return 0;
+}
+
+fn drainPtyTab(window: *Window, tab: *Tab, budget_us: u64) void {
     if (tab.closing) {
+        tab.pty_ring.posted.store(false, .release);
         // closeTabByIndex sets closing=true and PostMessages WM_APP_CLOSE_TAB;
         // until destroyTab runs, the reader is still alive and producing.
         // Drain anyway (no-op cb) to keep tail advanced — drain() internally
@@ -614,22 +626,73 @@ pub fn onAppChildProcessData(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARA
         _ = tab.pty_ring.drain({}, struct {
             fn cb(_: void, _: []const u8) void {}
         }.cb);
-        return 0;
+        return;
     }
     var byte_count: usize = 0;
+    var chunk_count: usize = 0;
     const Ctx = struct { tab: *Tab, n: *usize };
     var ctx = Ctx{ .tab = tab, .n = &byte_count };
-    _ = tab.pty_ring.drain(&ctx, struct {
-        fn cb(c: *Ctx, slice: []const u8) void {
-            c.tab.vt_stream.nextSlice(slice);
-            c.n.* += slice.len;
-        }
-    }.cb);
+    const t0 = diag.qpcNow();
+    while (true) {
+        const before = byte_count;
+        _ = tab.pty_ring.drainMax(PTY_DRAIN_CHUNK_BYTES, &ctx, struct {
+            fn cb(c: *Ctx, slice: []const u8) void {
+                c.tab.vt_stream.nextSlice(slice);
+                c.n.* += slice.len;
+            }
+        }.cb);
+        if (byte_count == before) break;
+        chunk_count += 1;
+        if (diag.qpcUsSince(t0) >= budget_us) break;
+    }
+    const drain_us = diag.qpcUsSince(t0);
     if (byte_count > 0) {
+        if (drain_us >= 2_000) {
+            std.log.info("pty drain: tab={} bytes={} chunks={} us={}", .{ tab.id, byte_count, chunk_count, drain_us });
+        }
         window.notePtyBytes(@intCast(byte_count));
         window.requestRender();
     }
-    return 0;
+    schedulePtyDrainContinuation(window, tab);
+}
+
+fn schedulePtyDrainContinuation(window: *Window, tab: *Tab) void {
+    if (tab.pty_ring.hasData()) {
+        // Keep posted=true: this handler consumed only a bounded batch, so the
+        // continuation timer represents the still-pending tail bytes.
+        tab.pty_ring.posted.store(true, .release);
+        armPtyDrainContinuation(window, tab);
+        return;
+    }
+
+    // No tail left from this wake-up. Clear the edge-trigger guard, then
+    // re-check for the race where the reader wrote while posted was still true
+    // and therefore did not post its own wake-up.
+    tab.pty_ring.posted.store(false, .release);
+    if (!tab.pty_ring.hasData()) return;
+    if (tab.pty_ring.posted.swap(true, .acq_rel)) return;
+    armPtyDrainContinuation(window, tab);
+}
+
+fn armPtyDrainContinuation(window: *Window, tab: *Tab) void {
+    if (win32.SetTimer(window.hwnd, types.TIMER_PTY_DRAIN, PTY_DRAIN_CONTINUATION_MS, null) != 0) return;
+
+    std.log.warn(
+        "SetTimer(PTY_DRAIN continuation) failed (tab {}): {f}",
+        .{ tab.id, win32.GetLastError() },
+    );
+    _ = onAppChildProcessData(window.hwnd, tab.id, 0);
+}
+
+fn drainPendingPtyTabs() void {
+    if (global.window == null) return;
+    const window = &global.window.?;
+    for (window.tabs.items) |tab| {
+        if (tab.closing) continue;
+        if (!tab.pty_ring.posted.load(.acquire)) continue;
+        if (!tab.pty_ring.hasData()) continue;
+        drainPtyTab(window, tab, PTY_DRAIN_BACKLOG_BUDGET_US);
+    }
 }
 
 // PostMessage'd by the background-image decode worker. lParam owns a

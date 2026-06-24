@@ -21,6 +21,7 @@ const swap_chain_mod = @import("d3d11/swap_chain.zig");
 const font_state = @import("d3d11/font_state.zig");
 const cell_buffer = @import("d3d11/cell_buffer.zig");
 const grid = @import("d3d11/grid.zig");
+const diag = @import("diag.zig");
 
 // Re-exported so external callers (window message handlers) stay agnostic
 // to the internal module layout.
@@ -484,15 +485,26 @@ pub fn render(
     background_opacity: f32,
     url_highlight: ?types.UrlHighlight,
 ) void {
+    const diag_on = diag.isEnabled();
+    const t0 = if (diag_on) diag.qpcNow() else 0;
+
     // Phase 1: client size, swap-chain (re)create + resize, occlusion test,
     // ensure grid texture + scissor rasterizer state, compute grid dims,
     // atlas setup, scrollbar geometry, snapshot diff, const-buffer write.
     // Returns null on early-out (zero size, still occluded, oversize cap).
-    const prepared = prepareFrame(self, hwnd, term, mouse_in_scrollbar) orelse return;
+    const prepared = prepareFrame(self, hwnd, term, mouse_in_scrollbar) orelse {
+        if (diag_on) {
+            const total_us = diag.qpcUsSince(t0);
+            if (total_us >= 2_000) std.log.info("render skip: prepare_us={}", .{total_us});
+        }
+        return;
+    };
+    const prepare_us = if (diag_on) diag.qpcUsSince(t0) else 0;
 
     // Phase 2: terminal -> shader.Cell translation + per-row shadow diff
     // upload + resize overlay. Returns the dirty row range used by phase 3.
     const cell_count = prepared.shader_col * prepared.term_shader_row;
+    const build_t0 = if (diag_on) diag.qpcNow() else 0;
     const build = cell_buffer.buildAndUpload(
         self,
         term,
@@ -508,6 +520,7 @@ pub fn render(
         background_opacity,
         url_highlight,
     );
+    const build_us = if (diag_on) diag.qpcUsSince(build_t0) else 0;
     if (build.has_blink) {
         _ = win32.SetTimer(hwnd, types.TIMER_TEXT_BLINK, 250, null);
     } else {
@@ -515,6 +528,7 @@ pub fn render(
     }
 
     // Phase 3: persistent grid draw decision + back-buffer delivery.
+    const grid_t0 = if (diag_on) diag.qpcNow() else 0;
     swap_chain_mod.acquireBackBufferTexture(self, prepared.swap_chain);
     grid.drawAndCopy(self, .{
         .client_w = prepared.client_w,
@@ -528,9 +542,30 @@ pub fn render(
         .dirty_max_row = build.dirty_max_row,
         .resizing = resizing,
     });
+    const grid_us = if (diag_on) diag.qpcUsSince(grid_t0) else 0;
 
     // Phase 4: tab-bar band paint + Present + occlusion state + diag.
+    const present_t0 = if (diag_on) diag.qpcNow() else 0;
     paintChromeAndPresent(self, prepared, tabbar);
+    const present_us = if (diag_on) diag.qpcUsSince(present_t0) else 0;
+    if (diag_on) {
+        const total_us = diag.qpcUsSince(t0);
+        if (total_us >= 8_000 or build_us >= 4_000 or present_us >= 4_000) {
+            std.log.info(
+                "render frame: total_us={} prepare_us={} build_us={} grid_us={} present_us={} cells={} dirty={?}-{?}",
+                .{
+                    total_us,
+                    prepare_us,
+                    build_us,
+                    grid_us,
+                    present_us,
+                    cell_count,
+                    build.dirty_min_row,
+                    build.dirty_max_row,
+                },
+            );
+        }
+    }
     self.maybeLogDiag(prepared.client_w, prepared.client_h, prepared.shader_col, prepared.term_shader_row);
 }
 

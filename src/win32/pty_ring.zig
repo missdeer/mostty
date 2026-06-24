@@ -4,13 +4,15 @@ const win32 = @import("win32").everything;
 // Per-tab SPSC byte ring between the PTY reader thread (producer) and the
 // UI thread (consumer). Replaces the prior synchronous SendMessage hand-off
 // so the reader is never gated by UI frame work. The reader copies bytes
-// into the ring; the UI thread drains the whole ring per wake-up. Ring full
-// blocks the reader on `wake_event` — bytes are never dropped (PTY streams
-// are non-replayable).
+// into the ring; the UI thread drains bounded batches per wake-up so large
+// bursts can't monopolize the message pump. Ring full blocks the reader on
+// `wake_event` — bytes are never dropped (PTY streams are non-replayable).
 //
 // Notification is edge-triggered via the `posted` atomic bool: at most one
 // WM_APP_CHILD_PROCESS_DATA is in flight per tab, set by the reader on the
-// empty→non-empty transition and cleared by the UI handler before drain.
+// empty→non-empty transition. The UI handler keeps it true while timer-driven
+// bounded-drain continuations are pending, then clears and re-checks when the
+// ring is empty.
 
 pub const RING_CAP: usize = 1 << 20; // 1 MiB ≈ 16 × 64 KB ReadFile bufs
 
@@ -30,8 +32,9 @@ pub const PtyRing = struct {
     // shutdown.
     wake_event: win32.HANDLE,
     // Edge-triggered wake-up guard. Reader does swap(true); if it returned
-    // false, reader posts WM_APP_CHILD_PROCESS_DATA. UI handler clears to
-    // false before drain so writes during drain re-arm a fresh post.
+    // false, reader posts WM_APP_CHILD_PROCESS_DATA. UI handler keeps it true
+    // while timer continuations are pending, then clears and re-checks when
+    // empty.
     posted: std.atomic.Value(bool),
     // Borrowed pointer to Tab.reader_stop. Re-checked at the top of every
     // write iteration and after waking from a full-ring wait.
@@ -94,27 +97,36 @@ pub const PtyRing = struct {
         return true;
     }
 
-    // Consumer (UI thread). Hands all currently-available bytes to `cb` as
-    // up to two contiguous slices (wrap split), advances tail, and signals
-    // `wake_event` so any full-ring writer can resume. Returns total bytes
-    // drained.
+    pub fn hasData(self: *PtyRing) bool {
+        return self.head.load(.acquire) != self.tail.load(.acquire);
+    }
+
+    // Consumer (UI thread). Hands up to `max_bytes` currently-available bytes
+    // to `cb` as up to two contiguous slices (wrap split), advances tail, and
+    // signals `wake_event` so any full-ring writer can resume. Returns total
+    // bytes drained.
     //
     // Zero-copy: the callback receives pointers directly into `self.buf`;
     // they are valid for the duration of the call (single-consumer ring,
     // tail not advanced until after both cb invocations).
-    pub fn drain(self: *PtyRing, ctx: anytype, comptime cb: anytype) usize {
+    pub fn drainMax(self: *PtyRing, max_bytes: usize, ctx: anytype, comptime cb: anytype) usize {
         const head = self.head.load(.acquire);
         const tail = self.tail.load(.monotonic);
         const used = head - tail;
-        if (used == 0) return 0;
+        if (used == 0 or max_bytes == 0) return 0;
+        const drain_len = @min(used, max_bytes);
         const cap = self.buf.len;
         const mask = cap - 1;
         const start = tail & mask;
-        const first = @min(used, cap - start);
+        const first = @min(drain_len, cap - start);
         cb(ctx, self.buf[start..][0..first]);
-        if (used > first) cb(ctx, self.buf[0..(used - first)]);
-        self.tail.store(head, .release);
+        if (drain_len > first) cb(ctx, self.buf[0..(drain_len - first)]);
+        self.tail.store(tail + drain_len, .release);
         _ = win32.SetEvent(self.wake_event);
-        return used;
+        return drain_len;
+    }
+
+    pub fn drain(self: *PtyRing, ctx: anytype, comptime cb: anytype) usize {
+        return self.drainMax(std.math.maxInt(usize), ctx, cb);
     }
 };
