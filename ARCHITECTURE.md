@@ -256,7 +256,10 @@ Handlers by family:
     counter and calls `requestRender`. If data remains, it arms
     `TIMER_PTY_DRAIN`; timer continuations use an ~8 ms budget so large
     bursts yield back to the message pump without dropping to tiny
-    throughput. Posts for a now-closed tab resolve to `findById → null`
+    throughput. If `SetTimer` cannot arm the continuation, the fallback
+    posts another `WM_APP_CHILD_PROCESS_DATA` instead of draining
+    synchronously, so a resource-exhaustion path cannot recurse on the UI
+    stack. Posts for a now-closed tab resolve to `findById → null`
     and return 0.
   - `WM_APP_CONFIG_CHANGED` arms `TIMER_CONFIG_RELOAD` so multiple
     in-burst editor saves collapse into one reload (`CONFIG_RELOAD_DEBOUNCE_MS = 150`).
@@ -417,6 +420,7 @@ ReadFile bytes
        window.notePtyBytes(n)
        window.requestRender()
   → if ring still has data: keep posted=true and arm TIMER_PTY_DRAIN
+       (if SetTimer fails, PostMessage another WM_APP_CHILD_PROCESS_DATA)
     else clear posted=false and re-check for a write raced under posted=true
 ```
 
@@ -779,10 +783,14 @@ WM_LBUTTONUP
   no wake-up coming.
 - **The UI handler drains PTY data in bounded batches.** If the ring still
   has data after a batch, it keeps `pty_ring.posted = true` and arms a
-  timer continuation; otherwise it clears `posted = false` and immediately
-  re-checks the ring. That final re-check covers the race where the reader
-  wrote while `posted` was still true and therefore did not post its own
-  wake-up.
+  timer continuation; if `SetTimer` fails, it posts another
+  `WM_APP_CHILD_PROCESS_DATA` and returns to the message pump rather than
+  draining synchronously. Otherwise it clears `posted = false` and
+  immediately re-checks the ring. That final re-check covers the race where
+  the reader wrote while `posted` was still true and therefore did not post
+  its own wake-up. Timer backlog scans also clear `posted` when they observe
+  `posted == true` but no ring data, so an inconsistent stale flag cannot
+  suppress the next reader wake-up.
 - **`tab.closing` is set together with `reader_stop` + `CancelIoEx` +
   `SetEvent(pty_ring.wake_event)` + `closePty()`, in that order, BEFORE
   `thread.join`.** The two wake calls cover the reader's two visible

@@ -681,7 +681,12 @@ fn armPtyDrainContinuation(window: *Window, tab: *Tab) void {
         "SetTimer(PTY_DRAIN continuation) failed (tab {}): {f}",
         .{ tab.id, win32.GetLastError() },
     );
-    _ = onAppChildProcessData(window.hwnd, tab.id, 0);
+    if (win32.PostMessageW(window.hwnd, types.WM_APP_CHILD_PROCESS_DATA, tab.id, 0) == 0) {
+        std.log.warn(
+            "PostMessageW(PTY_DRAIN continuation) failed (tab {}): {f}",
+            .{ tab.id, win32.GetLastError() },
+        );
+    }
 }
 
 fn drainPendingPtyTabs() void {
@@ -690,7 +695,10 @@ fn drainPendingPtyTabs() void {
     for (window.tabs.items) |tab| {
         if (tab.closing) continue;
         if (!tab.pty_ring.posted.load(.acquire)) continue;
-        if (!tab.pty_ring.hasData()) continue;
+        if (!tab.pty_ring.hasData()) {
+            tab.pty_ring.posted.store(false, .release);
+            continue;
+        }
         drainPtyTab(window, tab, PTY_DRAIN_BACKLOG_BUDGET_US);
     }
 }

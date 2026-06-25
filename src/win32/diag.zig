@@ -1,10 +1,10 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
+const state = @import("state.zig");
 
 var enabled: bool = false;
 var file: ?std.fs.File = null;
 var mutex: std.Thread.Mutex = .{};
-var qpc_freq_hz: u64 = 0;
 
 pub fn isEnabled() bool {
     return enabled;
@@ -46,18 +46,9 @@ pub fn log(
 }
 
 pub fn qpcNow() u64 {
-    var c: win32.LARGE_INTEGER = undefined;
-    _ = win32.QueryPerformanceCounter(&c);
-    return @bitCast(c.QuadPart);
+    return state.qpcNow();
 }
 
 pub fn qpcUsSince(prev: u64) u64 {
-    if (qpc_freq_hz == 0) {
-        var f: win32.LARGE_INTEGER = undefined;
-        _ = win32.QueryPerformanceFrequency(&f);
-        qpc_freq_hz = @bitCast(f.QuadPart);
-    }
-    const now = qpcNow();
-    if (now <= prev or qpc_freq_hz == 0) return 0;
-    return (now - prev) * 1_000_000 / qpc_freq_hz;
+    return state.qpcUsSince(prev);
 }
