@@ -144,6 +144,21 @@ pub fn utf16CodepointMaps(
     return out.toOwnedSlice(allocator) catch |e| oom(e);
 }
 
+pub fn dwriteFontFeatures(
+    allocator: std.mem.Allocator,
+    features: []const Config.FontFeature,
+) []const d3d11.FontConfig.FontFeature {
+    if (features.len == 0) return &.{};
+    const out = allocator.alloc(d3d11.FontConfig.FontFeature, features.len) catch |e| oom(e);
+    for (features, out) |feature, *dst| {
+        dst.* = .{
+            .nameTag = @enumFromInt(feature.tag),
+            .parameter = feature.value,
+        };
+    }
+    return out;
+}
+
 // Converts a Config.FontStyle (UTF-8 in arena) into a FontConfig.StyleSpec
 // (UTF-16 for DirectWrite). Same leak-by-design lifetime as families.
 pub fn convertStyleSpec(allocator: std.mem.Allocator, style: Config.FontStyle) d3d11.FontConfig.StyleSpec {

@@ -86,6 +86,25 @@ with fonts that do not provide programming ligatures, where shaping the run
 would otherwise consume extra atlas slots without changing the visual result.
 Hot-reloads — toggling the key triggers a repaint without resizing tabs.
 
+### `font-feature`
+
+Apply OpenType feature settings through DirectWrite typography. The syntax is
+compatible with Ghostty's `font-feature` / CSS `font-feature-settings` shape:
+
+```
+font-feature = liga
+font-feature = "calt" off
+font-feature = dlig=1, ss01=1, -ss02
+```
+
+Feature names must be four-character printable ASCII tags such as `liga`,
+`calt`, `dlig`, or stylistic sets like `ss01` through `ss20`. Custom tags
+from specific fonts are also supported. Values default to `1`; use `off`,
+`false`, `0`, or a leading `-` to disable a feature. Malformed tags (not
+exactly four characters or containing non-printable characters) are skipped
+with a warning. Hot-reloads rebuild the font atlas so changed features take
+effect on the next repaint.
+
 ### `tabbar-font-family` / `tabbar-font-size`
 
 Override the font used to render tab-bar titles. When unset, the tab bar

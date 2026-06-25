@@ -163,6 +163,7 @@ cell_size_xy: CellXY,
 // Effective font configuration (defaults if user didn't override). Lifetimes
 // of the [*:0]u16 strings are owned by the caller of `init`.
 font_size_pt: f32,
+font_features: []const FontConfig.FontFeature = &.{},
 font_ligatures: bool = true,
 effective_primary: [*:0]const u16,
 // Per-style primary overrides for bold/italic/bold-italic respectively.
@@ -362,6 +363,7 @@ pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Render
         .cell_size_xy = fmts.cell_size_xy,
         .dpi = dpi,
         .font_size_pt = eff.font_size_pt,
+        .font_features = eff.font_features,
         .font_ligatures = font_ligatures,
         .effective_primary = eff.primary,
         .effective_style_primaries = eff.style_primaries,

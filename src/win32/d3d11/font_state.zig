@@ -25,6 +25,7 @@ pub const Effective = struct {
     primary: [*:0]const u16,
     user_fallbacks: []const [*:0]const u16,
     font_size_pt: f32,
+    font_features: []const FontConfig.FontFeature,
     style_primaries: [3]?[*:0]const u16,
     style_specs: [4]FontConfig.StyleSpec,
     style: [4]GlyphIndexCache.Style,
@@ -83,6 +84,7 @@ pub fn deriveFromConfig(
         .primary = primary,
         .user_fallbacks = user_fallbacks,
         .font_size_pt = font_size_pt,
+        .font_features = font_config.font_features,
         .style_primaries = style_primaries,
         .style_specs = font_config.style_specs,
         .style = style,
@@ -100,6 +102,7 @@ pub fn snapshotFromRenderer(self: *D3d11Renderer) Effective {
         .primary = self.effective_primary,
         .user_fallbacks = self.effective_user_fallbacks,
         .font_size_pt = self.font_size_pt,
+        .font_features = self.font_features,
         .style_primaries = self.effective_style_primaries,
         .style_specs = self.effective_style_specs,
         .style = self.effective_style,
@@ -197,6 +200,7 @@ pub fn rebuildAndAssign(self: *D3d11Renderer, dpi: u32, eff: Effective) void {
 
     self.dpi = dpi;
     self.font_size_pt = eff.font_size_pt;
+    self.font_features = eff.font_features;
     self.effective_primary = eff.primary;
     self.effective_style_primaries = eff.style_primaries;
     self.effective_style_specs = eff.style_specs;

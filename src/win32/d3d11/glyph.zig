@@ -198,6 +198,11 @@ fn submitRasterJob(
             gpa.destroy(job);
             return false;
         };
+    const features_dup = dupeFontFeatures(gpa, self.font_features) catch {
+        if (grapheme_dup.len != 0) gpa.free(grapheme_dup);
+        gpa.destroy(job);
+        return false;
+    };
     const text_format = self.text_formats[@intFromEnum(style)];
     _ = text_format.IUnknown.AddRef();
     _ = self.rendering_params.IUnknown.AddRef();
@@ -216,6 +221,7 @@ fn submitRasterJob(
         .cs = self.cell_size_xy,
         .text_format = text_format,
         .rendering_params = self.rendering_params,
+        .font_features = features_dup,
     };
     if (!self.glyph_worker.submit(job)) {
         // submit() didn't consume the job — destroy locally. `destroy`
@@ -303,6 +309,11 @@ fn submitRunRasterJob(
         gpa.destroy(job);
         return false;
     };
+    const features_dup = dupeFontFeatures(gpa, self.font_features) catch {
+        gpa.free(run_dup);
+        gpa.destroy(job);
+        return false;
+    };
 
     const text_format = self.text_formats[@intFromEnum(style)];
     _ = text_format.IUnknown.AddRef();
@@ -334,12 +345,21 @@ fn submitRunRasterJob(
         .cs = self.cell_size_xy,
         .text_format = text_format,
         .rendering_params = self.rendering_params,
+        .font_features = features_dup,
     };
     if (!self.glyph_worker.submit(job)) {
         job.destroy(gpa);
         return false;
     }
     return true;
+}
+
+fn dupeFontFeatures(
+    gpa: std.mem.Allocator,
+    features: []const win32.DWRITE_FONT_FEATURE,
+) error{OutOfMemory}![]win32.DWRITE_FONT_FEATURE {
+    if (features.len == 0) return &.{};
+    return try gpa.dupe(win32.DWRITE_FONT_FEATURE, features);
 }
 
 // Reserve and populate both halves of a wide glyph using a single raster.
@@ -547,6 +567,7 @@ fn renderGlyphToStaging(
         const hr = layout.SetFontFamilyName(font.emoji_font_family, range);
         if (hr < 0) com.fatalHr("SetFontFamilyName(emoji)", hr);
     }
+    font.applyFontFeatures(&self.dwrite_factory.IDWriteFactory, layout, self.font_features, @intCast(utf16_len));
 
     // For ambiguous symbols, center the glyph in its single cell so the
     // center-anchored scale transform expands uniformly around the cell

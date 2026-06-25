@@ -48,10 +48,12 @@ pub const RasterJob = struct {
     // AddRef'd at submit, Release'd by worker after the raster completes.
     text_format: *win32.IDWriteTextFormat,
     rendering_params: *win32.IDWriteRenderingParams,
+    font_features: []win32.DWRITE_FONT_FEATURE = &.{},
 
     pub fn destroy(self: *RasterJob, gpa: std.mem.Allocator) void {
         _ = self.text_format.IUnknown.Release();
         _ = self.rendering_params.IUnknown.Release();
+        if (self.font_features.len != 0) gpa.free(self.font_features);
         if (self.grapheme.len != 0) gpa.free(self.grapheme);
         if (self.run_text.len != 0) gpa.free(self.run_text);
         gpa.destroy(self);
@@ -426,6 +428,7 @@ fn rasterToWicBuffer(
         const hr = layout.SetFontFamilyName(font.emoji_font_family, range);
         if (hr < 0) com.fatalHr("SetFontFamilyName(emoji)", hr);
     }
+    font.applyFontFeatures(&dwrite_factory.IDWriteFactory, layout, job.font_features, @intCast(utf16_len));
 
     if (job.is_ambiguous) {
         const ahr = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -634,6 +637,7 @@ fn rasterRunAndPostResults(
         if (hr < 0) com.fatalHr("CreateTextLayout(run worker)", hr);
     }
     defer _ = layout.IUnknown.Release();
+    font.applyFontFeatures(&dwrite_factory.IDWriteFactory, layout, job.font_features, utf16_len);
 
     const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
         .m11 = 1,

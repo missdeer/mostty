@@ -28,6 +28,8 @@ pub const FontConfig = struct {
         family: [*:0]const u16,
     };
 
+    pub const FontFeature = win32.DWRITE_FONT_FEATURE;
+
     /// First entry becomes the primary family; the rest are inserted at the
     /// front of the fallback chain. Empty -> use built-in defaults.
     families: []const [*:0]const u16 = &.{},
@@ -59,6 +61,8 @@ pub const FontConfig = struct {
     style_specs: [4]StyleSpec = .{ .default, .default, .default, .default },
     /// Font size in points. Null -> use built-in default.
     font_size_pt: ?f32 = null,
+    /// OpenType feature settings applied through IDWriteTypography.
+    font_features: []const FontFeature = &.{},
     /// Per-range forced font assignments. Applied at the head of the
     /// DirectWrite fallback chain (before the global family mapping), so for
     /// codepoints NOT covered by the preferred family the user-mapped family
@@ -600,6 +604,32 @@ pub fn buildRenderingParams(factory: *win32.IDWriteFactory) *win32.IDWriteRender
     );
     if (hr < 0) com.fatalHr("CreateCustomRenderingParams", hr);
     return params;
+}
+
+pub fn applyFontFeatures(
+    dwrite_factory: *win32.IDWriteFactory,
+    layout: *win32.IDWriteTextLayout,
+    features: []const win32.DWRITE_FONT_FEATURE,
+    utf16_len: u32,
+) void {
+    if (features.len == 0 or utf16_len == 0) return;
+    var typography: *win32.IDWriteTypography = undefined;
+    {
+        const hr = dwrite_factory.CreateTypography(&typography);
+        if (hr < 0) com.fatalHr("CreateTypography", hr);
+    }
+    defer _ = typography.IUnknown.Release();
+
+    for (features) |feature| {
+        const hr = typography.AddFontFeature(feature);
+        if (hr < 0) com.fatalHr("AddFontFeature", hr);
+    }
+    const range = win32.DWRITE_TEXT_RANGE{
+        .startPosition = 0,
+        .length = utf16_len,
+    };
+    const hr = layout.SetTypography(typography, range);
+    if (hr < 0) com.fatalHr("SetTypography", hr);
 }
 
 // Fallback object composition order (this is the order DirectWrite walks

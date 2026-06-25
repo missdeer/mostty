@@ -53,6 +53,11 @@ pub const FontStyle = union(enum) {
     named: []const u8,
 };
 
+pub const FontFeature = struct {
+    tag: u32,
+    value: u32,
+};
+
 // Anchor for `background-image-position`. Maps Ghostty's nine hyphenated names.
 pub const BackgroundImagePosition = enum {
     top_left,
@@ -183,6 +188,9 @@ font_size_pt: ?f32 = null,
 // default for MOSTTY-1; users on non-ligature fonts can disable the extra run
 // atlas entries with `font-ligatures = false`.
 font_ligatures: bool = true,
+// Ghostty-compatible OpenType feature settings (`font-feature = "liga" off`).
+// Applied through IDWriteTypography to every DirectWrite text layout.
+font_features: []const FontFeature = &.{},
 // Tab-bar-only font overrides. Empty/null means "inherit the terminal
 // font-family / font-size". Only the primary family is used; the tab bar's
 // fallback chain reuses the terminal font's fallbacks.
@@ -311,6 +319,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var style_bold_italic: FontStyle = .default;
     var font_size_pt: ?f32 = null;
     var font_ligatures: bool = true;
+    var font_features: std.ArrayListUnmanaged(FontFeature) = .empty;
     var tabbar_font_family: []const u8 = &.{};
     var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
@@ -425,6 +434,10 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 std.log.warn("config: {s}:{}: invalid font-ligatures '{s}' (expect true/false)", .{ source_name, line_no, value });
                 continue;
             };
+        } else if (std.mem.eql(u8, key, "font-feature")) {
+            parseFontFeatures(a, value, &font_features) catch {
+                std.log.warn("config: {s}:{}: invalid font-feature '{s}'", .{ source_name, line_no, value });
+            };
         } else if (std.mem.eql(u8, key, "tabbar-font-family")) {
             // Only the primary family drives the tab bar; the rest of any
             // comma list is ignored (the terminal fallback chain covers gaps).
@@ -534,6 +547,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     }
 
     const families_slice = families.toOwnedSlice(a) catch oom();
+    const font_features_slice = font_features.toOwnedSlice(a) catch oom();
     const codepoint_maps_slice = codepoint_maps.toOwnedSlice(a) catch oom();
     const launchers_slice = launchers.toOwnedSlice(a) catch oom();
     const envs_slice = envs.toOwnedSlice(a) catch oom();
@@ -549,6 +563,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .font_style_bold_italic = style_bold_italic,
         .font_size_pt = font_size_pt,
         .font_ligatures = font_ligatures,
+        .font_features = font_features_slice,
         .tabbar_font_family = tabbar_font_family,
         .tabbar_font_size_pt = tabbar_font_size_pt,
         .font_codepoint_maps = codepoint_maps_slice,
@@ -716,6 +731,84 @@ fn parseSyntheticStyle(value: []const u8) ?SyntheticStyle {
         } else return null;
     }
     return out;
+}
+
+// Parses Ghostty's loose `font-feature` syntax: `liga`, `+liga`, `-liga`,
+// `"liga" off`, `liga=2`, or comma-separated combinations of those forms.
+fn parseFontFeatures(
+    a: std.mem.Allocator,
+    value: []const u8,
+    out: *std.ArrayListUnmanaged(FontFeature),
+) error{OutOfMemory}!void {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw_item| {
+        const item = std.mem.trim(u8, raw_item, " \t");
+        if (item.len == 0) continue;
+        const feature = parseFontFeatureItem(item) orelse {
+            std.log.warn("config: invalid font-feature item '{s}'; skipping", .{item});
+            continue;
+        };
+        try out.append(a, feature);
+    }
+}
+
+fn parseFontFeatureItem(raw: []const u8) ?FontFeature {
+    var s = std.mem.trim(u8, raw, " \t");
+    if (s.len == 0) return null;
+
+    var prefix_value: ?u32 = null;
+    if (s[0] == '+' or s[0] == '-') {
+        prefix_value = if (s[0] == '+') 1 else 0;
+        s = std.mem.trim(u8, s[1..], " \t");
+        if (s.len == 0) return null;
+    }
+
+    const parsed = parseFeatureTagPrefix(s) orelse return null;
+    var feature_value = prefix_value orelse 1;
+    var rest = std.mem.trim(u8, parsed.rest, " \t");
+    if (rest.len != 0) {
+        if (rest[0] == '=' or rest[0] == ':') rest = std.mem.trim(u8, rest[1..], " \t");
+        if (rest.len == 0) return null;
+        feature_value = parseFeatureValue(rest) orelse return null;
+    }
+
+    return .{ .tag = parsed.tag, .value = feature_value };
+}
+
+fn parseFeatureTagPrefix(s: []const u8) ?struct { tag: u32, rest: []const u8 } {
+    if (s.len == 0) return null;
+    if (s[0] == '"' or s[0] == '\'') {
+        const quote = s[0];
+        const close_rel = std.mem.indexOfScalar(u8, s[1..], quote) orelse return null;
+        const close = close_rel + 1;
+        const tag = parseFeatureTag(s[1..close]) orelse return null;
+        return .{ .tag = tag, .rest = s[close + 1 ..] };
+    }
+
+    var end: usize = 0;
+    while (end < s.len) : (end += 1) {
+        const c = s[end];
+        if (c == '=' or c == ':' or c == ' ' or c == '\t') break;
+    }
+    if (end == 0) return null;
+    const tag = parseFeatureTag(s[0..end]) orelse return null;
+    return .{ .tag = tag, .rest = s[end..] };
+}
+
+fn parseFeatureTag(raw: []const u8) ?u32 {
+    if (raw.len != 4) return null;
+    var tag: u32 = 0;
+    for (raw, 0..) |c, i| {
+        if (c < 0x20 or c > 0x7e) return null;
+        tag |= @as(u32, c) << @intCast(i * 8);
+    }
+    return tag;
+}
+
+fn parseFeatureValue(raw: []const u8) ?u32 {
+    if (std.ascii.eqlIgnoreCase(raw, "on") or std.ascii.eqlIgnoreCase(raw, "true")) return 1;
+    if (std.ascii.eqlIgnoreCase(raw, "off") or std.ascii.eqlIgnoreCase(raw, "false")) return 0;
+    return std.fmt.parseInt(u32, raw, 10) catch null;
 }
 
 // Parses `<ranges>=<family>` where ranges is comma-separated
@@ -1299,6 +1392,37 @@ test "parse font-ligatures switch" {
         defer cfg.deinit();
         try std.testing.expect(cfg.font_ligatures);
     }
+}
+
+test "parse font-feature settings" {
+    const src =
+        \\font-feature = liga
+        \\font-feature = "calt" off, dlig=2
+        \\font-feature = +ss01, -ss02
+        \\font-feature = abcd, bad
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 6), cfg.font_features.len);
+    try std.testing.expectEqual(featureTag("liga"), cfg.font_features[0].tag);
+    try std.testing.expectEqual(@as(u32, 1), cfg.font_features[0].value);
+    try std.testing.expectEqual(featureTag("calt"), cfg.font_features[1].tag);
+    try std.testing.expectEqual(@as(u32, 0), cfg.font_features[1].value);
+    try std.testing.expectEqual(featureTag("dlig"), cfg.font_features[2].tag);
+    try std.testing.expectEqual(@as(u32, 2), cfg.font_features[2].value);
+    try std.testing.expectEqual(featureTag("ss01"), cfg.font_features[3].tag);
+    try std.testing.expectEqual(@as(u32, 1), cfg.font_features[3].value);
+    try std.testing.expectEqual(featureTag("ss02"), cfg.font_features[4].tag);
+    try std.testing.expectEqual(@as(u32, 0), cfg.font_features[4].value);
+    try std.testing.expectEqual(featureTag("abcd"), cfg.font_features[5].tag);
+    try std.testing.expectEqual(@as(u32, 1), cfg.font_features[5].value);
+}
+
+fn featureTag(comptime tag: *const [4:0]u8) u32 {
+    return @as(u32, tag[0]) |
+        (@as(u32, tag[1]) << 8) |
+        (@as(u32, tag[2]) << 16) |
+        (@as(u32, tag[3]) << 24);
 }
 
 test "parseSyntheticStyle: true/false/list/invalid" {

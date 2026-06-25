@@ -131,6 +131,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
         // the renderer's lifetime, same leak-by-design as startup.
         const families = util.utf16FontFamilies(gpa, new_cfg.font_families);
         const codepoint_maps = util.utf16CodepointMaps(gpa, new_cfg.font_codepoint_maps);
+        const font_features = util.dwriteFontFeatures(gpa, new_cfg.font_features);
         global.renderer.updateFont(.{
             .families = families,
             .family_bold = util.utf16FamilyOptional(gpa, new_cfg.font_family_bold),
@@ -146,6 +147,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
                 util.convertStyleSpec(gpa, new_cfg.font_style_bold_italic),
             },
             .font_size_pt = new_cfg.font_size_pt,
+            .font_features = font_features,
             .codepoint_maps = codepoint_maps,
             .tabbar_family = util.utf16FamilyOptional(gpa, new_cfg.tabbar_font_family),
             .tabbar_font_size_pt = new_cfg.tabbar_font_size_pt,
@@ -249,6 +251,11 @@ fn fontConfigEql(a: *const Config, b: *const Config) bool {
     if (!fontStyleEql(a.font_style_bold, b.font_style_bold)) return false;
     if (!fontStyleEql(a.font_style_italic, b.font_style_italic)) return false;
     if (!fontStyleEql(a.font_style_bold_italic, b.font_style_bold_italic)) return false;
+    if (a.font_features.len != b.font_features.len) return false;
+    for (a.font_features, b.font_features) |x, y| {
+        if (x.tag != y.tag) return false;
+        if (x.value != y.value) return false;
+    }
     if (a.font_codepoint_maps.len != b.font_codepoint_maps.len) return false;
     for (a.font_codepoint_maps, b.font_codepoint_maps) |x, y| {
         if (x.range_start != y.range_start) return false;

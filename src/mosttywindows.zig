@@ -94,6 +94,7 @@ pub fn main() !void {
     const gpa_alloc = global.gpa.allocator();
     const font_families_u16 = util.utf16FontFamilies(gpa_alloc, global.config.font_families);
     const codepoint_maps_u16 = util.utf16CodepointMaps(gpa_alloc, global.config.font_codepoint_maps);
+    const font_features = util.dwriteFontFeatures(gpa_alloc, global.config.font_features);
     const font_config: d3d11.FontConfig = .{
         .families = font_families_u16,
         .family_bold = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_bold),
@@ -109,6 +110,7 @@ pub fn main() !void {
             util.convertStyleSpec(gpa_alloc, global.config.font_style_bold_italic),
         },
         .font_size_pt = global.config.font_size_pt,
+        .font_features = font_features,
         .codepoint_maps = codepoint_maps_u16,
         .tabbar_family = util.utf16FamilyOptional(gpa_alloc, global.config.tabbar_font_family),
         .tabbar_font_size_pt = global.config.tabbar_font_size_pt,
