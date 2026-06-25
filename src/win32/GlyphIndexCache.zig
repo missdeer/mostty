@@ -15,6 +15,8 @@ pub const Key = struct {
     len: u16,
     half: Half,
     style: Style,
+    run_offset: u8 = 0,
+    run_len: u8 = 1,
 
     pub fn init(first: u21, rest: []const u21, half: Half, style: Style) Key {
         var h_a = std.hash.Wyhash.init(0);
@@ -31,6 +33,27 @@ pub const Key = struct {
             .len = @intCast(1 + rest.len),
             .half = half,
             .style = style,
+        };
+    }
+
+    pub fn initRun(text: []const u8, offset: u8, style: Style) Key {
+        std.debug.assert(text.len > 1);
+        std.debug.assert(offset < text.len);
+
+        var h_a = std.hash.Wyhash.init(0x72756e2d676c7970);
+        h_a.update(text);
+
+        var h_b = std.hash.Wyhash.init(0x9e3779b97f4a7c15 ^ 0x72756e2d676c7970);
+        h_b.update(text);
+
+        return .{
+            .hash_a = h_a.final(),
+            .hash_b = h_b.final(),
+            .len = @intCast(text.len),
+            .half = .single,
+            .style = style,
+            .run_offset = offset,
+            .run_len = @intCast(text.len),
         };
     }
 };
@@ -205,6 +228,19 @@ pub fn unreserve(self: *GlyphIndexCache, idx: u32, slot_gen: u32) void {
     self.moveToFront(idx);
 }
 
+/// Drop a pending reservation only if it still matches the worker result.
+/// This is the failure-path twin of `markReady`: stale worker messages must
+/// not clear a slot that has already been reused.
+pub fn cancelPending(self: *GlyphIndexCache, idx: u32, slot_gen: u32, expected_key: Key) bool {
+    const node = &self.nodes[idx];
+    if (!node.pending) return false;
+    if (node.gen != slot_gen) return false;
+    const k = node.key orelse return false;
+    if (!std.meta.eql(k, expected_key)) return false;
+    self.unreserve(idx, slot_gen);
+    return true;
+}
+
 /// Force `index` to the LRU back, unconditionally — bypasses the per-frame
 /// dampening in `reserve`. Use when the caller is about to perform another
 /// `reserve` whose miss path could otherwise evict the just-hit slot.
@@ -349,6 +385,19 @@ test "grapheme keys include full codepoint sequence" {
         .newly_reserved_pending => true,
         else => false,
     });
+}
+
+test "run keys include full text and cell offset" {
+    const k0: Key = .initRun("=>", 0, .regular);
+    const k1: Key = .initRun("=>", 1, .regular);
+    const k_other_text: Key = .initRun("==", 0, .regular);
+    const k_other_style: Key = .initRun("=>", 0, .bold);
+    const single: Key = .init('=', &.{}, .single, .regular);
+
+    try std.testing.expect(!std.meta.eql(k0, k1));
+    try std.testing.expect(!std.meta.eql(k0, k_other_text));
+    try std.testing.expect(!std.meta.eql(k0, k_other_style));
+    try std.testing.expect(!std.meta.eql(k0, single));
 }
 
 test "reserve state transitions: pending → already_pending → ready" {

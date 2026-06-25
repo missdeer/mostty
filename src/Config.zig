@@ -179,6 +179,10 @@ font_style_bold: FontStyle = .default,
 font_style_italic: FontStyle = .default,
 font_style_bold_italic: FontStyle = .default,
 font_size_pt: ?f32 = null,
+// Shape common programming-symbol ligatures through DirectWrite. Enabled by
+// default for MOSTTY-1; users on non-ligature fonts can disable the extra run
+// atlas entries with `font-ligatures = false`.
+font_ligatures: bool = true,
 // Tab-bar-only font overrides. Empty/null means "inherit the terminal
 // font-family / font-size". Only the primary family is used; the tab bar's
 // fallback chain reuses the terminal font's fallbacks.
@@ -306,6 +310,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var style_italic: FontStyle = .default;
     var style_bold_italic: FontStyle = .default;
     var font_size_pt: ?f32 = null;
+    var font_ligatures: bool = true;
     var tabbar_font_family: []const u8 = &.{};
     var tabbar_font_size_pt: ?f32 = null;
     var background_opacity: f32 = 0.94;
@@ -415,6 +420,11 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 continue;
             }
             font_size_pt = n;
+        } else if (std.mem.eql(u8, key, "font-ligatures")) {
+            font_ligatures = parseStrictBool(value) orelse {
+                std.log.warn("config: {s}:{}: invalid font-ligatures '{s}' (expect true/false)", .{ source_name, line_no, value });
+                continue;
+            };
         } else if (std.mem.eql(u8, key, "tabbar-font-family")) {
             // Only the primary family drives the tab bar; the rest of any
             // comma list is ignored (the terminal fallback chain covers gaps).
@@ -538,6 +548,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .font_style_italic = style_italic,
         .font_style_bold_italic = style_bold_italic,
         .font_size_pt = font_size_pt,
+        .font_ligatures = font_ligatures,
         .tabbar_font_family = tabbar_font_family,
         .tabbar_font_size_pt = tabbar_font_size_pt,
         .font_codepoint_maps = codepoint_maps_slice,
@@ -1270,6 +1281,24 @@ test "parse font-style: default/false/named" {
     try std.testing.expect(cfg.font_style_italic == .disabled);
     // Empty value resets to default.
     try std.testing.expect(cfg.font_style_bold_italic == .default);
+}
+
+test "parse font-ligatures switch" {
+    {
+        var cfg = parse(std.testing.allocator, "", "test");
+        defer cfg.deinit();
+        try std.testing.expect(cfg.font_ligatures);
+    }
+    {
+        var cfg = parse(std.testing.allocator, "font-ligatures = false\n", "test");
+        defer cfg.deinit();
+        try std.testing.expect(!cfg.font_ligatures);
+    }
+    {
+        var cfg = parse(std.testing.allocator, "font-ligatures = garbage\n", "test");
+        defer cfg.deinit();
+        try std.testing.expect(cfg.font_ligatures);
+    }
 }
 
 test "parseSyntheticStyle: true/false/list/invalid" {

@@ -113,7 +113,7 @@ pub fn main() !void {
         .tabbar_family = util.utf16FamilyOptional(gpa_alloc, global.config.tabbar_font_family),
         .tabbar_font_size_pt = global.config.tabbar_font_size_pt,
     };
-    global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config);
+    global.renderer = d3d11.init(@max(dpi.x, dpi.y), font_config, global.config.font_ligatures);
     const cell_size = global.renderer.cell_size;
     const placement = window_geom.calcWindowPlacement(
         maybe_monitor,

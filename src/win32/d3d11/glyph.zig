@@ -14,6 +14,19 @@ const glyph_worker = @import("glyph_worker.zig");
 
 const D3d11Renderer = @import("../d3d11.zig");
 const CellXY = gpu.CellXY;
+pub const max_ligature_run_cells = glyph_worker.max_run_cells;
+
+pub const RunGlyphs = struct {
+    glyphs: [max_ligature_run_cells]u32,
+    len: u8,
+};
+
+const RunPending = struct {
+    index: u32,
+    slot_gen: u32,
+    key: GlyphIndexCache.Key,
+    offset: u8,
+};
 
 // Frame-invariant glyph atlas setup. Call once per render() so the
 // per-cell generateGlyph path does only the cache lookup + miss work.
@@ -192,6 +205,8 @@ fn submitRasterJob(
         .key = key,
         .codepoint = codepoint,
         .grapheme = grapheme_dup,
+        .run_text = &.{},
+        .run_slot_count = 0,
         .is_wide = false,
         .is_color = emoji.isColorGlyphRun(codepoint, grapheme),
         .is_ambiguous = sprite.isAmbiguousOverflow(codepoint),
@@ -206,6 +221,121 @@ fn submitRasterJob(
         // submit() didn't consume the job — destroy locally. `destroy`
         // Releases the COM refs and frees the dupe, mirroring the worker's
         // own success-path cleanup.
+        job.destroy(gpa);
+        return false;
+    }
+    return true;
+}
+
+pub fn generateRun(
+    self: *D3d11Renderer,
+    cache: *GlyphIndexCache,
+    tex_cell_count: CellXY,
+    text: []const u8,
+    style: GlyphIndexCache.Style,
+) ?RunGlyphs {
+    if (text.len < 2 or text.len > max_ligature_run_cells) return null;
+    if (!self.glyph_worker_started) return null;
+
+    const arena = self.glyph_cache_arena.allocator();
+    const blank = blankGlyphSlot(self, cache, tex_cell_count);
+    var out: RunGlyphs = .{
+        .glyphs = undefined,
+        .len = @intCast(text.len),
+    };
+    @memset(out.glyphs[0..text.len], blank);
+
+    var pending: [max_ligature_run_cells]RunPending = undefined;
+    var pending_count: usize = 0;
+    var saw_new = false;
+
+    for (text, 0..) |_, i| {
+        const offset: u8 = @intCast(i);
+        const key = GlyphIndexCache.Key.initRun(text, offset, style);
+        const res = cache.reserve(arena, key) catch com.oom(error.OutOfMemory);
+        switch (res) {
+            .ready => |idx| out.glyphs[i] = idx,
+            .already_pending => {},
+            .newly_reserved_pending => |r| {
+                saw_new = true;
+                pending[pending_count] = .{
+                    .index = r.index,
+                    .slot_gen = r.slot_gen,
+                    .key = key,
+                    .offset = offset,
+                };
+                pending_count += 1;
+            },
+            .no_slot => {
+                rollbackRunReservations(cache, pending[0..pending_count]);
+                return null;
+            },
+        }
+    }
+
+    if (!saw_new) return out;
+
+    if (submitRunRasterJob(self, text, style, pending[0..pending_count])) {
+        return out;
+    }
+    rollbackRunReservations(cache, pending[0..pending_count]);
+    return null;
+}
+
+fn rollbackRunReservations(cache: *GlyphIndexCache, pending: []const RunPending) void {
+    var i = pending.len;
+    while (i > 0) {
+        i -= 1;
+        cache.unreserve(pending[i].index, pending[i].slot_gen);
+    }
+}
+
+fn submitRunRasterJob(
+    self: *D3d11Renderer,
+    text: []const u8,
+    style: GlyphIndexCache.Style,
+    pending: []const RunPending,
+) bool {
+    if (pending.len == 0 or pending.len > max_ligature_run_cells) return false;
+    const gpa = self.glyph_worker.gpa;
+    const job = gpa.create(glyph_worker.RasterJob) catch return false;
+    const run_dup = gpa.dupe(u8, text) catch {
+        gpa.destroy(job);
+        return false;
+    };
+
+    const text_format = self.text_formats[@intFromEnum(style)];
+    _ = text_format.IUnknown.AddRef();
+    _ = self.rendering_params.IUnknown.AddRef();
+
+    var run_slots: [max_ligature_run_cells]glyph_worker.RunSlot = undefined;
+    for (pending, 0..) |p, i| {
+        run_slots[i] = .{
+            .offset = p.offset,
+            .slot = p.index,
+            .slot_gen = p.slot_gen,
+            .key = p.key,
+        };
+    }
+
+    job.* = .{
+        .key = pending[0].key,
+        .codepoint = 0,
+        .grapheme = &.{},
+        .run_text = run_dup,
+        .run_slots = run_slots,
+        .run_slot_count = @intCast(pending.len),
+        .is_wide = false,
+        .is_color = false,
+        .is_ambiguous = false,
+        .slot = pending[0].index,
+        .slot_gen = pending[0].slot_gen,
+        .cache_gen = self.cache_gen,
+        .cs = self.cell_size_xy,
+        .text_format = text_format,
+        .rendering_params = self.rendering_params,
+    };
+    if (!self.glyph_worker.submit(job)) {
         job.destroy(gpa);
         return false;
     }

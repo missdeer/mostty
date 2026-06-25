@@ -163,6 +163,7 @@ cell_size_xy: CellXY,
 // Effective font configuration (defaults if user didn't override). Lifetimes
 // of the [*:0]u16 strings are owned by the caller of `init`.
 font_size_pt: f32,
+font_ligatures: bool = true,
 effective_primary: [*:0]const u16,
 // Per-style primary overrides for bold/italic/bold-italic respectively.
 // null entry == inherit regular primary. Held so updateDpi can rebuild
@@ -249,7 +250,7 @@ pub fn tabBarHeightForDpi(self: *D3d11Renderer, dpi: u32) i32 {
     return font_state.computeTabBarHeight(self.dwrite_factory, dpi, self.effective_tabbar_primary, self.tabbar_font_size_pt, @intCast(cs.cy));
 }
 
-pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
+pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Renderer {
     // Create D3D11 device
     const levels = [_]win32.D3D_FEATURE_LEVEL{.@"11_0"};
     var device: *win32.ID3D11Device = undefined;
@@ -361,6 +362,7 @@ pub fn init(dpi: u32, font_config: FontConfig) D3d11Renderer {
         .cell_size_xy = fmts.cell_size_xy,
         .dpi = dpi,
         .font_size_pt = eff.font_size_pt,
+        .font_ligatures = font_ligatures,
         .effective_primary = eff.primary,
         .effective_style_primaries = eff.style_primaries,
         .effective_style_specs = eff.style_specs,
@@ -887,13 +889,15 @@ pub fn setWorkerHwnd(self: *D3d11Renderer, gpa: std.mem.Allocator, hwnd: win32.H
 // Called by the WM_APP_GLYPH_READY handler. Validates the result against
 // the renderer-level `cache_gen` (covers full cache rebuilds) and the
 // cache's per-slot `gen` (covers in-cache slot reuse) before uploading the
-// BGRA bytes into the atlas slot's pixel rectangle. Returns true iff the
-// upload happened, so the dispatcher knows whether to requestRender. The
-// caller still owns `result` and frees it after we return.
+// BGRA bytes into the atlas slot's pixel rectangle. Failed worker results
+// cancel their pending reservation so the next render can retry. Returns
+// true iff renderer/cache state changed and the dispatcher should request a
+// render. The caller still owns `result` and frees it after we return.
 pub fn applyGlyphResult(self: *D3d11Renderer, result: *RasterResult) bool {
     if (result.cache_gen != self.cache_gen) return false;
     if (self.glyph_cache == null) return false;
     const cache = &self.glyph_cache.?;
+    if (result.failed) return cache.cancelPending(result.slot, result.slot_gen, result.key);
     if (!cache.markReady(result.slot, result.slot_gen, result.key)) return false;
 
     const cs = self.cell_size_xy;

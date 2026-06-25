@@ -26,6 +26,8 @@ const color = @import("color.zig");
 const emoji = @import("emoji.zig");
 const glyph_mod = @import("glyph.zig");
 const com = @import("com.zig");
+const sprite = @import("../sprite.zig");
+const GlyphIndexCache = @import("../GlyphIndexCache.zig");
 
 const shader = gpu.shader;
 const Rgba8 = gpu.Rgba8;
@@ -38,6 +40,19 @@ pub const max_shader_col: u32 = 4096;
 // Only flip in Debug builds: release builds emit zero overhead, but
 // renderer-side diagnostic counters always flush via `maybeLogDiag`.
 const debug_stats_enabled = builtin.mode == .Debug;
+
+const VisualCell = struct {
+    codepoint: u21,
+    grapheme: []const u21,
+    bg: Rgba8,
+    fg: Rgba8,
+    attrs: u32,
+    style_kind: GlyphIndexCache.Style,
+    shape_candidate: bool,
+};
+
+const HighlightRange = struct { sx: u32, ex: u32 };
+const SelRange = struct { sx: usize, ex: usize };
 
 pub const BuildResult = struct {
     // Inclusive [min, max] over `screen_row` indices that produced an
@@ -167,7 +182,6 @@ pub fn buildAndUpload(
         // the URL's start..end span). Multi-row URLs cover full rows in the
         // middle and partial rows at the endpoints. Resolved once per row so
         // the cell loop only does two compares per cell.
-        const HighlightRange = struct { sx: u32, ex: u32 };
         const url_row_range: ?HighlightRange = if (url_highlight) |u| blk_u: {
             if (screen_row < u.start_row or screen_row > u.end_row) break :blk_u null;
             const sx: u32 = if (screen_row == u.start_row) u.start_col else 0;
@@ -178,7 +192,6 @@ pub fn buildAndUpload(
         // Per-row x-range of the selection. `null` when the row is outside
         // the selection entirely. One pointFromPin per row (~60 calls/frame)
         // instead of three per cell.
-        const SelRange = struct { sx: usize, ex: usize };
         const sel_row_range: ?SelRange = if (sel_bounds) |sb| range_blk: {
             const py = screen.pages.pointFromPin(.screen, row_pin).?.screen.y;
             if (py < sb.tl_y or py > sb.br_y) break :range_blk null;
@@ -198,136 +211,120 @@ pub fn buildAndUpload(
         const cursor_fg_rgba = Rgba8.fromU24(cursor_text orelse eff_bg);
 
         var col: u32 = 0;
-        for (page_cells, 0..) |cell, cell_i| {
+        var cell_i: usize = 0;
+        while (cell_i < page_cells.len) {
             if (col >= shader_col) break;
+            const cell = page_cells[cell_i];
             if (cell.wide == .spacer_tail) {
                 // Already written by the .wide cell handler
+                cell_i += 1;
                 continue;
             }
 
-            const raw_cp: u21 = switch (cell.content_tag) {
-                .codepoint, .codepoint_grapheme => cell.content.codepoint,
-                .bg_color_palette, .bg_color_rgb => ' ',
-            };
-            const codepoint: u21 = if (raw_cp == 0) ' ' else raw_cp;
-            const grapheme: []const u21 = if (cell.content_tag == .codepoint_grapheme)
-                page.lookupGrapheme(&page_cells[cell_i]) orelse &.{}
-            else
-                &.{};
-
-            var cell_fg: u24 = eff_fg;
-            var cell_bg: u24 = eff_bg;
-            // Whether this cell shows the default background and should get
-            // the window blur-alpha. Tracked as a flag (not bg-value
-            // equality) so a cell explicitly painted with the theme's bg
-            // color stays opaque, and inverse video stays opaque too.
-            var is_default_bg = true;
-            var bold = false;
-            var italic = false;
-            var faint = false;
-            var invisible = false;
-            var attrs: u32 = 0;
-
-            if (cell.style_id != 0) {
-                const style = page.styles.get(page.memory, cell.style_id).*;
-                cell_fg = color.resolveColor(style.fg_color, palette, eff_fg);
-                cell_bg = color.resolveColor(style.bg_color, palette, eff_bg);
-                bold = style.flags.bold;
-                italic = style.flags.italic;
-                faint = style.flags.faint;
-                invisible = style.flags.invisible;
-                if (style.flags.blink) {
-                    result.has_blink = true;
-                    if (!blink_visible) invisible = true;
-                }
-                attrs |= @as(u32, @intFromEnum(style.flags.underline)) & gpu.cell_attr_underline_mask;
-                if (style.flags.strikethrough) attrs |= gpu.cell_attr_strikethrough;
-                if (style.flags.overline) attrs |= gpu.cell_attr_overline;
-                if (style.flags.inverse) {
-                    const tmp = cell_fg;
-                    cell_fg = cell_bg;
-                    cell_bg = tmp;
-                    is_default_bg = false;
-                } else {
-                    is_default_bg = switch (style.bg_color) {
-                        .none => true,
-                        else => false,
-                    };
-                }
-            }
-
-            switch (cell.content_tag) {
-                .bg_color_palette => {
-                    cell_bg = color.rgbToU24(palette[cell.content.color_palette]);
-                    is_default_bg = false;
-                },
-                .bg_color_rgb => {
-                    const rgb = cell.content.color_rgb;
-                    cell_bg = @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
-                    is_default_bg = false;
-                },
-                else => {},
-            }
-            if (emoji.isColorGlyphRun(codepoint, grapheme)) attrs |= gpu.cell_attr_color_glyph;
-            if (invisible) attrs |= gpu.cell_attr_invisible;
-
-            // Hover-linkified URL: paint a single underline on cells in the
-            // highlight range, but don't override an SGR-set underline.
-            if (url_row_range) |r| {
-                if (col >= r.sx and col <= r.ex and (attrs & gpu.cell_attr_underline_mask) == 0) {
-                    attrs |= 1;
-                }
-            }
-
-            var bg = if (is_default_bg) bg_rgba else Rgba8.fromU24(cell_bg);
-            if (faint) cell_fg = color.dimColor(cell_fg);
-            var fg = if (invisible) bg else Rgba8.fromU24(cell_fg);
-
-            // Highlight selected cells (with fade)
-            if (sel_row_range) |r| {
-                if (col >= r.sx and col <= r.ex) {
-                    const orig_bg = bg;
-                    // Theme selection colors when provided, else invert the
-                    // cell (selection bg := cell fg, selection text := cell bg).
-                    var target_bg = if (selection_bg) |s| Rgba8.fromU24(s) else fg;
-                    target_bg.a = 255;
-                    var target_fg = if (selection_fg) |s| Rgba8.fromU24(s) else orig_bg;
-                    target_fg.a = 255;
-                    bg = color.lerpRgba8(orig_bg, target_bg, selection_fade);
-                    fg = color.lerpRgba8(fg, target_fg, selection_fade);
-                }
-            }
-
-            // Cursor inversion applies to the LOGICAL cell at column `col`.
-            // For wide cells both visual halves inherit this so the cursor
-            // highlight covers the whole glyph.
-            if (cursor_on_row and screen.cursor.x == col) {
-                bg = cursor_bg_rgba;
-                fg = cursor_fg_rgba;
-            }
-
-            const style_kind = self.effective_style[@intFromEnum(glyph_mod.styleFromFlags(bold, italic))];
+            const visual = visualFromCell(
+                self,
+                page,
+                page_cells,
+                cell_i,
+                col,
+                eff_fg,
+                eff_bg,
+                bg_rgba,
+                palette,
+                blink_visible,
+                url_row_range,
+                sel_row_range,
+                selection_bg,
+                selection_fg,
+                selection_fade,
+                cursor_on_row,
+                screen.cursor.x,
+                cursor_bg_rgba,
+                cursor_fg_rgba,
+                &result,
+            );
 
             if (cell.wide == .wide) {
                 // One DirectWrite render for both halves; see generateWidePair.
-                const pair = glyph_mod.generateWidePair(self, glyph_cache, tex_cell_count, codepoint, grapheme, style_kind);
+                const pair = glyph_mod.generateWidePair(self, glyph_cache, tex_cell_count, visual.codepoint, visual.grapheme, visual.style_kind);
                 scratch[col] = .{
                     .glyph_index = pair.left,
-                    .background = bg,
-                    .foreground = fg,
-                    .attrs = attrs,
+                    .background = visual.bg,
+                    .foreground = visual.fg,
+                    .attrs = visual.attrs,
                 };
                 col += 1;
                 if (col < shader_col) {
                     scratch[col] = .{
                         .glyph_index = pair.right,
-                        .background = bg,
-                        .foreground = fg,
-                        .attrs = attrs,
+                        .background = visual.bg,
+                        .foreground = visual.fg,
+                        .attrs = visual.attrs,
                     };
                 }
                 col += 1;
+                cell_i += 1;
                 continue;
+            }
+
+            if (self.font_ligatures and visual.shape_candidate) {
+                var run_text: [glyph_mod.max_ligature_run_cells]u8 = undefined;
+                var run_visuals: [glyph_mod.max_ligature_run_cells]VisualCell = undefined;
+                std.debug.assert(visual.codepoint <= std.math.maxInt(u8));
+                run_text[0] = @intCast(visual.codepoint);
+                run_visuals[0] = visual;
+                var run_len: usize = 1;
+                var j = cell_i + 1;
+                var run_col = col + 1;
+                while (j < page_cells.len and run_col < shader_col and run_len < glyph_mod.max_ligature_run_cells) {
+                    const run_cell = page_cells[j];
+                    if (run_cell.wide != .narrow) break;
+                    const v = visualFromCell(
+                        self,
+                        page,
+                        page_cells,
+                        j,
+                        run_col,
+                        eff_fg,
+                        eff_bg,
+                        bg_rgba,
+                        palette,
+                        blink_visible,
+                        url_row_range,
+                        sel_row_range,
+                        selection_bg,
+                        selection_fg,
+                        selection_fade,
+                        cursor_on_row,
+                        screen.cursor.x,
+                        cursor_bg_rgba,
+                        cursor_fg_rgba,
+                        &result,
+                    );
+                    if (!v.shape_candidate or v.style_kind != visual.style_kind) break;
+                    std.debug.assert(v.codepoint <= std.math.maxInt(u8));
+                    run_text[run_len] = @intCast(v.codepoint);
+                    run_visuals[run_len] = v;
+                    run_len += 1;
+                    j += 1;
+                    run_col += 1;
+                }
+                if (run_len >= 2) {
+                    if (glyph_mod.generateRun(self, glyph_cache, tex_cell_count, run_text[0..run_len], visual.style_kind)) |run| {
+                        var k: usize = 0;
+                        while (k < run_len) : (k += 1) {
+                            scratch[col + @as(u32, @intCast(k))] = .{
+                                .glyph_index = run.glyphs[k],
+                                .background = run_visuals[k].bg,
+                                .foreground = run_visuals[k].fg,
+                                .attrs = run_visuals[k].attrs,
+                            };
+                        }
+                        col += @intCast(run_len);
+                        cell_i += run_len;
+                        continue;
+                    }
+                }
             }
 
             // Space is ink-free, so its atlas slot is identical regardless
@@ -336,17 +333,18 @@ pub fn buildAndUpload(
             // alignment gaps, bg_color_* cells which already normalize to
             // ' ' above). Trailing-blank and empty-row fills are handled by
             // the @memset paths below.
-            const glyph_index = if (codepoint == ' ' and grapheme.len == 0)
+            const glyph_index = if (visual.codepoint == ' ' and visual.grapheme.len == 0)
                 blank_glyph
             else
-                glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, codepoint, grapheme, .single, style_kind);
+                glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, visual.codepoint, visual.grapheme, .single, visual.style_kind);
             scratch[col] = .{
                 .glyph_index = glyph_index,
-                .background = bg,
-                .foreground = fg,
-                .attrs = attrs,
+                .background = visual.bg,
+                .foreground = visual.fg,
+                .attrs = visual.attrs,
             };
             col += 1;
+            cell_i += 1;
         }
         // Fill remaining columns with blanks
         if (col < shader_col) {
@@ -381,6 +379,144 @@ pub fn buildAndUpload(
     }
 
     return result;
+}
+
+fn visualFromCell(
+    self: *D3d11Renderer,
+    page: anytype,
+    page_cells: anytype,
+    cell_i: usize,
+    col: u32,
+    eff_fg: u24,
+    eff_bg: u24,
+    bg_rgba: Rgba8,
+    palette: anytype,
+    blink_visible: bool,
+    url_row_range: ?HighlightRange,
+    sel_row_range: ?SelRange,
+    selection_bg: ?u24,
+    selection_fg: ?u24,
+    selection_fade: f32,
+    cursor_on_row: bool,
+    cursor_x: u32,
+    cursor_bg_rgba: Rgba8,
+    cursor_fg_rgba: Rgba8,
+    result: *BuildResult,
+) VisualCell {
+    const cell = page_cells[cell_i];
+    const raw_cp: u21 = switch (cell.content_tag) {
+        .codepoint, .codepoint_grapheme => cell.content.codepoint,
+        .bg_color_palette, .bg_color_rgb => ' ',
+    };
+    const codepoint: u21 = if (raw_cp == 0) ' ' else raw_cp;
+    const grapheme: []const u21 = if (cell.content_tag == .codepoint_grapheme)
+        page.lookupGrapheme(&page_cells[cell_i]) orelse &.{}
+    else
+        &.{};
+
+    var cell_fg: u24 = eff_fg;
+    var cell_bg: u24 = eff_bg;
+    var is_default_bg = true;
+    var bold = false;
+    var italic = false;
+    var faint = false;
+    var invisible = false;
+    var attrs: u32 = 0;
+
+    if (cell.style_id != 0) {
+        const style = page.styles.get(page.memory, cell.style_id).*;
+        cell_fg = color.resolveColor(style.fg_color, palette, eff_fg);
+        cell_bg = color.resolveColor(style.bg_color, palette, eff_bg);
+        bold = style.flags.bold;
+        italic = style.flags.italic;
+        faint = style.flags.faint;
+        invisible = style.flags.invisible;
+        if (style.flags.blink) {
+            result.has_blink = true;
+            if (!blink_visible) invisible = true;
+        }
+        attrs |= @as(u32, @intFromEnum(style.flags.underline)) & gpu.cell_attr_underline_mask;
+        if (style.flags.strikethrough) attrs |= gpu.cell_attr_strikethrough;
+        if (style.flags.overline) attrs |= gpu.cell_attr_overline;
+        if (style.flags.inverse) {
+            const tmp = cell_fg;
+            cell_fg = cell_bg;
+            cell_bg = tmp;
+            is_default_bg = false;
+        } else {
+            is_default_bg = switch (style.bg_color) {
+                .none => true,
+                else => false,
+            };
+        }
+    }
+
+    switch (cell.content_tag) {
+        .bg_color_palette => {
+            cell_bg = color.rgbToU24(palette[cell.content.color_palette]);
+            is_default_bg = false;
+        },
+        .bg_color_rgb => {
+            const rgb = cell.content.color_rgb;
+            cell_bg = @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
+            is_default_bg = false;
+        },
+        else => {},
+    }
+    if (emoji.isColorGlyphRun(codepoint, grapheme)) attrs |= gpu.cell_attr_color_glyph;
+    if (invisible) attrs |= gpu.cell_attr_invisible;
+
+    if (url_row_range) |r| {
+        if (col >= r.sx and col <= r.ex and (attrs & gpu.cell_attr_underline_mask) == 0) {
+            attrs |= 1;
+        }
+    }
+
+    var bg = if (is_default_bg) bg_rgba else Rgba8.fromU24(cell_bg);
+    if (faint) cell_fg = color.dimColor(cell_fg);
+    var fg = if (invisible) bg else Rgba8.fromU24(cell_fg);
+
+    if (sel_row_range) |r| {
+        if (col >= r.sx and col <= r.ex) {
+            const orig_bg = bg;
+            var target_bg = if (selection_bg) |s| Rgba8.fromU24(s) else fg;
+            target_bg.a = 255;
+            var target_fg = if (selection_fg) |s| Rgba8.fromU24(s) else orig_bg;
+            target_fg.a = 255;
+            bg = color.lerpRgba8(orig_bg, target_bg, selection_fade);
+            fg = color.lerpRgba8(fg, target_fg, selection_fade);
+        }
+    }
+
+    const cursor_hit = cursor_on_row and cursor_x == col;
+    if (cursor_hit) {
+        bg = cursor_bg_rgba;
+        fg = cursor_fg_rgba;
+    }
+
+    const style_kind = self.effective_style[@intFromEnum(glyph_mod.styleFromFlags(bold, italic))];
+    const shape_candidate = !cursor_hit and
+        grapheme.len == 0 and
+        (attrs & (gpu.cell_attr_color_glyph | gpu.cell_attr_invisible)) == 0 and
+        isLigatureTrigger(codepoint) and
+        !sprite.hasCodepoint(codepoint);
+
+    return .{
+        .codepoint = codepoint,
+        .grapheme = grapheme,
+        .bg = bg,
+        .fg = fg,
+        .attrs = attrs,
+        .style_kind = style_kind,
+        .shape_candidate = shape_candidate,
+    };
+}
+
+fn isLigatureTrigger(cp: u21) bool {
+    return switch (cp) {
+        '=', '>', '<', '!', '-', '+', '*', '&', '|', '/', '\\', ':', '?', '.', '#', '%', '^', '~' => true,
+        else => false,
+    };
 }
 
 fn markDirty(result: *BuildResult, row: u32) void {

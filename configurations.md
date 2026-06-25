@@ -30,6 +30,7 @@ file and its parent folder if missing.
 The file is watched live. Saving it re-applies changes without a restart:
 
 - **Font** changes rebuild the renderer and reflow every tab.
+- **Font ligature** changes repaint immediately without resizing tabs.
 - **Theme/color** changes re-baseline every tab's colors (preserving any live
   `OSC 10/11/12/4` color overrides an app set at runtime).
 - **Launchers** are read on demand, so they take effect immediately.
@@ -65,6 +66,25 @@ font-size = 13.5
 ```
 
 Default: `13.0`.
+
+### `font-ligatures`
+
+Whether Mostty shapes common programming-symbol runs such as `=>`, `==`, `!=`,
+`->`, `&&`, and `||` through DirectWrite so fonts with ligature support can
+render them as a joined glyph.
+
+```
+font-ligatures = true
+font-ligatures = false
+```
+
+Default: `true`. Accepted values are `true` / `yes` / `t` / `y`,
+`false` / `no` / `f` / `n`, or a non-negative integer (`0` → off, `>0` → on).
+
+When disabled, symbol runs use the normal per-cell glyph path. This is useful
+with fonts that do not provide programming ligatures, where shaping the run
+would otherwise consume extra atlas slots without changing the visual result.
+Hot-reloads — toggling the key triggers a repaint without resizing tabs.
 
 ### `tabbar-font-family` / `tabbar-font-size`
 
@@ -442,6 +462,7 @@ Only real `key = value` lines are valid — do not add `#` comment lines.
 font-family             = JetBrains Mono, Consolas
 font-family-italic      = Cascadia Code
 font-size               = 13
+font-ligatures          = true
 font-style              = SemiBold
 font-synthetic-style    = no-italic
 font-codepoint-map      = U+1F300-U+1F9FF=Segoe UI Emoji

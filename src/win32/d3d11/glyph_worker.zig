@@ -22,11 +22,22 @@ const log = std.log.scoped(.d3d);
 const CellXY = gpu.CellXY;
 
 const queue_cap: usize = 256;
+pub const max_run_cells: usize = 12;
+
+pub const RunSlot = struct {
+    offset: u8,
+    slot: u32,
+    slot_gen: u32,
+    key: GlyphIndexCache.Key,
+};
 
 pub const RasterJob = struct {
     key: GlyphIndexCache.Key,
     codepoint: u21,
     grapheme: []u21,
+    run_text: []u8 = &.{},
+    run_slots: [max_run_cells]RunSlot = undefined,
+    run_slot_count: u8 = 0,
     is_wide: bool,
     is_color: bool,
     is_ambiguous: bool,
@@ -42,6 +53,7 @@ pub const RasterJob = struct {
         _ = self.text_format.IUnknown.Release();
         _ = self.rendering_params.IUnknown.Release();
         if (self.grapheme.len != 0) gpa.free(self.grapheme);
+        if (self.run_text.len != 0) gpa.free(self.run_text);
         gpa.destroy(self);
     }
 };
@@ -55,6 +67,7 @@ pub const RasterResult = struct {
     w: u32,
     h: u32,
     is_color: bool,
+    failed: bool = false,
 
     pub fn deinit(self: *RasterResult, gpa: std.mem.Allocator) void {
         if (self.bytes.len != 0) gpa.free(self.bytes);
@@ -204,6 +217,25 @@ fn run(self: *Worker) void {
 
     while (true) {
         const job = self.pop() orelse break;
+        if (job.run_text.len != 0) {
+            const hwnd_raw = self.hwnd.load(.acquire);
+            if (hwnd_raw != 0) {
+                rasterRunAndPostResults(
+                    self.gpa,
+                    hwnd_raw,
+                    self.dwrite_factory,
+                    d2d_factory,
+                    wic_factory,
+                    &mask_cached,
+                    job,
+                );
+            }
+            job.destroy(self.gpa);
+            _ = self.pending_count.fetchSub(1, .monotonic);
+            _ = self.total_completed.fetchAdd(1, .monotonic);
+            continue;
+        }
+
         const result = rasterToWicBuffer(
             self.gpa,
             self.dwrite_factory,
@@ -213,23 +245,53 @@ fn run(self: *Worker) void {
             &color_cached,
             job,
         );
+
+        const hwnd_raw = self.hwnd.load(.acquire);
+        if (result) |r| {
+            postRasterResult(self.gpa, hwnd_raw, r);
+        } else {
+            postRasterFailure(self.gpa, hwnd_raw, job.slot, job.slot_gen, job.cache_gen, job.key);
+        }
+
         job.destroy(self.gpa);
         _ = self.pending_count.fetchSub(1, .monotonic);
         _ = self.total_completed.fetchAdd(1, .monotonic);
-
-        if (result) |r| {
-            const hwnd_raw = self.hwnd.load(.acquire);
-            if (hwnd_raw == 0) {
-                r.deinit(self.gpa);
-                continue;
-            }
-            const hwnd: win32.HWND = @ptrFromInt(hwnd_raw);
-            const lparam: win32.LPARAM = @bitCast(@intFromPtr(r));
-            if (win32.PostMessageW(hwnd, types.WM_APP_GLYPH_READY, 0, lparam) == 0) {
-                r.deinit(self.gpa);
-            }
-        }
     }
+}
+
+fn postRasterResult(gpa: std.mem.Allocator, hwnd_raw: usize, result: *RasterResult) void {
+    if (hwnd_raw == 0) {
+        result.deinit(gpa);
+        return;
+    }
+    const hwnd: win32.HWND = @ptrFromInt(hwnd_raw);
+    const lparam: win32.LPARAM = @bitCast(@intFromPtr(result));
+    if (win32.PostMessageW(hwnd, types.WM_APP_GLYPH_READY, 0, lparam) == 0) {
+        result.deinit(gpa);
+    }
+}
+
+fn postRasterFailure(
+    gpa: std.mem.Allocator,
+    hwnd_raw: usize,
+    slot: u32,
+    slot_gen: u32,
+    cache_gen: u32,
+    key: GlyphIndexCache.Key,
+) void {
+    const result = gpa.create(RasterResult) catch com.oom(error.OutOfMemory);
+    result.* = .{
+        .slot = slot,
+        .slot_gen = slot_gen,
+        .cache_gen = cache_gen,
+        .key = key,
+        .bytes = &.{},
+        .w = 0,
+        .h = 0,
+        .is_color = false,
+        .failed = true,
+    };
+    postRasterResult(gpa, hwnd_raw, result);
 }
 
 fn ensureRt(
@@ -410,7 +472,12 @@ fn rasterToWicBuffer(
     }
 
     const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
-        .m11 = 1, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0,
+        .m11 = 1,
+        .m12 = 0,
+        .m21 = 0,
+        .m22 = 1,
+        .dx = 0,
+        .dy = 0,
     } } };
     cached.rt.SetTransform(&identity);
     if (!job.is_color) cached.rt.SetTextRenderingParams(job.rendering_params);
@@ -431,13 +498,21 @@ fn rasterToWicBuffer(
             const cx = target_width / 2.0;
             const cy = cs_y_f / 2.0;
             break :blk .{ .Anonymous = .{ .Anonymous1 = .{
-                .m11 = scale, .m12 = 0, .m21 = 0, .m22 = scale,
+                .m11 = scale,
+                .m12 = 0,
+                .m21 = 0,
+                .m22 = scale,
                 .dx = cx * (1.0 - scale),
                 .dy = cy * (1.0 - scale),
             } } };
         } else if (!job.is_wide) .{
             .Anonymous = .{ .Anonymous1 = .{
-                .m11 = scale, .m12 = 0, .m21 = 0, .m22 = 1, .dx = 0, .dy = 0,
+                .m11 = scale,
+                .m12 = 0,
+                .m21 = 0,
+                .m22 = 1,
+                .dx = 0,
+                .dy = 0,
             } },
         } else blk: {
             var lm: [1]win32.DWRITE_LINE_METRICS = undefined;
@@ -446,7 +521,10 @@ fn rasterToWicBuffer(
             if (lhr < 0) com.fatalHr("GetLineMetrics", lhr);
             const baseline: f32 = if (line_count >= 1) lm[0].baseline else 0;
             break :blk .{ .Anonymous = .{ .Anonymous1 = .{
-                .m11 = scale, .m12 = 0, .m21 = 0, .m22 = scale,
+                .m11 = scale,
+                .m12 = 0,
+                .m21 = 0,
+                .m22 = scale,
                 .dx = 0,
                 .dy = baseline * (1.0 - scale),
             } } };
@@ -515,4 +593,125 @@ fn rasterToWicBuffer(
         .is_color = job.is_color,
     };
     return result;
+}
+
+fn rasterRunAndPostResults(
+    gpa: std.mem.Allocator,
+    hwnd_raw: usize,
+    dwrite_factory: *win32.IDWriteFactory2,
+    d2d_factory: *win32.ID2D1Factory,
+    wic_factory: *win32.IWICImagingFactory,
+    mask_cached: *?CachedRt,
+    job: *RasterJob,
+) void {
+    std.debug.assert(job.run_text.len > 1);
+    std.debug.assert(job.run_text.len <= max_run_cells);
+    std.debug.assert(job.run_slot_count > 0);
+
+    const cs = job.cs;
+    const run_len_u32: u32 = @intCast(job.run_text.len);
+    const target_w: u32 = @as(u32, cs.x) * run_len_u32;
+    const bmp_size: CellXY = .{ .x = @intCast(target_w), .y = cs.y };
+    const cached = ensureRt(mask_cached, d2d_factory, wic_factory, bmp_size, .mask);
+
+    var utf16_stack: [max_run_cells]u16 = undefined;
+    for (job.run_text, 0..) |ch, i| utf16_stack[i] = ch;
+    const utf16_len: u32 = @intCast(job.run_text.len);
+
+    const target_width: f32 = @floatFromInt(target_w);
+    const cs_y_f: f32 = @floatFromInt(cs.y);
+
+    var layout: *win32.IDWriteTextLayout = undefined;
+    {
+        const hr = dwrite_factory.IDWriteFactory.CreateTextLayout(
+            @ptrCast(utf16_stack[0..utf16_len].ptr),
+            utf16_len,
+            job.text_format,
+            target_width,
+            cs_y_f,
+            &layout,
+        );
+        if (hr < 0) com.fatalHr("CreateTextLayout(run worker)", hr);
+    }
+    defer _ = layout.IUnknown.Release();
+
+    const identity: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
+        .m11 = 1,
+        .m12 = 0,
+        .m21 = 0,
+        .m22 = 1,
+        .dx = 0,
+        .dy = 0,
+    } } };
+    cached.rt.SetTransform(&identity);
+    cached.rt.SetTextRenderingParams(job.rendering_params);
+    cached.rt.SetTextAntialiasMode(.CLEARTYPE);
+    cached.rt.BeginDraw();
+    cached.rt.Clear(&.{ .r = 0, .g = 0, .b = 0, .a = 1 });
+    cached.rt.DrawTextLayout(
+        .{ .x = 0, .y = 0 },
+        layout,
+        &cached.brush.ID2D1Brush,
+        win32.D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    );
+    cached.rt.SetTransform(&identity);
+
+    var tag1: u64 = undefined;
+    var tag2: u64 = undefined;
+    const ehr = cached.rt.EndDraw(&tag1, &tag2);
+    if (ehr < 0) com.fatalHr("EndDraw(run worker)", ehr);
+
+    const stride: u32 = @as(u32, cs.x) * 4;
+    const byte_len: usize = @as(usize, stride) * @as(usize, cs.y);
+    for (job.run_slots[0..job.run_slot_count], 0..) |slot, i| {
+        std.debug.assert(slot.offset < job.run_text.len);
+        std.debug.assert((@as(u32, slot.offset) + 1) * @as(u32, cs.x) <= target_w);
+
+        const bytes = gpa.alloc(u8, byte_len) catch {
+            postRunFailures(gpa, hwnd_raw, job, i);
+            return;
+        };
+        errdefer gpa.free(bytes);
+        const rect = win32.WICRect{
+            .X = @intCast(@as(u32, slot.offset) * @as(u32, cs.x)),
+            .Y = 0,
+            .Width = @intCast(cs.x),
+            .Height = @intCast(cs.y),
+        };
+        const chr = cached.bitmap.IWICBitmapSource.CopyPixels(
+            &rect,
+            stride,
+            @intCast(byte_len),
+            @ptrCast(bytes.ptr),
+        );
+        if (chr < 0) {
+            log.warn("WIC CopyPixels failed in run raster worker, hresult=0x{x}", .{@as(u32, @bitCast(chr))});
+            gpa.free(bytes);
+            postRunFailures(gpa, hwnd_raw, job, i);
+            return;
+        }
+
+        const result = gpa.create(RasterResult) catch {
+            gpa.free(bytes);
+            postRunFailures(gpa, hwnd_raw, job, i);
+            return;
+        };
+        result.* = .{
+            .slot = slot.slot,
+            .slot_gen = slot.slot_gen,
+            .cache_gen = job.cache_gen,
+            .key = slot.key,
+            .bytes = bytes,
+            .w = cs.x,
+            .h = cs.y,
+            .is_color = false,
+        };
+        postRasterResult(gpa, hwnd_raw, result);
+    }
+}
+
+fn postRunFailures(gpa: std.mem.Allocator, hwnd_raw: usize, job: *const RasterJob, start: usize) void {
+    for (job.run_slots[start..job.run_slot_count]) |slot| {
+        postRasterFailure(gpa, hwnd_raw, slot.slot, slot.slot_gen, job.cache_gen, slot.key);
+    }
 }

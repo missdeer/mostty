@@ -119,6 +119,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
     // Must be computed before the move below, otherwise global.config == new_cfg.
     const theme_changed = !std.meta.eql(global.config.theme, new_cfg.theme);
     const blur_changed = global.config.background_blur != new_cfg.background_blur;
+    const ligatures_changed = global.config.font_ligatures != new_cfg.font_ligatures;
     const image_changed = !std.mem.eql(u8, global.config.background_image, new_cfg.background_image) or
         global.config.background_image_opacity != new_cfg.background_image_opacity or
         global.config.background_image_position != new_cfg.background_image_position or
@@ -156,6 +157,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
     var old = global.config;
     global.config = new_cfg;
     old.deinit();
+    global.renderer.font_ligatures = global.config.font_ligatures;
 
     // render-interval-*-ms may have changed; re-apply against the current
     // session state. No-op when the effective interval is unchanged.
@@ -211,6 +213,10 @@ fn reloadConfig(hwnd: win32.HWND) void {
 
     if (blur_changed) {
         util.applyBlurBehind(hwnd, global.config.background_blur);
+        if (global.window) |*window| window.requestRender();
+    }
+
+    if (ligatures_changed) {
         if (global.window) |*window| window.requestRender();
     }
 
