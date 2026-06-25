@@ -94,6 +94,7 @@ pub const Window = struct {
     // schedule a follow-up frame.
     render_pending: bool = false,
     render_timer_armed: bool = false,
+    pty_drain_timer_armed: bool = false,
     last_render_tick_ms: u64 = 0,
     render_interval_ms: u32 = 16,
     diag_last_tick_ms: u64 = 0,

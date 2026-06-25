@@ -56,7 +56,9 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         }
     }
     if (wparam == types.TIMER_PTY_DRAIN) {
+        const window = global_mod.windowFromHwnd(hwnd);
         _ = win32.KillTimer(hwnd, types.TIMER_PTY_DRAIN);
+        window.pty_drain_timer_armed = false;
         drainPendingPtyTabs();
     }
     return 0;
@@ -667,15 +669,20 @@ fn schedulePtyDrainContinuation(window: *Window, tab: *Tab) void {
 
     // No tail left from this wake-up. Clear the edge-trigger guard, then
     // re-check for the race where the reader wrote while posted was still true
-    // and therefore did not post its own wake-up.
-    tab.pty_ring.posted.store(false, .release);
+    // and therefore did not post its own wake-up. The clear must be seq_cst:
+    // the following hasData() loads must not move before this store.
+    tab.pty_ring.posted.store(false, .seq_cst);
     if (!tab.pty_ring.hasData()) return;
     if (tab.pty_ring.posted.swap(true, .acq_rel)) return;
     armPtyDrainContinuation(window, tab);
 }
 
 fn armPtyDrainContinuation(window: *Window, tab: *Tab) void {
-    if (win32.SetTimer(window.hwnd, types.TIMER_PTY_DRAIN, PTY_DRAIN_CONTINUATION_MS, null) != 0) return;
+    if (window.pty_drain_timer_armed) return;
+    if (win32.SetTimer(window.hwnd, types.TIMER_PTY_DRAIN, PTY_DRAIN_CONTINUATION_MS, null) != 0) {
+        window.pty_drain_timer_armed = true;
+        return;
+    }
 
     std.log.warn(
         "SetTimer(PTY_DRAIN continuation) failed (tab {}): {f}",
@@ -696,7 +703,12 @@ fn drainPendingPtyTabs() void {
         if (tab.closing) continue;
         if (!tab.pty_ring.posted.load(.acquire)) continue;
         if (!tab.pty_ring.hasData()) {
-            tab.pty_ring.posted.store(false, .release);
+            // Match schedulePtyDrainContinuation: clear, then re-check with a
+            // StoreLoad barrier so a raced reader write cannot be stranded.
+            tab.pty_ring.posted.store(false, .seq_cst);
+            if (!tab.pty_ring.hasData()) continue;
+            if (tab.pty_ring.posted.swap(true, .acq_rel)) continue;
+            armPtyDrainContinuation(window, tab);
             continue;
         }
         drainPtyTab(window, tab, PTY_DRAIN_BACKLOG_BUDGET_US);

@@ -22,21 +22,19 @@ pub fn windowFromHwnd(hwnd: win32.HWND) *state.Window {
 
 pub fn flushMessages() void {
     var msg: win32.MSG = undefined;
-    var last_dispatch_ms: u64 = win32.GetTickCount64();
     while (true) {
         const result = win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE);
         if (result < 0) win32.panicWin32("PeekMessage", win32.GetLastError());
         if (result == 0) break;
         if (msg.message == win32.WM_QUIT) onWmQuit(msg.wParam);
         _ = win32.TranslateMessage(&msg);
+        const dispatch_start_ms = if (diag.isEnabled()) win32.GetTickCount64() else 0;
         _ = win32.DispatchMessageW(&msg);
         if (diag.isEnabled()) {
-            const now = win32.GetTickCount64();
-            const elapsed = now -| last_dispatch_ms;
+            const elapsed = win32.GetTickCount64() -| dispatch_start_ms;
             if (elapsed >= 100) {
                 std.log.info("message dispatch: msg=0x{x} elapsed_ms={}", .{ msg.message, elapsed });
             }
-            last_dispatch_ms = now;
         }
     }
 }
