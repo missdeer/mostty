@@ -247,7 +247,7 @@ fullscreen: bool = false,
 // wire. Effective interval is recomputed on session-change (WTS) events.
 // Validated range 1..1000; out-of-range values fall back to the default.
 render_interval_local_ms: u32 = 16,
-render_interval_remote_ms: u32 = 33,
+render_interval_remote_ms: u32 = 50,
 
 arena: ?std.heap.ArenaAllocator = null,
 
@@ -332,7 +332,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var maximize: bool = false;
     var fullscreen: bool = false;
     var render_interval_local_ms: u32 = 16;
-    var render_interval_remote_ms: u32 = 33;
+    var render_interval_remote_ms: u32 = 50;
     var codepoint_maps: std.ArrayListUnmanaged(CodepointMap) = .empty;
     var launchers: std.ArrayListUnmanaged(Launcher) = .empty;
     var envs: std.ArrayListUnmanaged(EnvEntry) = .empty;
@@ -1391,6 +1391,35 @@ test "parse font-ligatures switch" {
         var cfg = parse(std.testing.allocator, "font-ligatures = garbage\n", "test");
         defer cfg.deinit();
         try std.testing.expect(cfg.font_ligatures);
+    }
+}
+
+test "parse render intervals keep local responsive and remote conservative" {
+    {
+        var cfg = parse(std.testing.allocator, "", "test");
+        defer cfg.deinit();
+        try std.testing.expectEqual(@as(u32, 16), cfg.render_interval_local_ms);
+        try std.testing.expectEqual(@as(u32, 50), cfg.render_interval_remote_ms);
+    }
+    {
+        const src =
+            \\render-interval-local-ms = 20
+            \\render-interval-remote-ms = 250
+        ;
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expectEqual(@as(u32, 20), cfg.render_interval_local_ms);
+        try std.testing.expectEqual(@as(u32, 250), cfg.render_interval_remote_ms);
+    }
+    {
+        const src =
+            \\render-interval-local-ms = 0
+            \\render-interval-remote-ms = 1001
+        ;
+        var cfg = parse(std.testing.allocator, src, "test");
+        defer cfg.deinit();
+        try std.testing.expectEqual(@as(u32, 16), cfg.render_interval_local_ms);
+        try std.testing.expectEqual(@as(u32, 50), cfg.render_interval_remote_ms);
     }
 }
 

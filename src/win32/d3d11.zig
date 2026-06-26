@@ -487,6 +487,7 @@ pub fn render(
     selection_bg: ?u24,
     selection_fg: ?u24,
     background_opacity: f32,
+    remote_session: bool,
     url_highlight: ?types.UrlHighlight,
 ) void {
     const diag_on = diag.isEnabled();
@@ -550,7 +551,7 @@ pub fn render(
 
     // Phase 4: tab-bar band paint + Present + occlusion state + diag.
     const present_t0 = if (diag_on) diag.qpcNow() else 0;
-    paintChromeAndPresent(self, prepared, tabbar);
+    paintChromeAndPresent(self, prepared, tabbar, remote_session);
     const present_us = if (diag_on) diag.qpcUsSince(present_t0) else 0;
     if (diag_on) {
         const total_us = diag.qpcUsSince(t0);
@@ -782,7 +783,7 @@ fn prepareFrame(
     };
 }
 
-fn paintChromeAndPresent(self: *D3d11Renderer, prepared: PreparedFrame, tabbar: types.TabBarDraw) void {
+fn paintChromeAndPresent(self: *D3d11Renderer, prepared: PreparedFrame, tabbar: types.TabBarDraw, remote_session: bool) void {
     // Tab-bar band: paint proportionally into the offscreen band texture,
     // then copy it onto the back buffer's top strip. Mirrors the
     // glyph-staging pattern (D2D EndDraw flushes before the D3D copy reads
@@ -820,18 +821,18 @@ fn paintChromeAndPresent(self: *D3d11Renderer, prepared: PreparedFrame, tabbar: 
     // offloads rasterization to TPP workers without blocking the UI
     // thread, and a sync-interval would just stack with the 16ms cap.
     //
-    // Remote/software (RDP w/o RemoteFX → WARP): Present(1,0). Software
-    // rasterization can't sustain 60fps anyway, so the "halve FPS" concern
-    // from the local path doesn't apply. Critically, the SetTimer cap only
-    // bounds paint frequency; with WARP each frame still costs real CPU on
-    // worker threads, and uncapped producer rate piles up workers (~30%
-    // CPU during spinner animation). Present(1) makes DXGI wait for the
-    // previous frame's workers before returning, naturally back-pressuring
-    // producer rate to actual consumer throughput.
+    // Remote/software (RDP session or RDP w/o RemoteFX -> WARP):
+    // Present(1,0). Software rasterization can't sustain 60fps anyway, so
+    // the "halve FPS" concern from the local path doesn't apply. Critically,
+    // the SetTimer cap only bounds paint frequency; with WARP each frame
+    // still costs real CPU on worker threads, and uncapped producer rate piles
+    // up workers (~30% CPU during spinner animation). On RDP with a hardware
+    // adapter, each frame still pays encode/transport cost, so use the same
+    // back-pressure policy whenever SM_REMOTESESSION is set.
     //
     // OCCLUDED is handled by the cheap early TEST probe in prepareFrame.
     // This final Present always submits the frame.
-    const sync_interval: u32 = if (self.remote_or_software_adapter) 1 else 0;
+    const sync_interval: u32 = if (self.remote_or_software_adapter or remote_session) 1 else 0;
     const hr = prepared.swap_chain.IDXGISwapChain.Present(sync_interval, 0);
     if (hr == DXGI_STATUS_OCCLUDED) {
         self.occluded = true;

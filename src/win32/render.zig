@@ -50,6 +50,7 @@ pub fn renderWindow(window: *Window) void {
         theme.selection_background,
         theme.selection_foreground,
         global.config.background_opacity,
+        window.remote_session,
         url_hl,
     );
 }

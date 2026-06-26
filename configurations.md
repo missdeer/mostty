@@ -401,12 +401,12 @@ not fire one `WM_PAINT` per chunk. Two independent caps are kept because the
   hardware GPU. Default `16` (~60 FPS).
 - `render-interval-remote-ms` — used when Windows reports a remote session
   (`SM_REMOTESESSION`) or the active DXGI adapter is a software renderer
-  (WARP / Microsoft Basic Render Driver). Default `33` (~30 FPS), since every
+  (WARP / Microsoft Basic Render Driver). Default `50` (20 FPS), since every
   frame in an RDP session pays a per-frame encode over the wire.
 
 ```
 render-interval-local-ms  = 16
-render-interval-remote-ms = 33
+render-interval-remote-ms = 50
 ```
 
 Each value is a positive integer in `1..1000`. Out-of-range or non-numeric
@@ -491,7 +491,7 @@ palette                 = 1 = #eb6f92
 background-opacity      = 0.85
 background-blur         = true
 render-interval-local-ms  = 16
-render-interval-remote-ms = 33
+render-interval-remote-ms = 50
 launcher                = PowerShell | powershell.exe
 launcher                = WSL | wsl.exe ~
 env                     = LANG=en_US.UTF-8

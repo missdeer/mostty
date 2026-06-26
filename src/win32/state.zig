@@ -97,6 +97,7 @@ pub const Window = struct {
     pty_drain_timer_armed: bool = false,
     last_render_tick_ms: u64 = 0,
     render_interval_ms: u32 = 16,
+    remote_session: bool = false,
     diag_last_tick_ms: u64 = 0,
     diag_pty_bytes: u64 = 0,
     diag_renders: u64 = 0,
@@ -167,6 +168,7 @@ pub const Window = struct {
         remote_or_software_adapter: bool,
     ) void {
         const remote_session = win32.GetSystemMetrics(win32.SM_REMOTESESSION) != 0;
+        self.remote_session = remote_session;
         const new_interval = if (remote_or_software_adapter or remote_session) remote_ms else local_ms;
         if (new_interval == self.render_interval_ms) return;
         std.log.info(

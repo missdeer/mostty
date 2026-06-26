@@ -594,11 +594,13 @@ shift monospace alignment.
   `computeDest` runs each frame for fit (`none/stretch/contain/cover`) and
   position; the pixel shader composites OVER cell bg with premultiplied
   alpha, so opaque cells properly mask the image (matches Ghostty).
-- **Adapter classification** (`swap_chain.zig:detectAdapter`): inspects
-  vendor id + name to detect WARP / Basic Render / RDP. Hardware adapters
-  use `Present(0, 0)` (async / tearing-allowed); software / remote
-  adapters use `Present(1, 0)` so the producer back-pressures. This same
-  classification drives the render-interval throttle (§7).
+- **Adapter/session classification** (`swap_chain.zig:detectAdapter`,
+  cached `Window.remote_session`): inspects vendor id + name to detect WARP /
+  Basic Render / RDP, and reuses the cached Windows remote-session bit before
+  presenting. Local hardware uses `Present(0, 0)` (async / tearing-allowed);
+  software adapters or active RDP sessions use `Present(1, 0)` so the producer
+  back-pressures. This same classification drives the render-interval
+  throttle (§7).
 
 ---
 
@@ -611,7 +613,9 @@ soft frame cap:
   `(local_ms, remote_ms, remote_or_software_adapter)`. It picks the
   remote cap when either `SM_REMOTESESSION` is set or the boot-time
   adapter probe flagged the GPU as remote/software. Triggered at create,
-  on `WM_WTSSESSION_CHANGE`, and after config reload.
+  on `WM_WTSSESSION_CHANGE`, and after config reload; the same call refreshes
+  `Window.remote_session` for the renderer's Present policy. Defaults are
+  16 ms local and 50 ms remote.
 - `requestRender` sets `render_pending = true` and:
   - If `now - last_render_tick_ms >= render_interval_ms`,
     `InvalidateRect` immediately.
