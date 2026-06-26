@@ -1,0 +1,101 @@
+Font ligature rendering test
+============================
+
+Use this file with a programming font that supports ligatures, such as
+Cascadia Code, Fira Code, JetBrains Mono, Hasklig, Iosevka, or Monaspace.
+
+Each line keeps the raw character sequence visible in the left label, then
+prints the sequence repeatedly so shaping, spacing, and cursor width issues are
+easy to spot.
+
+
+Arrows
+------
+right arrow        ->    -> -> ->    a->b    start -> middle -> end
+long right arrow   -->   --> -->     a-->b   start --> middle --> end
+fat right arrow    =>    => => =>    a=>b    fn x => x + 1
+long fat arrow     ==>   ==> ==>     a==>b   input ==> output
+left arrow         <-    <- <- <-    a<-b    end <- middle <- start
+long left arrow    <--   <-- <--     a<--b   end <-- middle <-- start
+fat left arrow     <=    <= <= <=    a<=b    lower <= value <= upper
+long fat left      <==   <== <==     a<==b   output <== input
+both directions    <->   <-> <->     a<->b   read <-> write
+double compare     <=>   <=> <=>     a<=>b   left <=> right
+
+
+Equality and comparison
+-----------------------
+equal              ==    == == ==    a == b
+triple equal       ===   === ===     a === b
+not equal          !=    != != !=    a != b
+strict not equal   !==   !== !==     a !== b
+slash not equal    =/=   =/= =/=     a =/= b
+less/equal         <=    <= <= <=    a <= b
+greater/equal      >=    >= >= >=    a >= b
+less/greater       <>    <> <> <>    a <> b
+spaces prevent     = =   ! =   < =   > =
+
+
+Logic and nullish operators
+---------------------------
+and                &&    && && &&    ready && visible
+or                 ||    || || ||    cached || fallback
+not                !     ! ! !       !ready
+double not         !!    !! !! !!    !!value
+ternary            ?:    ?: ?: ?:    condition ?: fallback
+nullish            ??    ?? ?? ??    value ?? fallback
+nullish assign     ??=   ??= ??=     value ??= fallback
+optional chain     ?.    ?. ?. ?.    object?.field?.method()
+
+
+Pipes and composition
+---------------------
+pipe forward       |>    |> |> |>    value |> parse |> render
+pipe backward      <|    <| <| <|    render <| parse <| value
+or-pipe right      ||>   ||> ||>     source ||> sink
+or-pipe left       <||   <|| <||     sink <|| source
+bind right         >=>   >=> >=>     parse >=> validate >=> save
+bind left          <=<   <=< <=<     save <=< validate <=< parse
+
+
+Math and punctuation runs
+-------------------------
+plus plus          ++    ++ ++ ++    index++
+minus minus        --    -- -- --    count--
+triple minus       ---   --- ---     section --- break
+star star          **    ** ** **    base ** exp
+triple star        ***   *** ***     strong *** emphasis
+slash slash        //    // // //    path // comment
+triple slash       ///   /// ///     doc /// comment
+block open         /*    /* /* /*    /* block */
+block close        */    */ */ */    /* block */
+ellipsis           ...   ... ...     loading...
+
+
+Colons and assignment
+---------------------
+colon pair         ::    :: :: ::    module::symbol
+triple colon       :::   ::: :::     section:::name
+walrus             :=    := := :=    value := compute()
+definition         ::=   ::= ::=     expr ::= term
+equals colon       =:    =: =: =:    key =: value
+colon equals       :=    := := :=    key := value
+
+
+Cursor width probes
+-------------------
+The brackets should stay aligned when the terminal advances by the original
+character count rather than the rendered glyph width.
+
+[->] [=>] [==] [===] [!=] [!==] [<=] [>=] [<=>] [??] [??=] [?.]
+[a->b] [a=>b] [a==b] [a===b] [a!=b] [a!==b] [a<=b] [a>=b]
+
+
+Mixed code samples
+------------------
+if (a != b && c >= d) return x => y;
+const value = input?.field ?? defaultValue;
+value ??= fallback;
+pipeline = source |> parse |> validate |> render;
+compare = left <=> right;
+rangeOk = min <= current && current <= max;

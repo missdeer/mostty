@@ -1,0 +1,44 @@
+Nerd Font rendering test
+========================
+
+Powerline / separators:
+                        
+
+Prompt/status samples:
+     mostty    D:\Shareware\mostty   main  ✔ 
+     shell   feature/nerdfont   12:34 
+
+Common file/folder icons:
+   folder     open-folder     file     code     archive
+   text       json            js       python   go
+   rust       zig             css      html     config
+   markdown   pdf             excel    word     image
+
+Dev / VCS icons:
+   git        branch          pull-request     git-branch
+   github     github          diff             staged
+   modified   deleted         review           fork
+
+Tools and languages:
+   terminal   console         node             python
+   rust       go              zig              powershell
+   database   db              package          settings
+
+UI/status symbols:
+  ✔ success   ✘ error           warning          info
+   check      close           unknown          alert
+   refresh    download        upload           fast
+   locked     unlocked        search           star
+
+Octicons-style symbols:
+   repo       issue           fork             branch
+   comment    request         eye              milestone
+   package    sparkles        release          rocket
+
+Weather / misc:
+   sun        rain            snow             wind
+   music      video           game             heart
+
+Box and width checks:
+  [][][][][][][][][][][✔][][]
+  |  |  |  |  |  |

@@ -1,0 +1,106 @@
+OpenType ligature and feature probe
+===================================
+
+This file is meant to separate general OpenType shaping from programming-only
+ligatures. A terminal that supports font shaping should preserve cell advance
+while applying any enabled OpenType substitutions from the selected font.
+
+
+Standard Latin ligatures
+------------------------
+fi   fi fi fi        office    file    final    config
+fl   fl fl fl        flow      flag    inflate  reflux
+ffi  ffi ffi ffi     office    affinity efficient
+ffl  ffl ffl ffl     offload   waffle   suffixless
+ff   ff ff ff        staff     cliff    different
+ft   ft ft ft        after     often    soft
+st   st st st        stack     first    last
+ct   ct ct ct        action    vector   strict
+Th   Th Th Th        The       That     Through
+
+
+Broken Latin ligature controls
+------------------------------
+These should usually not become one ligature because the letters are separated.
+
+f i    f l    f f i    f f l    s t    c t    T h
+fi     fl     ffi      ffl      st     ct     Th
+
+
+Programming substitutions
+-------------------------
+These overlap with font-ligatures.txt, but are kept here to catch fonts that
+implement programming forms through OpenType contextual substitutions.
+
+arrows        ->  -->  =>  ==>  <-  <--  <=  <==  <->  <=>
+compare       ==  ===  !=  !==  =/=  <=  >=  <>  <=>  ====
+logic         &&  ||  !!  ?:  ??  ??=  ?.  ?:
+pipes         |>  <|  ||>  <||  >=>  <=<  |->  <-|
+math          ++  --  ---  **  ***  //  ///  /*  */  /**
+colon forms   ::  :::  :=  ::=  =:=  =!=  =:  :==
+dots          ..  ...  ....  .-  .=  .?
+
+
+Context probes
+--------------
+The same token appears in neutral text, code-like text, and bracketed text.
+
+neutral:       a -> b, a => b, a == b, a != b, a <= b, a >= b
+code:          if (a != b && c >= d) return x => y;
+bracketed:     [->] [=>] [==] [===] [!=] [!==] [<=] [>=] [<=>]
+repeated:      ->->->  =>=>=>  ======  !=!=!=  <=<=<=  >=>>=
+
+
+Digits and zero forms
+---------------------
+Some fonts expose slashed/dotted zero or tabular digits through OpenType
+features. This section is for checking whether digits remain aligned.
+
+0123456789
+0000000000
+1111111111
+2222222222
+3333333333
+4444444444
+5555555555
+6666666666
+7777777777
+8888888888
+9999999999
+
+Columns:
+| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+| 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 |
+
+
+Ambiguous glyph forms
+---------------------
+These characters are often affected by stylistic sets or font variants.
+
+0 O o
+1 I l i |
+5 S s
+2 Z z
+6 G g
+8 B b
+a g Q R &
+
+
+ASCII coverage line
+-------------------
+!"#$%&'()*+,-./0123456789:;<=>?
+@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_
+`abcdefghijklmnopqrstuvwxyz{|}~
+
+
+Width and cursor probes
+-----------------------
+The vertical bars should remain in stable columns after shaping.
+
+|fi|fl|ffi|ffl|ff|ft|st|ct|Th|
+|->|=>|==|===|!=|!==|<=|>=|<=>|
+|..|...|....|::|:::|:=|::=|=:|
+
+0123456789 0123456789 0123456789
+.......... .......... ..........
+========== ========== ==========
