@@ -10,21 +10,24 @@ Maximum **3** review→fix rounds. After round 3, stop and report whatever is le
 
 ## Per-round steps
 
-### 1. Collect the diff
+### 1. Determine the review scope (a git command, not the diff content)
 
-Same procedure as `/audit` step 1 — keep the two commands aligned, don't fork the logic:
+The reviewers read the diff **themselves** (step 2) — you do not pull it into the prompt. Here you only decide *which* git command defines the scope, so both reviewers review the same thing:
 
 - `git status` for scope
-- `git diff` + `git diff --cached`, concatenated
-- If both empty → `git diff master...HEAD` and label this as **branch-vs-master**
-- If combined diff > ~50KB: drop generated files (`*.pb.go`, vendored code, lockfiles, large fixtures), drop pure formatting churn. State what was dropped before sending.
+- If the working tree or index has changes → scope command is `git diff HEAD` (covers staged + unstaged in one shot)
+- If the working tree is clean → scope command is `git diff master...HEAD`; label this as **branch-vs-master**
+
+Call the chosen command `<DIFF_CMD>` and substitute it into the message below. No size-trimming needed — the diff never enters the prompt, so generated files / large fixtures cost nothing here.
 
 ### 2. Build the shared review message
 
-The message body for all three reviewers is identical (the prefix line differs per reviewer). Body:
+The message body for all reviewers is identical (the prefix line differs per reviewer). The reviewer fetches the diff itself — do **not** paste the diff into the message. Body:
 
 ```
-Review the following diff from the e-commercial-agent repo. The repo's coding standards are in CLAUDE.md (Go modernize idioms, surgical changes, minimal abstractions). Check for:
+Review the pending diff in this repo. First obtain the diff yourself by running (read-only):
+  <DIFF_CMD>
+Do not ask me to paste it; run the command and review its output. The repo's coding standards are in CLAUDE.md (Go modernize idioms, surgical changes, minimal abstractions). Check for:
   1. Correctness bugs (off-by-one, nil deref, error swallowing, missing context propagation)
   2. Edge cases the change doesn't handle (empty input, partial failure, concurrent access)
   3. Security issues (SQL injection, command injection, secret leakage)
@@ -34,12 +37,11 @@ Review the following diff from the e-commercial-agent repo. The repo's coding st
 You are reviewing; do NOT propose code edits — list findings only, each with file:line and a one-sentence rationale. Classify each as must-fix / should-fix / nit.
 
 Focus instruction from user (may be empty): <ARGS>
-
-Diff follows:
-<DIFF>
 ```
 
 ### 3. Dispatch the two reviewers **in parallel**
+
+Both transports run the reviewer in the repo root (cwd), so `<DIFF_CMD>` resolves there. `git diff` is a read — it's allowed under Codex's `read-only` sandbox and Antigravity's read-only prefix.
 
 Each reviewer gets the same body, prefixed with its own first line:
 
@@ -52,8 +54,8 @@ Each reviewer gets the same body, prefixed with its own first line:
 
 - **If `mcp__ccgo__ask_agents` is in your available-tools list** → single call with both requests in one `requests` array (this is what the parallel-capable wrapper is for).
 - **Else (MCP not installed)** → fall back to raw CLI per `.claude/rules/{codex,antigravity}-usage.md`. Write the two messages to `./tmp/review-{codex,agy}-prompt-$(date +%s).txt`, then launch two Bash calls **in parallel** (single message, two `Bash` tool calls with `run_in_background: true`, `timeout: 1800000`):
-  - Codex: `codex exec -s read-only --skip-git-repo-check --full-auto "$(cat ./tmp/review-codex-prompt-<ts>.txt)"`
-  - Antigravity: `agy-wrapper --dangerously-skip-permissions --timeout 30m -p "$(cat ./tmp/review-agy-prompt-<ts>.txt)"`
+  - Codex: `codex exec -s read-only --skip-git-repo-check --full-auto "$(bat ./tmp/review-codex-prompt-<ts>.txt)"`
+  - Antigravity: `agy-wrapper --dangerously-skip-permissions --timeout 30m -p "$(bat ./tmp/review-agy-prompt-<ts>.txt)"`
   - Poll both with `TaskOutput`. Wait for both to complete before step 4. Delete temp files after.
 - **Never silently skip** a reviewer just because its transport is missing — if one CLI (e.g. `agy-wrapper`) is not on PATH, report this to the user and continue with the remaining one; do not pretend the other reviewer agreed.
 
