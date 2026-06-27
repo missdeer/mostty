@@ -13,13 +13,7 @@ pub const variation_selector_emoji: u21 = 0xFE0F;
 pub const combining_enclosing_keycap: u21 = 0x20E3;
 
 pub fn isColorGlyphRun(first: u21, rest: []const u21) bool {
-    if (hasTextPresentationSelector(rest)) return false;
-    if (shouldForceEmojiFont(first, rest)) return true;
-    if (isColorGlyphCodepoint(first)) return true;
-    for (rest) |cp| {
-        if (isColorGlyphCodepoint(cp)) return true;
-    }
-    return false;
+    return shouldForceEmojiFont(first, rest);
 }
 
 // Unicode `Emoji_Presentation=Yes` codepoints: those that default to color
@@ -79,7 +73,17 @@ fn isColorGlyphCodepoint(cp: u21) bool {
 
 pub fn shouldForceEmojiFont(first: u21, rest: []const u21) bool {
     if (hasTextPresentationSelector(rest)) return false;
-    return hasEmojiPresentationSelector(rest) or isEmojiKeycapRun(first, rest);
+    return hasEmojiPresentationSelector(rest) or
+        isEmojiKeycapRun(first, rest) or
+        hasEmojiPresentationCodepoint(first, rest);
+}
+
+fn hasEmojiPresentationCodepoint(first: u21, rest: []const u21) bool {
+    if (isColorGlyphCodepoint(first)) return true;
+    for (rest) |cp| {
+        if (isColorGlyphCodepoint(cp)) return true;
+    }
+    return false;
 }
 
 fn hasEmojiPresentationSelector(rest: []const u21) bool {
@@ -126,12 +130,16 @@ pub fn encodeUtf16Codepoint(out: []u16, cp: u21) usize {
     return 2;
 }
 
-test "emoji presentation forces emoji font only for explicit emoji runs" {
+test "emoji presentation forces emoji font for explicit and default emoji runs" {
     try std.testing.expect(!shouldForceEmojiFont(0x2600, &[_]u21{}));
     try std.testing.expect(shouldForceEmojiFont(0x2600, &[_]u21{variation_selector_emoji}));
     try std.testing.expect(!shouldForceEmojiFont(0x2600, &[_]u21{variation_selector_text}));
     try std.testing.expect(!shouldForceEmojiFont(0x2665, &[_]u21{}));
     try std.testing.expect(shouldForceEmojiFont(0x2665, &[_]u21{variation_selector_emoji}));
+    try std.testing.expect(shouldForceEmojiFont(0x2705, &[_]u21{}));
+    try std.testing.expect(!shouldForceEmojiFont(0x2714, &[_]u21{}));
+    try std.testing.expect(shouldForceEmojiFont(0x2714, &[_]u21{variation_selector_emoji}));
+    try std.testing.expect(!shouldForceEmojiFont(0x2714, &[_]u21{variation_selector_text}));
 }
 
 test "emoji color detection includes keycaps and respects text presentation" {
@@ -139,4 +147,7 @@ test "emoji color detection includes keycaps and respects text presentation" {
     try std.testing.expect(isColorGlyphRun('#', &[_]u21{combining_enclosing_keycap}));
     try std.testing.expect(!isColorGlyphRun('0', &[_]u21{}));
     try std.testing.expect(!isColorGlyphRun(0x2600, &[_]u21{variation_selector_text}));
+    try std.testing.expect(!isColorGlyphRun(0x2714, &[_]u21{}));
+    try std.testing.expect(isColorGlyphRun(0x2714, &[_]u21{variation_selector_emoji}));
+    try std.testing.expect(!isColorGlyphRun(0x2714, &[_]u21{variation_selector_text}));
 }

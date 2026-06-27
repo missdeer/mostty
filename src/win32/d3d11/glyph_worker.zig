@@ -420,14 +420,6 @@ fn rasterToWicBuffer(
     }
     defer _ = layout.IUnknown.Release();
 
-    if (emoji.shouldForceEmojiFont(job.codepoint, job.grapheme)) {
-        const range = win32.DWRITE_TEXT_RANGE{
-            .startPosition = 0,
-            .length = @intCast(utf16_len),
-        };
-        const hr = layout.SetFontFamilyName(font.emoji_font_family, range);
-        if (hr < 0) com.fatalHr("SetFontFamilyName(emoji)", hr);
-    }
     font.applyFontFeatures(&dwrite_factory.IDWriteFactory, layout, job.font_features, @intCast(utf16_len));
 
     if (job.is_ambiguous) {

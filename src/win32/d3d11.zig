@@ -89,6 +89,8 @@ d2d_factory: *win32.ID2D1Factory,
 // kicks in via the format's weight/style.
 text_formats: [4]*win32.IDWriteTextFormat,
 font_fallbacks: [4]*win32.IDWriteFontFallback,
+emoji_text_format: *win32.IDWriteTextFormat,
+emoji_fallback: *win32.IDWriteFontFallback,
 rendering_params: *win32.IDWriteRenderingParams,
 dpi: u32,
 
@@ -180,6 +182,7 @@ effective_style_specs: [4]FontConfig.StyleSpec,
 // regular atlas slots — no redundant entries for identical pixels.
 effective_style: [4]GlyphIndexCache.Style,
 effective_user_fallbacks: []const [*:0]const u16,
+effective_emoji_families: []const [*:0]const u16,
 effective_codepoint_maps: []const FontConfig.CodepointMapEntry,
 
 // Tab-bar title text format (regular weight only). Built from the tab-bar
@@ -358,6 +361,8 @@ pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Render
         .d2d_factory = d2d_factory,
         .text_formats = fmts.text_formats,
         .font_fallbacks = fmts.font_fallbacks,
+        .emoji_text_format = fmts.emoji_format,
+        .emoji_fallback = fmts.emoji_fallback,
         .rendering_params = rendering_params,
         .cell_size = fmts.cell_size,
         .cell_size_xy = fmts.cell_size_xy,
@@ -370,6 +375,7 @@ pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Render
         .effective_style_specs = eff.style_specs,
         .effective_style = eff.style,
         .effective_user_fallbacks = eff.user_fallbacks,
+        .effective_emoji_families = eff.emoji_families,
         .effective_codepoint_maps = eff.codepoint_maps,
         .tabbar_text_format = fmts.tabbar_format,
         .tabbar_fallback = fmts.tabbar_fallback,
@@ -445,6 +451,13 @@ pub fn deinit(self: *D3d11Renderer) void {
     if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
     _ = self.d2d_factory.IUnknown.Release();
     font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    {
+        var emoji_fmt: font_mod.EmojiFormat = .{
+            .format = self.emoji_text_format,
+            .fallback = self.emoji_fallback,
+        };
+        font_mod.releaseEmojiFormat(&emoji_fmt);
+    }
     {
         var tabbar: font_mod.TabBarFormat = .{ .format = self.tabbar_text_format, .fallback = self.tabbar_fallback, .trimming_sign = self.tabbar_trimming_sign };
         font_mod.releaseTabBarFormat(&tabbar);

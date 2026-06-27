@@ -33,6 +33,8 @@ pub const FontConfig = struct {
     /// First entry becomes the primary family; the rest are inserted at the
     /// front of the fallback chain. Empty -> use built-in defaults.
     families: []const [*:0]const u16 = &.{},
+    /// Ordered color emoji families. Empty -> use built-in emoji default.
+    emoji_families: []const [*:0]const u16 = &.{},
     /// Per-style primary family overrides. `null` -> inherit the regular
     /// primary (single-family-everywhere is the common case). The
     /// per-style fallback chain prepends THIS family in front of the regular
@@ -81,15 +83,13 @@ pub const FontConfig = struct {
 };
 
 // Font configuration (mirrors WezTerm config). Primary family, then ordered
-// fallbacks: CJK -> Nerd Font icons -> Emoji. Missing families on the system
-// are silently skipped by DirectWrite when resolving glyphs.
+// user fallbacks, then system fallback. Color emoji are routed explicitly by
+// emoji.zig when `emoji-font-family` is configured.
 pub const default_primary_font_family: [*:0]const u16 = win32.L("Consolas");
 pub const default_font_size_pt: f32 = 13.0;
 
 pub const emoji_font_family: [*:0]const u16 = win32.L("Segoe UI Emoji");
-const font_fallback_families = [_][*:0]const u16{
-    emoji_font_family,
-};
+const font_fallback_families = [_][*:0]const u16{};
 
 // Hard cap on user-supplied fallback families. Anything beyond is ignored;
 // the chain is already long once you include the hardcoded CJK/icon/emoji
@@ -481,6 +481,11 @@ pub const TextFormatSet = struct {
     fallbacks: [4]*win32.IDWriteFontFallback,
 };
 
+pub const EmojiFormat = struct {
+    format: *win32.IDWriteTextFormat,
+    fallback: *win32.IDWriteFontFallback,
+};
+
 // Builds the four (regular, bold, italic, bold-italic) (text_format,
 // fallback) pairs. Index MUST match GlyphIndexCache.Style ordinals.
 // `style_primaries` carries optional per-style family overrides
@@ -495,6 +500,7 @@ pub fn createTextFormatSet(
     style_primaries: [3]?[*:0]const u16, // bold, italic, bold-italic (indexes 1..3)
     style_specs: [4]FontConfig.StyleSpec,
     user_fallbacks: []const [*:0]const u16,
+    emoji_families: []const [*:0]const u16,
     codepoint_maps: []const FontConfig.CodepointMapEntry,
     font_size_pt_val: f32,
 ) TextFormatSet {
@@ -534,7 +540,7 @@ pub fn createTextFormatSet(
     var formats: [4]*win32.IDWriteTextFormat = undefined;
     var fallbacks: [4]*win32.IDWriteFontFallback = undefined;
     for (slots, 0..) |s, i| {
-        fallbacks[i] = buildFontFallback(factory, regular_primary, s.style_primary, user_fallbacks, codepoint_maps);
+        fallbacks[i] = buildFontFallback(factory, regular_primary, s.style_primary, user_fallbacks, emoji_families, codepoint_maps);
         formats[i] = createTextFormat(&factory.IDWriteFactory, dpi, fallbacks[i], s.primary, font_size_pt_val, s.weight, s.slant, s.stretch);
     }
     return .{ .formats = formats, .fallbacks = fallbacks };
@@ -546,6 +552,23 @@ pub fn releaseTextFormatSet(
 ) void {
     for (formats) |tf| _ = tf.IUnknown.Release();
     for (fallbacks) |fb| _ = fb.IUnknown.Release();
+}
+
+pub fn createEmojiTextFormat(
+    factory: *win32.IDWriteFactory2,
+    dpi: u32,
+    emoji_families: []const [*:0]const u16,
+    font_size_pt_val: f32,
+) EmojiFormat {
+    const primary = firstConfiguredEmojiFamily(emoji_families);
+    const fallback = buildEmojiFontFallback(factory, primary, emoji_families);
+    const format = createTextFormat(&factory.IDWriteFactory, dpi, fallback, primary, font_size_pt_val, .NORMAL, .NORMAL, .NORMAL);
+    return .{ .format = format, .fallback = fallback };
+}
+
+pub fn releaseEmojiFormat(f: *EmojiFormat) void {
+    _ = f.format.IUnknown.Release();
+    _ = f.fallback.IUnknown.Release();
 }
 
 pub const TabBarFormat = struct {
@@ -564,10 +587,11 @@ pub fn createTabBarTextFormat(
     dpi: u32,
     primary: [*:0]const u16,
     user_fallbacks: []const [*:0]const u16,
+    emoji_families: []const [*:0]const u16,
     codepoint_maps: []const FontConfig.CodepointMapEntry,
     font_size_pt_val: f32,
 ) TabBarFormat {
-    const fallback = buildFontFallback(factory, primary, null, user_fallbacks, codepoint_maps);
+    const fallback = buildFontFallback(factory, primary, null, user_fallbacks, emoji_families, codepoint_maps);
     const format = createTextFormat(&factory.IDWriteFactory, dpi, fallback, primary, font_size_pt_val, .NORMAL, .NORMAL, .NORMAL);
     var trimming_sign: ?*win32.IDWriteInlineObject = null;
     {
@@ -639,9 +663,10 @@ pub fn applyFontFeatures(
 //   2. style_primary (when set; e.g. font-family-bold)
 //   3. regular_primary (the global primary family — keeps visual cohesion
 //      when style-family is partial; matches Ghostty's permissive behavior)
-//   4. user_fallbacks (font-family entries 2..N)
-//   5. font_fallback_families (built-in: Emoji)
-//   6. system fallback (CJK, etc.)
+//   4. user_fallbacks (font-family entries 2..N), except families also listed
+//      in emoji-font-family
+//   5. font_fallback_families (currently empty; emoji is forced per run)
+//   6. system fallback (CJK, symbols, etc.)
 //
 // `style_primary == null` means "this style inherits the regular primary",
 // and step 2 is skipped — step 3 alone provides it.
@@ -650,6 +675,7 @@ fn buildFontFallback(
     regular_primary: [*:0]const u16,
     style_primary: ?[*:0]const u16,
     user_fallbacks: []const [*:0]const u16,
+    emoji_families: []const [*:0]const u16,
     codepoint_maps: []const FontConfig.CodepointMapEntry,
 ) *win32.IDWriteFontFallback {
     var builder: *win32.IDWriteFontFallbackBuilder = undefined;
@@ -707,16 +733,25 @@ fn buildFontFallback(
     family_ptrs[n] = @ptrCast(regular_primary);
     n += 1;
 
-    const user_n = @min(user_fallbacks.len, max_user_fallbacks);
-    if (user_fallbacks.len > max_user_fallbacks) {
+    var user_eligible_count: usize = 0;
+    for (user_fallbacks) |family| {
+        if (isConfiguredEmojiFamily(emoji_families, family)) continue;
+        user_eligible_count += 1;
+    }
+    if (user_eligible_count > max_user_fallbacks) {
         std.log.warn("config: dropping {d} extra font-family fallback(s) past cap {d}", .{
-            user_fallbacks.len - max_user_fallbacks,
+            user_eligible_count - max_user_fallbacks,
             max_user_fallbacks,
         });
     }
-    for (user_fallbacks[0..user_n]) |family| {
+
+    var user_kept: usize = 0;
+    for (user_fallbacks) |family| {
+        if (user_kept >= max_user_fallbacks) break;
+        if (isConfiguredEmojiFamily(emoji_families, family)) continue;
         family_ptrs[n] = @ptrCast(family);
         n += 1;
+        user_kept += 1;
     }
     for (font_fallback_families) |family| {
         family_ptrs[n] = @ptrCast(family);
@@ -753,4 +788,98 @@ fn buildFontFallback(
         if (hr < 0) com.fatalHr("CreateFontFallback", hr);
     }
     return fallback;
+}
+
+fn firstConfiguredEmojiFamily(emoji_families: []const [*:0]const u16) [*:0]const u16 {
+    if (emoji_families.len > 0) return emoji_families[0];
+    return emoji_font_family;
+}
+
+fn isConfiguredEmojiFamily(
+    emoji_families: []const [*:0]const u16,
+    family: [*:0]const u16,
+) bool {
+    const name = std.mem.span(family);
+    for (emoji_families) |emoji_family| {
+        if (utf16EqlIgnoreAsciiCase(std.mem.span(emoji_family), name)) return true;
+    }
+    return false;
+}
+
+fn buildEmojiFontFallback(
+    factory: *win32.IDWriteFactory2,
+    primary: [*:0]const u16,
+    emoji_families: []const [*:0]const u16,
+) *win32.IDWriteFontFallback {
+    var builder: *win32.IDWriteFontFallbackBuilder = undefined;
+    {
+        const hr = factory.CreateFontFallbackBuilder(&builder);
+        if (hr < 0) com.fatalHr("CreateFontFallbackBuilder(emoji)", hr);
+    }
+    defer _ = builder.IUnknown.Release();
+
+    var family_ptrs: [max_user_fallbacks + 1]?*const u16 = undefined;
+    var n: usize = 0;
+    appendUniqueFamily(&family_ptrs, &n, primary);
+    for (emoji_families) |family| {
+        if (n >= family_ptrs.len) break;
+        appendUniqueFamily(&family_ptrs, &n, family);
+    }
+    appendUniqueFamily(&family_ptrs, &n, emoji_font_family);
+
+    const full_range = win32.DWRITE_UNICODE_RANGE{ .first = 0, .last = 0x10FFFF };
+    {
+        const hr = builder.AddMapping(
+            @ptrCast(&full_range),
+            1,
+            &family_ptrs,
+            @intCast(n),
+            null,
+            null,
+            null,
+            1.0,
+        );
+        if (hr < 0) com.fatalHr("AddMapping(emoji)", hr);
+    }
+
+    {
+        var system_fallback: *win32.IDWriteFontFallback = undefined;
+        const hr = factory.GetSystemFontFallback(&system_fallback);
+        if (hr < 0) com.fatalHr("GetSystemFontFallback(emoji)", hr);
+        defer _ = system_fallback.IUnknown.Release();
+        const ahr = builder.AddMappings(system_fallback);
+        if (ahr < 0) com.fatalHr("AddMappings(emoji)", ahr);
+    }
+
+    var fallback: *win32.IDWriteFontFallback = undefined;
+    {
+        const hr = builder.CreateFontFallback(&fallback);
+        if (hr < 0) com.fatalHr("CreateFontFallback(emoji)", hr);
+    }
+    return fallback;
+}
+
+fn appendUniqueFamily(
+    out: []?*const u16,
+    n: *usize,
+    family: [*:0]const u16,
+) void {
+    const name = std.mem.span(family);
+    for (out[0..n.*]) |existing_ptr| {
+        const existing: [*:0]const u16 = @ptrCast(existing_ptr.?);
+        if (utf16EqlIgnoreAsciiCase(std.mem.span(existing), name)) return;
+    }
+    if (n.* >= out.len) return;
+    out[n.*] = @ptrCast(family);
+    n.* += 1;
+}
+
+test "explicit emoji families drive emoji selection and text filtering" {
+    const emoji_families = [_][*:0]const u16{
+        win32.L("Custom Color Emoji"),
+    };
+    try std.testing.expectEqual(emoji_families[0], firstConfiguredEmojiFamily(&emoji_families));
+    try std.testing.expectEqual(emoji_font_family, firstConfiguredEmojiFamily(&.{}));
+    try std.testing.expect(isConfiguredEmojiFamily(&emoji_families, win32.L("custom color emoji")));
+    try std.testing.expect(!isConfiguredEmojiFamily(&emoji_families, win32.L("Noto Color Emoji")));
 }

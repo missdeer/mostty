@@ -24,6 +24,7 @@ const FontConfig = font_mod.FontConfig;
 pub const Effective = struct {
     primary: [*:0]const u16,
     user_fallbacks: []const [*:0]const u16,
+    emoji_families: []const [*:0]const u16,
     font_size_pt: f32,
     font_features: []const FontConfig.FontFeature,
     style_primaries: [3]?[*:0]const u16,
@@ -37,6 +38,8 @@ pub const Effective = struct {
 pub const BuiltFormats = struct {
     text_formats: [4]*win32.IDWriteTextFormat,
     font_fallbacks: [4]*win32.IDWriteFontFallback,
+    emoji_format: *win32.IDWriteTextFormat,
+    emoji_fallback: *win32.IDWriteFontFallback,
     tabbar_format: *win32.IDWriteTextFormat,
     tabbar_fallback: *win32.IDWriteFontFallback,
     tabbar_trimming_sign: ?*win32.IDWriteInlineObject,
@@ -83,6 +86,7 @@ pub fn deriveFromConfig(
     return .{
         .primary = primary,
         .user_fallbacks = user_fallbacks,
+        .emoji_families = font_config.emoji_families,
         .font_size_pt = font_size_pt,
         .font_features = font_config.font_features,
         .style_primaries = style_primaries,
@@ -101,6 +105,7 @@ pub fn snapshotFromRenderer(self: *D3d11Renderer) Effective {
     return .{
         .primary = self.effective_primary,
         .user_fallbacks = self.effective_user_fallbacks,
+        .emoji_families = self.effective_emoji_families,
         .font_size_pt = self.font_size_pt,
         .font_features = self.font_features,
         .style_primaries = self.effective_style_primaries,
@@ -127,6 +132,7 @@ pub fn buildFormats(
         eff.style_primaries,
         eff.style_specs,
         eff.user_fallbacks,
+        eff.emoji_families,
         eff.codepoint_maps,
         eff.font_size_pt,
     );
@@ -147,8 +153,15 @@ pub fn buildFormats(
         dpi,
         eff.tabbar_primary,
         eff.user_fallbacks,
+        eff.emoji_families,
         eff.codepoint_maps,
         eff.tabbar_font_size_pt,
+    );
+    const emoji = font_mod.createEmojiTextFormat(
+        dwrite_factory,
+        dpi,
+        eff.emoji_families,
+        eff.font_size_pt,
     );
     const tab_bar_h = computeTabBarHeight(
         dwrite_factory,
@@ -161,6 +174,8 @@ pub fn buildFormats(
     return .{
         .text_formats = set.formats,
         .font_fallbacks = set.fallbacks,
+        .emoji_format = emoji.format,
+        .emoji_fallback = emoji.fallback,
         .tabbar_format = tabbar.format,
         .tabbar_fallback = tabbar.fallback,
         .tabbar_trimming_sign = tabbar.trimming_sign,
@@ -180,6 +195,13 @@ pub fn buildFormats(
 // the same sequence; the only difference is where `eff` comes from.
 pub fn rebuildAndAssign(self: *D3d11Renderer, dpi: u32, eff: Effective) void {
     font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
+    {
+        var old_emoji: font_mod.EmojiFormat = .{
+            .format = self.emoji_text_format,
+            .fallback = self.emoji_fallback,
+        };
+        font_mod.releaseEmojiFormat(&old_emoji);
+    }
     var old_tabbar: font_mod.TabBarFormat = .{
         .format = self.tabbar_text_format,
         .fallback = self.tabbar_fallback,
@@ -191,6 +213,8 @@ pub fn rebuildAndAssign(self: *D3d11Renderer, dpi: u32, eff: Effective) void {
 
     self.text_formats = fmts.text_formats;
     self.font_fallbacks = fmts.font_fallbacks;
+    self.emoji_text_format = fmts.emoji_format;
+    self.emoji_fallback = fmts.emoji_fallback;
     self.tabbar_text_format = fmts.tabbar_format;
     self.tabbar_fallback = fmts.tabbar_fallback;
     self.tabbar_trimming_sign = fmts.tabbar_trimming_sign;
@@ -206,6 +230,7 @@ pub fn rebuildAndAssign(self: *D3d11Renderer, dpi: u32, eff: Effective) void {
     self.effective_style_specs = eff.style_specs;
     self.effective_style = eff.style;
     self.effective_user_fallbacks = eff.user_fallbacks;
+    self.effective_emoji_families = eff.emoji_families;
     self.effective_codepoint_maps = eff.codepoint_maps;
     self.effective_tabbar_primary = eff.tabbar_primary;
     self.tabbar_font_size_pt = eff.tabbar_font_size_pt;

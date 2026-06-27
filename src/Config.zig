@@ -172,6 +172,8 @@ fn rebaseDynamicRGB(c: *vt.color.DynamicRGB, new_default: ?vt.color.RGB) void {
 }
 
 font_families: []const []const u8 = &.{},
+// Emoji/color-symbol fallback families. Empty -> renderer default.
+emoji_font_families: []const []const u8 = &.{},
 // Per-style primary family overrides. Empty -> inherit the regular family
 // (one of font_families or the renderer's built-in default). Each is a single
 // family name, not a fallback list — fallback comes from font_families.
@@ -309,6 +311,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     const a = arena.allocator();
 
     var families: std.ArrayListUnmanaged([]const u8) = .empty;
+    var emoji_families: std.ArrayListUnmanaged([]const u8) = .empty;
     var family_bold: []const u8 = &.{};
     var family_italic: []const u8 = &.{};
     var family_bold_italic: []const u8 = &.{};
@@ -399,6 +402,14 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 if (name.len == 0) continue;
                 const owned = a.dupe(u8, name) catch oom();
                 families.append(a, owned) catch oom();
+            }
+        } else if (std.mem.eql(u8, key, "emoji-font-family")) {
+            var vit = std.mem.splitScalar(u8, value, ',');
+            while (vit.next()) |v| {
+                const name = std.mem.trim(u8, v, " \t");
+                if (name.len == 0) continue;
+                const owned = a.dupe(u8, name) catch oom();
+                emoji_families.append(a, owned) catch oom();
             }
         } else if (std.mem.eql(u8, key, "font-family-bold")) {
             family_bold = a.dupe(u8, value) catch oom();
@@ -547,12 +558,14 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     }
 
     const families_slice = families.toOwnedSlice(a) catch oom();
+    const emoji_families_slice = emoji_families.toOwnedSlice(a) catch oom();
     const font_features_slice = font_features.toOwnedSlice(a) catch oom();
     const codepoint_maps_slice = codepoint_maps.toOwnedSlice(a) catch oom();
     const launchers_slice = launchers.toOwnedSlice(a) catch oom();
     const envs_slice = envs.toOwnedSlice(a) catch oom();
     return .{
         .font_families = families_slice,
+        .emoji_font_families = emoji_families_slice,
         .font_family_bold = family_bold,
         .font_family_italic = family_italic,
         .font_family_bold_italic = family_bold_italic,
@@ -1392,6 +1405,25 @@ test "parse font-ligatures switch" {
         defer cfg.deinit();
         try std.testing.expect(cfg.font_ligatures);
     }
+}
+
+test "parse emoji-font-family list and repeated lines" {
+    const src =
+        \\font-family = Cascadia Mono, Noto Color Emoji
+        \\emoji-font-family = Noto Color Emoji, Segoe UI Emoji
+        \\emoji-font-family = Custom Color Emoji
+    ;
+    var cfg = parse(std.testing.allocator, src, "test");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), cfg.font_families.len);
+    try std.testing.expectEqualStrings("Cascadia Mono", cfg.font_families[0]);
+    try std.testing.expectEqualStrings("Noto Color Emoji", cfg.font_families[1]);
+
+    try std.testing.expectEqual(@as(usize, 3), cfg.emoji_font_families.len);
+    try std.testing.expectEqualStrings("Noto Color Emoji", cfg.emoji_font_families[0]);
+    try std.testing.expectEqualStrings("Segoe UI Emoji", cfg.emoji_font_families[1]);
+    try std.testing.expectEqualStrings("Custom Color Emoji", cfg.emoji_font_families[2]);
 }
 
 test "parse render intervals keep local responsive and remote conservative" {

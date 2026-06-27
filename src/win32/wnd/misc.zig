@@ -130,10 +130,12 @@ fn reloadConfig(hwnd: win32.HWND) void {
         // pointers into it until updateFont republishes. New list lives for
         // the renderer's lifetime, same leak-by-design as startup.
         const families = util.utf16FontFamilies(gpa, new_cfg.font_families);
+        const emoji_families = util.utf16FontFamilies(gpa, new_cfg.emoji_font_families);
         const codepoint_maps = util.utf16CodepointMaps(gpa, new_cfg.font_codepoint_maps);
         const font_features = util.dwriteFontFeatures(gpa, new_cfg.font_features);
         global.renderer.updateFont(.{
             .families = families,
+            .emoji_families = emoji_families,
             .family_bold = util.utf16FamilyOptional(gpa, new_cfg.font_family_bold),
             .family_italic = util.utf16FamilyOptional(gpa, new_cfg.font_family_italic),
             .family_bold_italic = util.utf16FamilyOptional(gpa, new_cfg.font_family_bold_italic),
@@ -239,10 +241,8 @@ fn fontConfigEql(a: *const Config, b: *const Config) bool {
     if (!optF32Eql(a.font_size_pt, b.font_size_pt)) return false;
     if (!optF32Eql(a.tabbar_font_size_pt, b.tabbar_font_size_pt)) return false;
     if (!std.mem.eql(u8, a.tabbar_font_family, b.tabbar_font_family)) return false;
-    if (a.font_families.len != b.font_families.len) return false;
-    for (a.font_families, b.font_families) |x, y| {
-        if (!std.mem.eql(u8, x, y)) return false;
-    }
+    if (!stringListEql(a.font_families, b.font_families)) return false;
+    if (!stringListEql(a.emoji_font_families, b.emoji_font_families)) return false;
     if (!std.mem.eql(u8, a.font_family_bold, b.font_family_bold)) return false;
     if (!std.mem.eql(u8, a.font_family_italic, b.font_family_italic)) return false;
     if (!std.mem.eql(u8, a.font_family_bold_italic, b.font_family_bold_italic)) return false;
@@ -261,6 +261,14 @@ fn fontConfigEql(a: *const Config, b: *const Config) bool {
         if (x.range_start != y.range_start) return false;
         if (x.range_end != y.range_end) return false;
         if (!std.mem.eql(u8, x.family, y.family)) return false;
+    }
+    return true;
+}
+
+fn stringListEql(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (!std.mem.eql(u8, x, y)) return false;
     }
     return true;
 }

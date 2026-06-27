@@ -93,10 +93,12 @@ pub fn main() !void {
     global.config = Config.loadDefault(global.gpa.allocator());
     const gpa_alloc = global.gpa.allocator();
     const font_families_u16 = util.utf16FontFamilies(gpa_alloc, global.config.font_families);
+    const emoji_families_u16 = util.utf16FontFamilies(gpa_alloc, global.config.emoji_font_families);
     const codepoint_maps_u16 = util.utf16CodepointMaps(gpa_alloc, global.config.font_codepoint_maps);
     const font_features = util.dwriteFontFeatures(gpa_alloc, global.config.font_features);
     const font_config: d3d11.FontConfig = .{
         .families = font_families_u16,
+        .emoji_families = emoji_families_u16,
         .family_bold = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_bold),
         .family_italic = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_italic),
         .family_bold_italic = util.utf16FamilyOptional(gpa_alloc, global.config.font_family_bold_italic),

@@ -204,7 +204,11 @@ fn submitRasterJob(
         return false;
     };
     const text_format = self.text_formats[@intFromEnum(style)];
-    _ = text_format.IUnknown.AddRef();
+    const layout_format = if (emoji.shouldForceEmojiFont(codepoint, grapheme))
+        self.emoji_text_format
+    else
+        text_format;
+    _ = layout_format.IUnknown.AddRef();
     _ = self.rendering_params.IUnknown.AddRef();
     job.* = .{
         .key = key,
@@ -219,7 +223,7 @@ fn submitRasterJob(
         .slot_gen = slot_gen,
         .cache_gen = self.cache_gen,
         .cs = self.cell_size_xy,
-        .text_format = text_format,
+        .text_format = layout_format,
         .rendering_params = self.rendering_params,
         .font_features = features_dup,
     };
@@ -544,7 +548,10 @@ fn renderGlyphToStaging(
     // Style index picks bold / italic / bold-italic text formats; these
     // share the regular family today and differ only by synthetic
     // weight/oblique applied by DirectWrite.
-    const text_format = self.text_formats[@intFromEnum(style)];
+    const text_format = if (emoji.shouldForceEmojiFont(codepoint, grapheme))
+        self.emoji_text_format
+    else
+        self.text_formats[@intFromEnum(style)];
     var layout: *win32.IDWriteTextLayout = undefined;
     {
         const hr = self.dwrite_factory.IDWriteFactory.CreateTextLayout(
@@ -559,14 +566,6 @@ fn renderGlyphToStaging(
     }
     defer _ = layout.IUnknown.Release();
 
-    if (emoji.shouldForceEmojiFont(codepoint, grapheme)) {
-        const range = win32.DWRITE_TEXT_RANGE{
-            .startPosition = 0,
-            .length = @intCast(utf16_len),
-        };
-        const hr = layout.SetFontFamilyName(font.emoji_font_family, range);
-        if (hr < 0) com.fatalHr("SetFontFamilyName(emoji)", hr);
-    }
     font.applyFontFeatures(&self.dwrite_factory.IDWriteFactory, layout, self.font_features, @intCast(utf16_len));
 
     // For ambiguous symbols, center the glyph in its single cell so the

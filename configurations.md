@@ -57,6 +57,20 @@ font-family = JetBrains Mono, Consolas
 
 Default: `Consolas`.
 
+### `emoji-font-family`
+
+Comma-separated list of color emoji font family names. May be repeated; all
+entries accumulate into the emoji fallback chain. Emoji runs use this list
+instead of the normal text fallback chain.
+
+```
+emoji-font-family = Noto Color Emoji, Segoe UI Emoji
+```
+
+Default: unset, which uses Mostty's built-in emoji default. Prefer this
+explicit key for color emoji fonts and keep `font-family` for text, CJK, icon,
+and symbol fonts.
+
 ### `font-size`
 
 Font size in points. Must be a positive number.
@@ -479,12 +493,12 @@ Only real `key = value` lines are valid — do not add `#` comment lines.
 
 ```
 font-family             = JetBrains Mono, Consolas
+emoji-font-family       = Noto Color Emoji, Segoe UI Emoji
 font-family-italic      = Cascadia Code
 font-size               = 13
 font-ligatures          = true
 font-style              = SemiBold
 font-synthetic-style    = no-italic
-font-codepoint-map      = U+1F300-U+1F9FF=Segoe UI Emoji
 theme                   = light:Rose Pine Dawn, dark:Rose Pine
 background              = #191724
 palette                 = 1 = #eb6f92

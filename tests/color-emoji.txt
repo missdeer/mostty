@@ -1,0 +1,56 @@
+Color emoji rendering test
+==========================
+
+Use this file to check that text-presentation symbols and color emoji route to
+different font fallback paths. In particular, the plain check mark below should
+render as a normal text glyph, while emoji-presentation runs should render as
+color glyphs.
+
+
+Check marks and presentation selectors
+--------------------------------------
+plain text check mark:       ✔  ✔ ✔ ✔
+emoji check mark:            ✔️  ✔️ ✔️ ✔️
+text selector check mark:    ✔︎  ✔︎ ✔︎ ✔︎
+
+default emoji check button:  ✅  ✅ ✅ ✅
+cross mark emoji:            ❌  ❌ ❌ ❌
+negative squared cross:      ❎  ❎ ❎ ❎
+
+
+Default text symbols that should not become color emoji
+------------------------------------------------------
+heart text default:          ♥  ♥ ♥ ♥
+sun text default:            ☀  ☀ ☀ ☀
+phone text default:          ☎  ☎ ☎ ☎
+spade text default:          ♠  ♠ ♠ ♠
+
+emoji selector variants:     ♥️  ☀️  ☎️  ♠️
+text selector variants:      ♥︎  ☀︎  ☎︎  ♠︎
+
+
+Default color emoji
+-------------------
+faces:                      😀 😃 😄 😁 😆 😅 😂 🙂
+objects:                    🚀 💡 🔥 ✨ 🎉 📦 🧪 🛠️
+weather:                    ☔ ☕ ⚡ ⚽ ⭐ ⛅ 🌈 ❄️
+shapes:                     🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪
+
+
+Emoji sequences
+---------------
+keycaps:                    0️⃣ 1️⃣ 2️⃣ 3️⃣ #️⃣ *️⃣
+skin tone:                  👍 👍🏻 👍🏼 👍🏽 👍🏾 👍🏿
+zwj family:                 👨‍👩‍👧‍👦  👩‍💻  🧑‍🔧  🧑‍🚀
+flags:                      🇺🇸 🇨🇳 🇯🇵 🇪🇺 🇬🇧
+
+
+Width and alignment probes
+--------------------------
+The bars should stay aligned around single-cell text symbols and wide emoji.
+
+|✔|✔️|✅|❌|♥|♥️|😀|🚀|
+|A|B |C |D |E|F |G |H |
+
+[✔][✔️][✅][❌][♥][♥️][😀][🚀]
+012345678901234567890123456789
