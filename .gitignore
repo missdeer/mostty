@@ -1,3 +1,9 @@
 .zig-cache/
 zig-out/
+zig-pkg/
+settings.local.json
+build*.bat
 .ace-tool/
+tmp/
+install.cmd
+Thumbs.db
