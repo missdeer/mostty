@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash 'D:\\Shareware\\mostty\\.codex\\hooks\\legacy-cli-pretool.sh'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
