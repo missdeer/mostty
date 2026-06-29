@@ -6,7 +6,7 @@ Heavyweight quality gate. Runs Codex + Antigravity in parallel on the pending di
 
 ## Iteration budget
 
-Maximum **3** review→fix rounds. After round 3, stop and report whatever is left to the user — do not loop forever.
+Infinite review→fix rounds until no new issue is found.
 
 ## Per-round steps
 
@@ -39,7 +39,7 @@ You are reviewing; do NOT propose code edits — list findings only, each with f
 Focus instruction from user (may be empty): <ARGS>
 ```
 
-### 3. Dispatch the two reviewers **in parallel**
+### 3. Dispatch the reviewers **in parallel**
 
 Both transports run the reviewer in the repo root (cwd), so `<DIFF_CMD>` resolves there. `git diff` is a read — it's allowed under Codex's `read-only` sandbox and Antigravity's read-only prefix.
 
@@ -50,13 +50,12 @@ Each reviewer gets the same body, prefixed with its own first line:
 | Codex | `Execute directly without asking for confirmation. Do not repeat or echo the request back.` | Deep technical, edge cases, line-level correctness |
 | Antigravity | `Do NOT run any git write commands (commit, push, reset, etc.). Git repository is read-only for you. Do NOT modify any files. Read-only operations only — provide findings as text/diff in your response.` | High-level architecture, design coherence, alternative angles |
 
-**Transport — detect, don't blend:**
+**Transport:**
 
-- **If `mcp__ccgo__ask_agents` is in your available-tools list** → single call with both requests in one `requests` array (this is what the parallel-capable wrapper is for).
-- **Else (MCP not installed)** → fall back to raw CLI per `.claude/rules/{codex,antigravity}-usage.md`. Write the two messages to `./tmp/review-{codex,agy}-prompt-$(date +%s).txt`, then launch two Bash calls **in parallel** (single message, two `Bash` tool calls with `run_in_background: true`, `timeout: 1800000`):
-  - Codex: `codex exec -s read-only --skip-git-repo-check --full-auto "$(bat ./tmp/review-codex-prompt-<ts>.txt)"`
+- Raw CLI per `.claude/rules/{codex,antigravity}-usage.md`. Write the two messages to `./tmp/review-{codex,agy}-prompt-$(date +%s).txt`, then launch two Bash calls **in parallel** (single message, two `Bash` tool calls with `run_in_background: true`, `timeout: 1800000`):
+  - Codex: `codex exec -s read-only --skip-git-repo-check "$(bat ./tmp/review-codex-prompt-<ts>.txt)"`
   - Antigravity: `agy-wrapper --dangerously-skip-permissions --timeout 30m -p "$(bat ./tmp/review-agy-prompt-<ts>.txt)"`
-  - Poll both with `TaskOutput`. Wait for both to complete before step 4. Delete temp files after.
+  - Poll all with `TaskOutput`. Wait for all to complete before step 4. Delete temp files after.
 - **Never silently skip** a reviewer just because its transport is missing — if one CLI (e.g. `agy-wrapper`) is not on PATH, report this to the user and continue with the remaining one; do not pretend the other reviewer agreed.
 
 ### 4. Aggregate findings
