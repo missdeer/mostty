@@ -446,7 +446,14 @@ The `d3d11` struct owns:
   textures (mask for ClearType, color for emoji),
 - swap chain (created on first frame via DirectComposition: an
   `IDXGISwapChain1` cast to `IDXGISwapChain2`, bound to a DComposition
-  visual and pushed to the HWND),
+  visual and pushed to the HWND). `BufferCount = 3` so a third back
+  buffer absorbs DWM composition jitter during window drag/resize —
+  the 2-buffer FLIP configuration stalled the CPU producer when DWM's
+  hold on a presented buffer spiked. `SetMaximumFrameLatency(1)` caps
+  the queued-frame depth so the extra buffer does not translate into
+  an extra frame of input latency. The `GetFrameLatencyWaitableObject`
+  handle is cached in `frame_latency_waitable` and consumed by
+  `prepareFrame`,
 - a persistent `grid_texture` + sRGB RTV the size of the client (see §6.4),
 - shadow `shader.Cell` buffer for the per-row diff upload (§6.3),
 - background-image state (CPU pixels + GPU SRV + decode req-id + worker
@@ -463,11 +470,15 @@ reads the active `Tab.term`, computes selection/cursor state, and hands
 everything to:
 
 1. **prepareFrame** (`d3d11.zig`): client-size query; swap-chain
-   create-or-resize; cheap occlusion test (`Present(0, TEST)`); ensure
-   persistent grid RTV; compute grid dims and atlas size; diff
-   `ConfigSnapshot` (cell metrics / scrollbar / tab-bar) against the prior
-   frame; write `GridConfig` constants (cell size, counts, scrollbar,
-   `bg_image_dest`).
+   create-or-resize; cheap occlusion test (`Present(0, TEST)`);
+   `WaitForSingleObjectEx(frame_latency_waitable, 100 ms, 0)` to gate
+   CPU frame production on DXGI queue availability (placed after the
+   OCCLUDED gate so hidden windows don't stall; bounded timeout so a
+   stuck waitable — GPU TDR mid-recovery, DWM hiccup — can't freeze
+   the message pump); ensure persistent grid RTV; compute grid dims
+   and atlas size; diff `ConfigSnapshot` (cell metrics / scrollbar /
+   tab-bar) against the prior frame; write `GridConfig` constants
+   (cell size, counts, scrollbar, `bg_image_dest`).
 2. **buildAndUpload** (`d3d11/cell_buffer.zig`): per-row, build a scratch
    `[]shader.Cell` from terminal screen + style + selection + cursor + URL
    hover + resize overlay, compare against `shadow_cells`, and only call
@@ -823,6 +834,17 @@ WM_LBUTTONUP
   would freeze the renderer.
 - **Persistent grid RTV is required** for partial redraw because
   flip-model back-buffer contents are undefined post-`Present`.
+- **Swap chain is 3-buffer FLIP + `MaxFrameLatency = 1` + waitable-gated.**
+  The three components go together: dropping to 2 buffers reintroduces
+  drag-time stutter; dropping the latency cap or the waitable wait adds
+  input lag from queued frames. The waitable wait is bounded (100 ms) and
+  best-effort — a failed/timed-out wait proceeds with the frame.
+- **DComposition tree lifetime is tied to `swap_chain`.** `dcomp_visual`,
+  `dcomp_target`, `dcomp_device`, and `swap_chain` are all created together
+  in `swap_chain.init` and left `undefined` until then. `deinit` gates the
+  four `Release()` calls on `swap_chain != null` so a renderer that never
+  rendered doesn't touch undefined memory; `frame_latency_waitable`'s
+  `CloseHandle` is guarded by its own optional.
 - **Custom title-bar color is set via `DwmSetWindowAttribute`** — there's
   no separate Win32 caption control; the tab bar lives inside the same
   D3D11 client area.
