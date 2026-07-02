@@ -100,7 +100,11 @@ pub fn init(self: *D3d11Renderer, hwnd: win32.HWND, width: u32, height: u32) *wi
             .Stereo = 0,
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .BufferUsage = win32.DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            .BufferCount = 2,
+            // 3 back buffers give DWM one buffer of slack during window
+            // drag/resize, when its hold time on the presented buffer spikes.
+            // MaxFrameLatency=1 below caps the queued-frame depth so this
+            // does not translate into an extra frame of input latency.
+            .BufferCount = 3,
             .Scaling = .STRETCH,
             .SwapEffect = .FLIP_SEQUENTIAL,
             .AlphaMode = .PREMULTIPLIED,
@@ -147,6 +151,15 @@ pub fn init(self: *D3d11Renderer, hwnd: win32.HWND, width: u32, height: u32) *wi
         const hr = swap_chain1.IUnknown.QueryInterface(win32.IID_IDXGISwapChain2, @ptrCast(&swap_chain2));
         if (hr < 0) com.fatalHr("QuerySwapChain2", hr);
     }
+    {
+        const hr = swap_chain2.SetMaximumFrameLatency(1);
+        if (hr < 0) com.fatalHr("SetMaximumFrameLatency", hr);
+    }
+    // Cache the waitable handle so prepareFrame can gate CPU frame work on
+    // DXGI queue availability. Survives ResizeBuffers along with the
+    // MaxFrameLatency setting.
+    self.frame_latency_waitable = swap_chain2.GetFrameLatencyWaitableObject();
+    if (self.frame_latency_waitable == null) @panic("GetFrameLatencyWaitableObject returned null");
     return swap_chain2;
 }
 

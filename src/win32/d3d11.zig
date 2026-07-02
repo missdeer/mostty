@@ -101,6 +101,11 @@ dcomp_visual: *win32.IDCompositionVisual = undefined,
 
 // Per-window state (lazily initialized)
 swap_chain: ?*win32.IDXGISwapChain2 = null,
+// Frame-latency waitable object (DXGI 1.3). Populated by swap_chain_mod.init
+// together with `swap_chain`; consumed by prepareFrame to gate CPU frame
+// work on DXGI queue availability so the 3-buffer swap chain does not add
+// input latency. Closed in deinit.
+frame_latency_waitable: ?win32.HANDLE = null,
 shader_cells: ShaderCells = .{},
 // CPU shadow of the GPU cell buffer. Per-row equality vs scratch picks
 // which rows actually need UpdateSubresource; on a steady-state terminal
@@ -448,7 +453,21 @@ pub fn deinit(self: *D3d11Renderer) void {
     if (self.bg_sampler) |s| _ = s.IUnknown.Release();
     self.bg_sampler = null;
     self.context.Flush();
-    if (self.swap_chain) |sc| _ = sc.IUnknown.Release();
+    // DirectComposition tree + swap chain share a lifecycle: all four are
+    // created together in swap_chain_mod.init and left `undefined` until then.
+    // Release in reverse-creation order (visual → target → device → swap
+    // chain), gated on swap_chain being non-null so a renderer that never
+    // rendered doesn't touch undefined memory.
+    if (self.swap_chain) |sc| {
+        _ = self.dcomp_visual.IUnknown.Release();
+        _ = self.dcomp_target.IUnknown.Release();
+        _ = self.dcomp_device.IUnknown.Release();
+        _ = sc.IUnknown.Release();
+    }
+    if (self.frame_latency_waitable) |h| {
+        _ = win32.CloseHandle(h);
+        self.frame_latency_waitable = null;
+    }
     _ = self.d2d_factory.IUnknown.Release();
     font_mod.releaseTextFormatSet(&self.text_formats, &self.font_fallbacks);
     {
@@ -658,6 +677,20 @@ fn prepareFrame(
         } else {
             fatalHr("Present(TEST)", hr);
         }
+    }
+
+    // Gate frame production on DXGI queue availability. Combined with
+    // MaxFrameLatency=1 (set in swap_chain_mod.init), this caps queued-frame
+    // depth at 1 so the 3-buffer swap chain absorbs DWM composition jitter
+    // during drag/resize without adding input latency. Placed after the
+    // OCCLUDED gate so a hidden window doesn't stall here.
+    //
+    // Bounded timeout (not INFINITE) so a stuck waitable in a pathological
+    // state (GPU TDR mid-recovery, DWM hiccup) doesn't freeze the UI thread's
+    // message pump. On timeout or failure, proceed with the frame — the queue
+    // gate is best-effort, not a correctness invariant.
+    if (self.frame_latency_waitable) |h| {
+        _ = win32.WaitForSingleObjectEx(h, 100, 0);
     }
 
     // Persistent grid texture + scissor rasterizer state. Both are safe to
