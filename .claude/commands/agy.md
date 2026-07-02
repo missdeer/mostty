@@ -17,14 +17,12 @@ Antigravity took over the role formerly assigned to Gemini in this repo. See `.c
 
    followed by a blank line, then your packaged context + the question from `$ARGUMENTS`.
 
-   **Transport — detect, don't blend:**
-   - **If `mcp__ccgo__ask_agents` is in your available-tools list** → call it with `agent: "antigravity"` (or whatever the wrapper's agent key for Antigravity is — check the tool's schema) and the message above.
-   - **Else (MCP not installed on this machine)** → write the message to `./tmp/agy-prompt-$(date +%s).txt`, then run via Bash in background:
+   **Transport — launch wrapper directly:**
+   - Write the message to `./tmp/agy-prompt-$(date +%s).txt`, then run via Bash in background:
      ```bash
-     agy-wrapper --dangerously-skip-permissions --timeout 30m -p "$(cat ./tmp/agy-prompt-<ts>.txt)"
+     agy-wrapper --dangerously-skip-permissions --timeout 30m -p "$(bat ./tmp/agy-prompt-<ts>.txt)"
      ```
      with `run_in_background: true` and `timeout: 1800000` (30 min). Poll with `TaskOutput`. After the run completes, delete the temp prompt file.
-   - **Never silently skip** consultation because MCP is missing — the CLI fallback is a first-class path.
 
 4. When Antigravity responds:
    - Summarize the answer in Chinese, grouped as: **Antigravity 的方向 / 与当前思路的差异 / 我建议怎么办**.

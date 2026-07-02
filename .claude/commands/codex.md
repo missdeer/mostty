@@ -19,7 +19,7 @@ Use this to get Codex's deep-technical / edge-case opinion on something concrete
    - **If `mcp__ccgo__ask_agents` is in your available-tools list** → call it with `agent: "codex"` and the message above.
    - **Else (MCP not installed on this machine)** → write the message to `./tmp/codex-prompt-$(date +%s).txt`, then run via Bash in background:
      ```bash
-     codex exec -s read-only --skip-git-repo-check --full-auto "$(cat ./tmp/codex-prompt-<ts>.txt)"
+     codex exec -s read-only --skip-git-repo-check "$(bat ./tmp/codex-prompt-<ts>.txt)"
      ```
      with `run_in_background: true` and `timeout: 1800000` (30 min). Poll with `TaskOutput`. After the run completes, delete the temp prompt file.
    - **Never silently skip** consultation because MCP is missing — the CLI fallback is a first-class path.
@@ -30,7 +30,7 @@ Use this to get Codex's deep-technical / edge-case opinion on something concrete
 
 ## When this command is the wrong tool
 
-- The question is purely architectural / high-level → use `/gemini` instead.
+- The question is purely architectural / high-level → use `/antigravity` instead.
 - The user wants a review of the whole pending diff → use `/audit` instead.
 - The question is trivial (one-liner you can answer from `rg` in 10 seconds) → just answer it.
 
