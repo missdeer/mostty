@@ -20,3 +20,9 @@ The Codex Tool provides a `codex` tool for **debugging, complex problem solving,
 - Debugging and issue localization in complex codebases
 - Algorithm optimization and complex logic analysis
 - Code review and edge case identification
+
+## Notes
+
+- Write prompt into temporary file ./tmp/codex-prompt.txt first
+- Pass the content from the temporary file as the command line option to `codex`, e.g. `codex exec -s read-only --skip-git-repo-check "$(bat --plain --paging=never ./tmp/codex-prompt.txt)"`
+- Remove the temporary prompt file after codex exits

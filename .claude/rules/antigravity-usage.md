@@ -25,5 +25,6 @@ The Antigravity Tool provides a `agy-wrapper` tool for AI tasks. Launch `agy-wra
 ## Notes
 
 - Write prompt into temporary file ./tmp/agy-prompt.txt first
-- Pass the content from the temporary file as the command line option to `agy-wrapper`
+- Pass the content from the temporary file as the command line option to `agy-wrapper`, e.g. `agy-wrapper --dangerously-skip-permissions --timeout 30m -p "$(bat --plain --paging=never ./tmp/agy-prompt.txt)"`
 - Remove the temporary prompt file after antigravity exits
+- Retry once if it reports `authentication failed or timed out`
