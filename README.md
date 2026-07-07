@@ -7,7 +7,7 @@
 
 A fast, lightweight native terminal emulator with libghostty at its core. Currently designed and implemented for Windows 10/11 only.
 
-> Forked from [marler8997/mite](https://github.com/marler8997/mite).
+> Inspired by [marler8997/mite](https://github.com/marler8997/mite).
 >
 > Windows only. If you need a macOS or Linux build, use [ghostty](https://github.com/ghostty-org/ghostty) directly.
 
@@ -18,9 +18,7 @@ Uses Direct3D 11 and DirectWrite for text. Compiles to a tiny executable (less t
 
 <img alt="WindowsScreenshot" src="screenshot.png" />
 
-#### Fork enhancements (Windows)
-
-This fork adds several Windows-side enhancements on top of upstream:
+#### Windows features
 
 - Configurable startup launchers per tab, including right-click `+` launcher selection and SSH hosts integrated into the launcher menu.
 - Confirmation prompts before closing a tab or the window to reduce accidental session loss.
