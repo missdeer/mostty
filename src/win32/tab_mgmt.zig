@@ -102,6 +102,27 @@ fn onSize(handler: *vt.TerminalStream.Handler) EffectReturnType("size") {
     };
 }
 
+// Scrollback size in bytes. libghostty-vt's built-in default is only 10 KB,
+// which PageList clamps up to `min_max_size` (~2 std_capacity pages) — enough
+// for the active viewport plus a page of buffer, so long output evicts older
+// rows almost immediately. Match Ghostty upstream's `scrollback-limit` default
+// (10 MB, decimal) so scrolling up over normal long output actually returns
+// the earlier rows. See MOSTTY-16.
+pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+
+// Sole source of the `vt.Terminal.Options` mostty uses at tab creation. The
+// tests below assert this helper wires `max_scrollback` correctly, which is
+// how we regression-guard against the field ever being dropped from the init
+// options struct.
+fn terminalInitOptions(cols: u16, rows: u16) vt.Terminal.Options {
+    return .{
+        .cols = cols,
+        .rows = rows,
+        .max_scrollback = DEFAULT_SCROLLBACK_BYTES,
+        .default_modes = .{ .grapheme_cluster = true },
+    };
+}
+
 pub fn newTab(window: *Window) void {
     const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0)
         &global.config.launchers[0]
@@ -183,11 +204,10 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
     };
 
     tab.term = std.heap.page_allocator.create(vt.Terminal) catch util.oom(error.OutOfMemory);
-    tab.term.* = vt.Terminal.init(tab.term_arena.allocator(), .{
-        .cols = cell_count.col,
-        .rows = cell_count.row,
-        .default_modes = .{ .grapheme_cluster = true },
-    }) catch |e| std.debug.panic("Terminal.init: {}", .{e});
+    tab.term.* = vt.Terminal.init(
+        tab.term_arena.allocator(),
+        terminalInitOptions(cell_count.col, cell_count.row),
+    ) catch |e| std.debug.panic("Terminal.init: {}", .{e});
     global.config.theme.applyToNewTerminal(tab.term);
 
     tab.vt_stream = .initAlloc(
@@ -326,4 +346,82 @@ pub fn writeToPty(tab: *Tab, bytes: []const u8) void {
 
 pub fn writeToActivePty(window: *Window, bytes: []const u8) void {
     writeToPty(window.active(), bytes);
+}
+
+test "terminalInitOptions wires DEFAULT_SCROLLBACK_BYTES" {
+    // Regression guard for MOSTTY-16: dropping `.max_scrollback` from the
+    // helper fails this test. Terminal.init is the sole caller of this
+    // helper, so this is the wiring check. Constant drift (someone lowering
+    // DEFAULT_SCROLLBACK_BYTES to a value too small for real scrollback)
+    // is caught by the positive behavior test below.
+    const opts = terminalInitOptions(80, 24);
+    try std.testing.expectEqual(DEFAULT_SCROLLBACK_BYTES, opts.max_scrollback);
+}
+
+test "long output with DEFAULT_SCROLLBACK_BYTES preserves earliest line" {
+    // Business rule: mostty's default scrollback is large enough that 500
+    // wide lines of normal output do not evict the earliest line. Uses
+    // cols=215 to hit std_capacity page granularity fast (each page is
+    // 215 rows max), so the min_max_size floor is only ~2 pages and the
+    // observation would collapse to "everything fits regardless of
+    // max_scrollback" at smaller col counts.
+    const alloc = std.testing.allocator;
+    var term = try vt.Terminal.init(alloc, .{
+        .cols = 215,
+        .rows = 2,
+        .max_scrollback = DEFAULT_SCROLLBACK_BYTES,
+    });
+    defer term.deinit(alloc);
+
+    var stream = vt_stream_mod.Stream.initAlloc(
+        alloc,
+        vt_stream_mod.Handler.init(&term, .readonly),
+    );
+    defer stream.deinit();
+
+    var buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < 500) : (i += 1) {
+        const line = try std.fmt.bufPrint(&buf, "line {d:0>4}\r\n", .{i});
+        stream.nextSlice(line);
+    }
+
+    term.screens.active.scroll(.{ .top = {} });
+    const dump = try term.plainString(alloc);
+    defer alloc.free(dump);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "line 0000") != null);
+}
+
+test "long output with 10 KB scrollback evicts earliest line" {
+    // 10_000 bytes is the libghostty-vt built-in default and reproduces
+    // MOSTTY-16's pre-fix behavior: PageList clamps it up to min_max_size
+    // (~2 std_capacity pages, or ~430 rows for a 215-col terminal); 500
+    // lines forces a third page → prune first page → "line 0000" evicted.
+    // This asserts the positive behavior test above can actually fail if
+    // its max_scrollback gets accidentally zeroed / minimized.
+    const alloc = std.testing.allocator;
+    var term = try vt.Terminal.init(alloc, .{
+        .cols = 215,
+        .rows = 2,
+        .max_scrollback = 10_000,
+    });
+    defer term.deinit(alloc);
+
+    var stream = vt_stream_mod.Stream.initAlloc(
+        alloc,
+        vt_stream_mod.Handler.init(&term, .readonly),
+    );
+    defer stream.deinit();
+
+    var buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < 500) : (i += 1) {
+        const line = try std.fmt.bufPrint(&buf, "line {d:0>4}\r\n", .{i});
+        stream.nextSlice(line);
+    }
+
+    term.screens.active.scroll(.{ .top = {} });
+    const dump = try term.plainString(alloc);
+    defer alloc.free(dump);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "line 0000") == null);
 }
