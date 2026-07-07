@@ -28,6 +28,7 @@ Antigravity took over the role formerly assigned to Gemini in this repo. See `.c
    - Summarize the answer in Chinese, grouped as: **Antigravity 的方向 / 与当前思路的差异 / 我建议怎么办**.
    - If Antigravity disagrees with the current direction, do **not** smooth it over — present both options to the user and let them choose (Rule 1: surface conflicts, don't blend).
    - Do **not** auto-apply any suggestion as code — surface and wait.
+   - Retry once if it reports `authentication failed or timed out`
 
 ## When this command is the wrong tool
 

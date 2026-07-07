@@ -6,3 +6,4 @@
 - remove ./tmp/commit_message.txt if it exists
 - write the commit message with the Write tool instead of a heredoc to ./tmp/commit_message.txt 
 - then `git commit -F ./tmp/commit_message.txt`
+- stop if commit failed due to gpg sign issue, ask the user to commit it manually
