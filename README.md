@@ -31,6 +31,7 @@ Uses Direct3D 11 and DirectWrite for text. Compiles to a tiny executable (less t
 - Hover-detect http/https URLs across visually-wrapped rows — matched cells get an underline, the cursor turns into a hand, and double-click opens the link via `ShellExecuteW`. The walker crosses row boundaries on URL-character continuity rather than `row.wrap`, so producer hard-wrapped output (e.g. `bat` defaulting to character wrap) is linkified the same as terminal soft-wrap. Detection re-validates from the render path so PTY scroll, resize, and viewport snap-back all keep the highlight in sync without per-event hooks; silently-truncated runs at the 4 KiB cap are rejected so a host-shortened prefix can't be opened.
 - Render hot-path performance pass: coalesced `InvalidateRect` via a `render_pending` flag, per-frame LRU dampening in the glyph cache, per-render selection-bounds precompute (replaces per-cell page walks), and a pow-free shader gamma decode approximation kept close to DirectWrite's gamma 2.2 rendering params.
 - Async glyph rasterization for single-cell DirectWrite misses: a dedicated worker thread owns its own `ID2D1Factory(MULTI_THREADED)` + WIC bitmap render target and produces CPU BGRA pixels off the UI thread, which then `UpdateSubresource`s them into the atlas via `WM_APP_GLYPH_READY`. The UI's D3D11 device stays `SINGLETHREADED` and its D2D factory `SINGLE_THREADED` — no shared GPU context. A two-level generation guard (renderer-global `cache_gen` for font/DPI rebuilds + per-slot `gen` for LRU reuse) and a `pending` flag on each cache node let in-flight rasters land safely or get dropped on stale slots without stalling eviction. Unicode-heavy bursts (`cat unicode-test.txt`) no longer hitch the UI thread; a missed cell shows the blank placeholder for one or two frames before the real glyph swaps in.
+- Kitty graphics protocol support for inline terminal images. Mostty handles Kitty APC image transmissions through `libghostty-vt`, uploads visible images as D3D11 textures, renders them with per-placement clipping/z-order, sends Kitty ACK replies, and supports deletion/cleanup when images or tabs go away. This depends on a ConPTY build that passes APC data through; release artifacts bundle Microsoft Terminal's `conpty.dll` and `OpenConsole.exe` under `dist/conpty/`.
 - Automated Windows builds via GitHub Actions, plus repository assistant tooling/docs updates for contributors.
 
 **Tabs.** One window can host multiple ConPTY-backed shells. The tab bar is painted into the top cell row of the same D3D11 surface (no extra Win32 control). Each tab owns its own terminal state, vt stream, child process, reader thread, title, and WM_CHAR surrogate carry; window-scoped state (mouse capture, scrollbar drag, selection fade) stays on the window. Closing the last tab quits.
@@ -51,6 +52,14 @@ Custom shells / startup programs are declared as `launcher` lines in `%LOCALAPPD
 Font family, size, and ligatures (plus colors, themes, and launchers) are overridable via `%LOCALAPPDATA%\Mostty\config` — see [Configuration](configurations.md) for all keys and the file format.
 
 The child shell is spawned with an isolated per-process Unicode environment block (`TERM`/`COLORTERM`/`LANG`/`LC_ALL` applied, `NO_COLOR` stripped, sorted case-insensitively as Win32 requires) instead of mutating Mostty's own process env, which removes a race across concurrent `CreateProcessW` calls.
+
+**Bundled ConPTY for Kitty graphics.** On Windows, the inbox ConPTY can filter Kitty's APC image sequences before Mostty's VT parser sees them. Mostty therefore looks for an experimental Microsoft Terminal ConPTY in this order:
+
+1. `MOSTTY_CONPTY_DLL`
+2. `<Mostty.exe directory>\conpty\conpty.dll`
+3. system `CreatePseudoConsole`
+
+CI downloads `Microsoft.Windows.Console.ConPTY.1.23.251216003.nupkg` from the Microsoft Terminal release, verifies SHA256 hashes, and stages `conpty.dll` plus `OpenConsole.exe` into `dist/conpty/`. Local development can use the same layout under `zig-out\bin\conpty\`.
 
 **Sharper text rendering.** Three coupled changes that together visibly crisp up the glyphs:
 

@@ -41,6 +41,9 @@ fn winMain(
 
 pub fn main() !void {
     diag.init();
+    const com_initialized = png_decode.initUiComApartment();
+    defer if (com_initialized) win32.CoUninitialize();
+    png_decode.install();
 
     const opt: struct {
         window_placement: window_geom.WindowPlacementOptions = .{},
@@ -293,6 +296,7 @@ const dispatch = @import("win32/wnd/dispatch.zig");
 const global_mod = @import("win32/global.zig");
 const icons_mod = @import("win32/icons.zig");
 const panic_mod = @import("win32/panic.zig");
+const png_decode = @import("win32/png_decode.zig");
 const state = @import("win32/state.zig");
 const types = @import("win32/types.zig");
 const util = @import("win32/util.zig");

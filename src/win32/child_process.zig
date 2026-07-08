@@ -11,6 +11,8 @@ const GridPos = types.GridPos;
 const TabId = types.TabId;
 const PtyRing = pty_ring_mod.PtyRing;
 
+const CONPTY_DLL_ENV = "MOSTTY_CONPTY_DLL";
+
 pub const ChildProcess = struct {
     pty: ?Pty,
     read: win32.HANDLE,
@@ -21,8 +23,9 @@ pub const ChildProcess = struct {
     pub const Pty = struct {
         write: std.fs.File,
         hpcon: win32.HPCON,
+        conpty: ConptyApi,
         pub fn deinit(self: *Pty) void {
-            win32.ClosePseudoConsole(self.hpcon);
+            self.conpty.close(self.hpcon);
             win32.closeHandle(self.write.handle);
         }
         pub fn writeFlushAll(self: *const Pty, slice: []const u8) !void {
@@ -46,7 +49,7 @@ pub const ChildProcess = struct {
 
     pub fn resize(self: *ChildProcess, out_err: *Error, cell_count: GridPos) error{ Error, Closed }!void {
         const pty = self.pty orelse return;
-        const hr = win32.ResizePseudoConsole(
+        const hr = pty.conpty.resize(
             pty.hpcon,
             .{ .X = @intCast(cell_count.col), .Y = @intCast(cell_count.row) },
         );
@@ -263,20 +266,18 @@ pub const ChildProcess = struct {
         }
 
         var hpcon: win32.HPCON = undefined;
-        {
-            const hr = win32.CreatePseudoConsole(
-                .{ .X = @intCast(cell_count.col), .Y = @intCast(cell_count.row) },
-                pty_read,
-                pty_write,
-                0,
-                @ptrCast(&hpcon),
-            );
-            win32.closeHandle(pty_read);
-            win32.closeHandle(pty_write);
-            pty_handles_closed = true;
-            if (hr < 0) return out_err.setHresult("CreatePseudoConsole", hr);
-        }
-        errdefer win32.ClosePseudoConsole(hpcon);
+        var conpty = try ConptyApi.create(
+            out_err,
+            allocator,
+            .{ .X = @intCast(cell_count.col), .Y = @intCast(cell_count.row) },
+            pty_read,
+            pty_write,
+            &hpcon,
+        );
+        win32.closeHandle(pty_read);
+        win32.closeHandle(pty_write);
+        pty_handles_closed = true;
+        errdefer conpty.close(hpcon);
 
         var attr_list_size: usize = undefined;
         std.debug.assert(0 == win32.InitializeProcThreadAttributeList(null, 1, 0, &attr_list_size));
@@ -389,7 +390,7 @@ pub const ChildProcess = struct {
         _ = win32.ResumeThread(process_info.hThread.?);
 
         return .{
-            .pty = .{ .write = .{ .handle = our_write }, .hpcon = hpcon },
+            .pty = .{ .write = .{ .handle = our_write }, .hpcon = hpcon, .conpty = conpty },
             .read = our_read,
             .thread = thread,
             .job = job,
@@ -476,5 +477,145 @@ pub const ChildProcess = struct {
             }
             if (stop_flag.load(.acquire)) return;
         }
+    }
+};
+
+const ConptyApi = union(enum) {
+    system,
+    dynamic: DynamicConptyApi,
+
+    const CreatePseudoConsoleFn = *const fn (
+        size: win32.COORD,
+        hInput: ?win32.HANDLE,
+        hOutput: ?win32.HANDLE,
+        dwFlags: u32,
+        phPC: ?*?win32.HPCON,
+    ) callconv(.winapi) win32.HRESULT;
+
+    const ResizePseudoConsoleFn = *const fn (
+        hPC: ?win32.HPCON,
+        size: win32.COORD,
+    ) callconv(.winapi) win32.HRESULT;
+
+    const ClosePseudoConsoleFn = *const fn (
+        hPC: ?win32.HPCON,
+    ) callconv(.winapi) void;
+
+    const DynamicConptyApi = struct {
+        // Keep the module loaded after close; ConPTY cleanup can outlive HPCON close.
+        module: win32.HINSTANCE,
+        resize: ResizePseudoConsoleFn,
+        close_fn: ClosePseudoConsoleFn,
+    };
+
+    fn create(
+        out_err: *Error,
+        allocator: std.mem.Allocator,
+        size: win32.COORD,
+        h_input: win32.HANDLE,
+        h_output: win32.HANDLE,
+        hpcon: *win32.HPCON,
+    ) error{Error}!ConptyApi {
+        const maybe_dll_path = try conptyDllPathOwned(out_err, allocator);
+        const dll_path = maybe_dll_path orelse return createSystem(out_err, size, h_input, h_output, hpcon);
+        defer allocator.free(dll_path);
+
+        const dll_path_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, dll_path) catch |e| switch (e) {
+            error.OutOfMemory => return out_err.setZig("Utf16ConptyDllPath", error.OutOfMemory),
+            error.InvalidUtf8 => return out_err.setZig("Utf16ConptyDllPath", error.InvalidUtf8),
+        };
+        defer allocator.free(dll_path_w);
+
+        const module = win32.LoadLibraryW(dll_path_w.ptr) orelse {
+            std.log.warn("{s}={s}: LoadLibraryW failed: {f}", .{ CONPTY_DLL_ENV, dll_path, win32.GetLastError() });
+            return out_err.setWin32("LoadConptyDll", win32.GetLastError());
+        };
+        errdefer _ = win32.FreeLibrary(module);
+
+        const create_fn = getProc(CreatePseudoConsoleFn, module, "ConptyCreatePseudoConsole") orelse
+            return out_err.setWin32("GetConptyCreatePseudoConsole", win32.GetLastError());
+        const resize_fn = getProc(ResizePseudoConsoleFn, module, "ConptyResizePseudoConsole") orelse
+            return out_err.setWin32("GetConptyResizePseudoConsole", win32.GetLastError());
+        const close_fn = getProc(ClosePseudoConsoleFn, module, "ConptyClosePseudoConsole") orelse
+            return out_err.setWin32("GetConptyClosePseudoConsole", win32.GetLastError());
+
+        const hr = create_fn(size, h_input, h_output, 0, @ptrCast(hpcon));
+        if (hr < 0) return out_err.setHresult("ConptyCreatePseudoConsole", hr);
+
+        std.log.info("using experimental ConPTY DLL from {s}", .{dll_path});
+        return .{ .dynamic = .{
+            .module = module,
+            .resize = resize_fn,
+            .close_fn = close_fn,
+        } };
+    }
+
+    fn createSystem(
+        out_err: *Error,
+        size: win32.COORD,
+        h_input: win32.HANDLE,
+        h_output: win32.HANDLE,
+        hpcon: *win32.HPCON,
+    ) error{Error}!ConptyApi {
+        const hr = win32.CreatePseudoConsole(size, h_input, h_output, 0, @ptrCast(hpcon));
+        if (hr < 0) return out_err.setHresult("CreatePseudoConsole", hr);
+        return .system;
+    }
+
+    fn conptyDllPathOwned(out_err: *Error, allocator: std.mem.Allocator) error{Error}!?[]u8 {
+        const env_path = std.process.getEnvVarOwned(allocator, CONPTY_DLL_ENV) catch |e| switch (e) {
+            error.EnvironmentVariableNotFound => null,
+            error.OutOfMemory => return out_err.setZig("ReadConptyDllEnv", error.OutOfMemory),
+            else => |err| return out_err.setZig("ReadConptyDllEnv", err),
+        };
+        if (env_path) |path| {
+            if (path.len > 0) return path;
+            allocator.free(path);
+        }
+
+        const exe_path = std.fs.selfExePathAlloc(allocator) catch |e| switch (e) {
+            error.OutOfMemory => return out_err.setZig("FindBundledConptyDll", error.OutOfMemory),
+            else => |err| {
+                std.log.warn("cannot locate Mostty executable path for bundled ConPTY: {s}", .{@errorName(err)});
+                return null;
+            },
+        };
+        defer allocator.free(exe_path);
+
+        const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
+        const bundled_path = std.fs.path.join(allocator, &.{ exe_dir, "conpty", "conpty.dll" }) catch |e|
+            return out_err.setZig("FindBundledConptyDll", e);
+        errdefer allocator.free(bundled_path);
+
+        std.fs.accessAbsolute(bundled_path, .{}) catch |e| switch (e) {
+            error.FileNotFound => {
+                allocator.free(bundled_path);
+                return null;
+            },
+            else => |err| return out_err.setZig("FindBundledConptyDll", err),
+        };
+        return bundled_path;
+    }
+
+    fn resize(self: ConptyApi, hpcon: win32.HPCON, size: win32.COORD) win32.HRESULT {
+        return switch (self) {
+            .system => win32.ResizePseudoConsole(hpcon, size),
+            .dynamic => |api| api.resize(hpcon, size),
+        };
+    }
+
+    fn close(self: *ConptyApi, hpcon: win32.HPCON) void {
+        switch (self.*) {
+            .system => win32.ClosePseudoConsole(hpcon),
+            .dynamic => |api| {
+                api.close_fn(hpcon);
+                self.* = .system;
+            },
+        }
+    }
+
+    fn getProc(comptime Fn: type, module: win32.HINSTANCE, name: [:0]const u8) ?Fn {
+        const proc = win32.GetProcAddress(module, name.ptr) orelse return null;
+        return @ptrCast(proc);
     }
 };

@@ -6,6 +6,7 @@ const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const render = @import("../render.zig");
 const state = @import("../state.zig");
+const tab_mgmt = @import("../tab_mgmt.zig");
 const types = @import("../types.zig");
 const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
@@ -84,17 +85,19 @@ pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARA
 
         for (window.tabs.items) |tab| {
             if (tab.closing) continue;
-            if (tab.term.cols == cell_count.col and tab.term.rows == cell_count.row) continue;
-            tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
-                std.debug.panic("Terminal.resize: {}", .{e});
-            var resize_err: Error = undefined;
-            tab.child_process.resize(&resize_err, cell_count) catch |e| switch (e) {
-                error.Closed => {
-                    tab.closing = true;
-                    _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
-                },
-                error.Error => std.debug.panic("{f}", .{resize_err}),
-            };
+            if (tab.term.cols != cell_count.col or tab.term.rows != cell_count.row) {
+                tab.term.resize(tab.term_arena.allocator(), cell_count.col, cell_count.row) catch |e|
+                    std.debug.panic("Terminal.resize: {}", .{e});
+                var resize_err: Error = undefined;
+                tab.child_process.resize(&resize_err, cell_count) catch |e| switch (e) {
+                    error.Closed => {
+                        tab.closing = true;
+                        _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
+                    },
+                    error.Error => std.debug.panic("{f}", .{resize_err}),
+                };
+            }
+            tab_mgmt.syncTerminalPixelSize(tab.term);
         }
     }
 

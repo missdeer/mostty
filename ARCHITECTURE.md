@@ -63,11 +63,13 @@ src/
     d3d11/glyph.zig        glyph rasterization (DirectWrite + sprite + emoji)
     d3d11/emoji.zig        color-glyph detection, Segoe UI Emoji routing
     d3d11/background_image.zig   async WIC decode, fit/position geometry
+    d3d11/kitty_images.zig per-tab Kitty image texture cache + draw pass
     d3d11/tabbar_paint.zig D2D tab-bar band painter
     d3d11/color.zig        palette resolution, faint dim, selection lerp
     d3d11/com.zig          tiny COM Release helpers
 
     # Higher-level UI features
+    png_decode.zig         WIC PNG decode for Kitty f=100 payloads
     paste.zig              clipboard paste, drag-drop, bracketed-paste guard
     url_hover.zig          left/right URL detection across soft-wrapped rows
     tooltip.zig            native TOOLTIPS_CLASS control for tab-bar hover
@@ -304,8 +306,16 @@ Handlers by family:
      `ReadFile` gets `BROKEN_PIPE` instead of hanging the join. After
      `CreatePseudoConsole` succeeds the PTY owns those handles and the
      LIFO-earlier `ClosePseudoConsole` errdefer handles the close.
-   - `CreatePseudoConsole(size, pty_read, pty_write, 0)` → `HPCON`; close
-     the PTY-side pipe ends now that the PTY owns them.
+   - Create the pseudoconsole. `child_process.zig` first tries
+     `MOSTTY_CONPTY_DLL`, then `<Mostty.exe dir>\conpty\conpty.dll`, and
+     finally the system `CreatePseudoConsole`. Dynamic ConPTY loads use
+     `ConptyCreatePseudoConsole` / `ConptyResizePseudoConsole` /
+     `ConptyClosePseudoConsole`; the loaded DLL is intentionally kept for
+     process lifetime because ConPTY cleanup can outlive `HPCON` close.
+     Release artifacts put Microsoft Terminal's `conpty.dll` and matching
+     `OpenConsole.exe` in `dist/conpty/` so Kitty APC data reaches the VT
+     parser instead of being filtered by older inbox ConPTY builds.
+   - Close the PTY-side pipe ends now that the PTY owns them.
    - Build a process attribute list with
      `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.
    - Merge env: `GetEnvironmentStringsW` + per-launcher `env` overrides,
@@ -429,6 +439,30 @@ ReadFile bytes
     then re-checked and re-armed if a reader raced a write under posted=true
 ```
 
+### 5.4 Kitty graphics
+
+Kitty graphics support is wired through `vt_stream.zig` and
+`libghostty-vt`'s Kitty image storage:
+
+1. The child app writes APC sequences into ConPTY. Kitty sequences start
+   with `ESC _ G` and terminate with ST (`ESC` followed by `\`). The
+   bundled Microsoft Terminal ConPTY is used when available because the
+   Windows inbox ConPTY can discard APC payloads before Mostty sees them.
+2. The UI thread drains PTY bytes into `vt_stream.nextSlice`. The handler
+   lets `libghostty-vt` parse Kitty graphics, including direct RGB/gray
+   payloads, PNG payloads decoded by `png_decode.zig`, placements, deletes,
+   and ACK responses.
+3. Parsed images and placements live in
+   `term.screens.active.kitty_images`. They are still terminal state, so
+   they follow the UI-thread-only `vt.Terminal` ownership rule.
+4. `d3d11/kitty_images.zig` mirrors visible images into a renderer-side
+   cache keyed by `(tab_id, image_id)`. It uploads images as individual
+   `ID3D11Texture2D` + shader-resource-view pairs, prunes deleted images,
+   and releases all image resources when a tab closes.
+5. Placement sync happens every render. Placement hashes mark the grid dirty
+   only when the visible placement set changes; visible above-text images
+   force a full grid redraw for correctness with the persistent grid texture.
+
 ---
 
 ## 6. Rendering Pipeline
@@ -479,18 +513,22 @@ everything to:
    and atlas size; diff `ConfigSnapshot` (cell metrics / scrollbar /
    tab-bar) against the prior frame; write `GridConfig` constants
    (cell size, counts, scrollbar, `bg_image_dest`).
-2. **buildAndUpload** (`d3d11/cell_buffer.zig`): per-row, build a scratch
+2. **Kitty image sync** (`d3d11/kitty_images.zig`): mirror the active
+   tab's Kitty image storage into D3D textures, prune deleted image IDs,
+   sort visible placements by z-order, and mark the grid for full redraw
+   when image placement state changes.
+3. **buildAndUpload** (`d3d11/cell_buffer.zig`): per-row, build a scratch
    `[]shader.Cell` from terminal screen + style + selection + cursor + URL
    hover + resize overlay, compare against `shadow_cells`, and only call
    `UpdateSubresource` for changed rows. Glyph indices come from the LRU
    cache; misses trigger DirectWrite or sprite rasterization (§6.5).
-3. **drawAndCopy** (`d3d11/grid.zig`): if anything is dirty (or
+4. **drawAndCopy** (`d3d11/grid.zig`): if anything is dirty (or
    `grid_force_full` is set by font/DPI/resize), bind the grid RTV with a
    scissor rectangle covering the dirty row range, draw a full-screen
    quad as a 4-vertex triangle strip (`context.Draw(4, 0)`; the vertex
    shader generates the corners from `SV_VertexID`), then
    `CopyResource(back_buffer, grid_texture)`.
-4. **paintChromeAndPresent** (`d3d11.zig`): D2D-paint the tab-bar band into
+5. **paintChromeAndPresent** (`d3d11.zig`): D2D-paint the tab-bar band into
    its own offscreen target, `CopySubresourceRegion` it onto the back
    buffer's top strip, then `Present(0|1, 0)` (sync interval depends on
    the adapter classification from §6.6).
@@ -535,6 +573,12 @@ undefined — there's no way to do a partial draw directly onto it.
 Scissor (`ensureScissorRasterizerState`) is set from the dirty row range
 returned by `buildAndUpload`, so the pixel shader is only invoked over the
 rows that actually changed.
+
+Kitty images share the persistent grid texture. The text/background pass
+updates the grid first, then `kitty_images.draw` overlays above-text
+placements into the same grid RTV using a dedicated pixel shader,
+premultiplied-alpha blend state, per-placement scissor, and SRV slot `t3`.
+The completed grid texture is then copied to the swap-chain back buffer.
 
 ### 6.5 Glyph atlas, cache, rasterization
 

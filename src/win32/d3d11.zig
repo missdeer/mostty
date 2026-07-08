@@ -15,6 +15,7 @@ const emoji = @import("d3d11/emoji.zig");
 const font_mod = @import("d3d11/font.zig");
 const glyph_mod = @import("d3d11/glyph.zig");
 const glyph_worker_mod = @import("d3d11/glyph_worker.zig");
+const kitty_image_mod = @import("d3d11/kitty_images.zig");
 const tabbar_paint = @import("d3d11/tabbar_paint.zig");
 const bg_image = @import("d3d11/background_image.zig");
 const swap_chain_mod = @import("d3d11/swap_chain.zig");
@@ -77,6 +78,9 @@ context: *win32.ID3D11DeviceContext,
 vertex_shader: *win32.ID3D11VertexShader,
 pixel_shader: *win32.ID3D11PixelShader,
 const_buf: *win32.ID3D11Buffer,
+image_pixel_shader: *win32.ID3D11PixelShader,
+image_const_buf: *win32.ID3D11Buffer,
+image_blend_state: *win32.ID3D11BlendState,
 
 // DirectWrite
 dwrite_factory: *win32.IDWriteFactory2,
@@ -232,6 +236,7 @@ bg_sampler: ?*win32.ID3D11SamplerState = null,
 // id no longer matches, so a fast burst of hot-reloads doesn't paint a
 // stale image. Only ever read/written from the UI thread.
 bg_image_req_id: u32 = 0,
+kitty_images: kitty_image_mod.Cache = .{},
 
 // Async DirectWrite raster worker. The struct stays `undefined` until
 // `setWorkerHwnd` calls `Worker.start` and flips `glyph_worker_started`.
@@ -313,6 +318,18 @@ pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Render
         );
         if (hr < 0) fatalHr("CreatePixelShader", hr);
     }
+    const image_ps_blob = gpu.compileShaderBlob(shader_source, "ImagePixelMain", "ps_5_0");
+    defer _ = image_ps_blob.IUnknown.Release();
+    var image_pixel_shader: *win32.ID3D11PixelShader = undefined;
+    {
+        const hr = device.CreatePixelShader(
+            @ptrCast(image_ps_blob.GetBufferPointer()),
+            image_ps_blob.GetBufferSize(),
+            null,
+            &image_pixel_shader,
+        );
+        if (hr < 0) fatalHr("CreatePixelShader(image)", hr);
+    }
 
     // Constant buffer
     var const_buf: *win32.ID3D11Buffer = undefined;
@@ -327,6 +344,19 @@ pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Render
         };
         const hr = device.CreateBuffer(&desc, null, &const_buf);
         if (hr < 0) fatalHr("CreateConstBuffer", hr);
+    }
+    var image_const_buf: *win32.ID3D11Buffer = undefined;
+    {
+        const desc: win32.D3D11_BUFFER_DESC = .{
+            .ByteWidth = std.mem.alignForward(u32, @sizeOf(kitty_image_mod.ImageConfig), 16),
+            .Usage = .DYNAMIC,
+            .BindFlags = .{ .CONSTANT_BUFFER = 1 },
+            .CPUAccessFlags = .{ .WRITE = 1 },
+            .MiscFlags = .{},
+            .StructureByteStride = 0,
+        };
+        const hr = device.CreateBuffer(&desc, null, &image_const_buf);
+        if (hr < 0) fatalHr("CreateConstBuffer(image)", hr);
     }
 
     // DirectWrite (factory2 for custom font fallback support, Win 8.1+)
@@ -362,6 +392,9 @@ pub fn init(dpi: u32, font_config: FontConfig, font_ligatures: bool) D3d11Render
         .vertex_shader = vertex_shader,
         .pixel_shader = pixel_shader,
         .const_buf = const_buf,
+        .image_pixel_shader = image_pixel_shader,
+        .image_const_buf = image_const_buf,
+        .image_blend_state = kitty_image_mod.createBlendState(device),
         .dwrite_factory = dwrite_factory,
         .d2d_factory = d2d_factory,
         .text_formats = fmts.text_formats,
@@ -425,6 +458,7 @@ pub fn deinit(self: *D3d11Renderer) void {
         log.info("uploadCellRow stats: uploaded={d} skipped={d} ({d:.1}% skipped)", .{ self.stats.rows_uploaded, self.stats.rows_skipped, skip_pct });
     }
     self.staging_texture.release();
+    self.kitty_images.deinit(std.heap.page_allocator);
     self.band_texture.release();
     if (self.glyph_cache) |*c| {
         c.deinit(self.glyph_cache_arena.allocator());
@@ -484,6 +518,9 @@ pub fn deinit(self: *D3d11Renderer) void {
     _ = self.rendering_params.IUnknown.Release();
     _ = self.dwrite_factory.IUnknown.Release();
     _ = self.const_buf.IUnknown.Release();
+    _ = self.image_blend_state.IUnknown.Release();
+    _ = self.image_const_buf.IUnknown.Release();
+    _ = self.image_pixel_shader.IUnknown.Release();
     _ = self.pixel_shader.IUnknown.Release();
     _ = self.vertex_shader.IUnknown.Release();
     _ = self.context.IUnknown.Release();
@@ -510,6 +547,7 @@ const PreparedFrame = struct {
 pub fn render(
     self: *D3d11Renderer,
     hwnd: win32.HWND,
+    tab_id: types.TabId,
     term: *vt.Terminal,
     tabbar: types.TabBarDraw,
     resizing: bool,
@@ -542,6 +580,15 @@ pub fn render(
     // upload + resize overlay. Returns the dirty row range used by phase 3.
     const cell_count = prepared.shader_col * prepared.term_shader_row;
     const build_t0 = if (diag_on) diag.qpcNow() else 0;
+    if (self.kitty_images.sync(
+        std.heap.page_allocator,
+        self,
+        tab_id,
+        term,
+    )) {
+        self.grid_force_full = true;
+    }
+    const kitty_images_present = self.kitty_images.hasVisibleAboveTextPlacements();
     const build = cell_buffer.buildAndUpload(
         self,
         term,
@@ -572,12 +619,14 @@ pub fn render(
         .client_h = prepared.client_h,
         .tab_bar_h = prepared.tab_bar_h,
         .term_pixel_h = prepared.term_pixel_h,
+        .cell_w = prepared.cs.x,
         .cell_h = prepared.cs.y,
         .term_shader_row = prepared.term_shader_row,
         .cell_count = cell_count,
         .dirty_min_row = build.dirty_min_row,
         .dirty_max_row = build.dirty_max_row,
         .resizing = resizing,
+        .kitty_images_present = kitty_images_present,
     });
     const grid_us = if (diag_on) diag.qpcUsSince(grid_t0) else 0;
 
@@ -1006,4 +1055,17 @@ pub fn reloadBackgroundImage(
 
 pub fn applyDecodedBackgroundImage(self: *D3d11Renderer, result: *const BgImageDecoded) void {
     bg_image.applyDecoded(self, result);
+}
+
+pub fn releaseKittyImagesForTab(self: *D3d11Renderer, tab_id: types.TabId) void {
+    self.kitty_images.releaseForTab(std.heap.page_allocator, tab_id);
+    self.grid_force_full = true;
+}
+
+test "terminal shader passes compile" {
+    const shader_source = @embedFile("terminal.hlsl");
+    const text_ps_blob = gpu.compileShaderBlob(shader_source, "PixelMain", "ps_5_0");
+    defer _ = text_ps_blob.IUnknown.Release();
+    const ps_blob = gpu.compileShaderBlob(shader_source, "ImagePixelMain", "ps_5_0");
+    defer _ = ps_blob.IUnknown.Release();
 }

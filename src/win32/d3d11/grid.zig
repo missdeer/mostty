@@ -19,6 +19,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const D3d11Renderer = @import("../d3d11.zig");
 const com = @import("com.zig");
+const kitty_images = @import("kitty_images.zig");
 const bg_image = @import("background_image.zig");
 
 // Compared frame-to-frame in render(); any mismatch sets
@@ -141,12 +142,14 @@ pub const DrawInputs = struct {
     client_h: u32,
     tab_bar_h: u32,
     term_pixel_h: u32,
+    cell_w: u16,
     cell_h: u16,
     term_shader_row: u32,
     cell_count: u32,
     dirty_min_row: ?u32,
     dirty_max_row: ?u32,
     resizing: bool,
+    kitty_images_present: bool,
 };
 
 /// Step B draw-scope decision and submission. Decides full-vs-dirty-strip
@@ -165,7 +168,7 @@ pub fn drawAndCopy(self: *D3d11Renderer, in: DrawInputs) void {
     //     Draw entirely. The persistent grid texture still holds the
     //     correct image from the previous render(); the CopyResource below
     //     delivers it to the freshly-rotated back buffer.
-    const full_redraw = self.grid_force_full or in.resizing;
+    const full_redraw = self.grid_force_full or in.resizing or (in.kitty_images_present and in.dirty_min_row != null);
     const have_row_dirty = in.dirty_min_row != null;
     const do_draw = full_redraw or have_row_dirty;
 
@@ -246,6 +249,17 @@ pub fn drawAndCopy(self: *D3d11Renderer, in: DrawInputs) void {
 
         // Clear the force-full flag only now that a redraw actually ran.
         self.grid_force_full = false;
+    }
+
+    if (do_draw) {
+        kitty_images.draw(self, .{
+            .client_w = in.client_w,
+            .client_h = in.client_h,
+            .tab_bar_h = in.tab_bar_h,
+            .term_pixel_h = in.term_pixel_h,
+            .cell_w = in.cell_w,
+            .cell_h = in.cell_h,
+        });
     }
 
     // Deliver the grid texture to the back buffer. Always runs — flip-model

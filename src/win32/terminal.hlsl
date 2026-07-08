@@ -33,7 +33,17 @@ struct Cell
 StructuredBuffer<Cell> cells : register(t0);
 Texture2D<float4> glyph_texture : register(t1);
 Texture2D<float4> bg_image : register(t2);
+Texture2D<float4> inline_image : register(t3);
 SamplerState bg_sampler : register(s0);
+
+cbuffer ImageConfig : register(b0)
+{
+    float4 image_dest;
+    float4 image_source;
+    float2 image_size;
+    float image_tab_bar_height;
+    float image_pad;
+}
 
 float4 VertexMain(uint id : SV_VERTEXID) : SV_POSITION
 {
@@ -220,4 +230,19 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     float alpha = lerp(back_a, 1.0, max(cov.r, max(cov.g, cov.b)));
 
     return float4(color * alpha, alpha);
+}
+
+float4 ImagePixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
+    float2 p = float2(sv_pos.x, sv_pos.y - image_tab_bar_height);
+    float2 q = p - image_dest.xy;
+    clip(q.x);
+    clip(q.y);
+    clip(image_dest.z - q.x);
+    clip(image_dest.w - q.y);
+
+    float2 uv = image_source.xy + (q / image_dest.zw) * image_source.zw;
+    uv = uv / image_size;
+    float4 img = inline_image.SampleLevel(bg_sampler, uv, 0);
+    float alpha = saturate(img.a);
+    return float4(to_linear(img.rgb) * alpha, alpha);
 }

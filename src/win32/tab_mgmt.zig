@@ -123,6 +123,15 @@ fn terminalInitOptions(cols: u16, rows: u16) vt.Terminal.Options {
     };
 }
 
+pub fn syncTerminalPixelSize(term: *vt.Terminal) void {
+    const cs = global.renderer.cell_size;
+    const cell_w = std.math.cast(u32, cs.cx) orelse 0;
+    const cell_h = std.math.cast(u32, cs.cy) orelse 0;
+    if (cell_w == 0 or cell_h == 0) return;
+    term.width_px = @as(u32, term.cols) * cell_w;
+    term.height_px = @as(u32, term.rows) * cell_h;
+}
+
 pub fn newTab(window: *Window) void {
     const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0)
         &global.config.launchers[0]
@@ -208,6 +217,7 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         tab.term_arena.allocator(),
         terminalInitOptions(cell_count.col, cell_count.row),
     ) catch |e| std.debug.panic("Terminal.init: {}", .{e});
+    syncTerminalPixelSize(tab.term);
     global.config.theme.applyToNewTerminal(tab.term);
 
     tab.vt_stream = .initAlloc(
@@ -314,6 +324,8 @@ pub fn destroyTab(window: *Window, tab: *Tab) void {
     // Direct join: the reader no longer SendMessages to the UI thread, so
     // there is no in-flight cross-thread call to drain via PeekMessage.
     tab.child_process.thread.join();
+
+    global.renderer.releaseKittyImagesForTab(tab.id);
 
     win32.closeHandle(tab.child_process.read);
     win32.closeHandle(tab.child_process.job);

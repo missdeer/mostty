@@ -41,6 +41,7 @@ pub fn renderWindow(window: *Window) void {
     };
     global.renderer.render(
         window.hwnd,
+        window.active().id,
         window.active().term,
         tabbar,
         window.resizing,
