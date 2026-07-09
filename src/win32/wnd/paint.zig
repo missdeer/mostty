@@ -142,12 +142,21 @@ pub fn onGetDpiScaledSize(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.
     const client_size = win32.getClientSize(hwnd);
     const grid_w = client_size.cx -| @as(i32, d3d11.scrollbarWidth(current_dpi));
     const grid_h_cur = @max(0, client_size.cy - tbh_cur);
-    // WM_GETDPISCALEDSIZE can arrive during display/RDP transitions while
-    // DWM reports a transient client size that did not pass through our
-    // WM_SIZING snap path. Preserve the visible whole-cell count, but do not
-    // require the current pixel dimensions to be exactly cell-aligned.
-    const col_count = @max(1, @divTrunc(grid_w, cs.cx));
-    const row_count = @max(1, @divTrunc(grid_h_cur, cs.cy));
+    // Prefer the active terminal's committed grid as the source of truth so a
+    // DPI change reproduces the same logical size at the new DPI. WM_GETDPISCALEDSIZE
+    // can arrive during display/RDP transitions where the DWM-reported client
+    // rect never passed through our WM_SIZING snap path and is not cell-aligned;
+    // recomputing from those pixels risks silently shrinking the grid by one
+    // cell across the transition. Client-derived counts stay as the fallback
+    // for early frames before the first tab is attached.
+    var col_count: i32 = @max(1, @divTrunc(grid_w, cs.cx));
+    var row_count: i32 = @max(1, @divTrunc(grid_h_cur, cs.cy));
+    const window = global_mod.windowFromHwnd(hwnd);
+    if (window.tabs.items.len > 0) {
+        const tab = window.active();
+        col_count = @intCast(tab.term.cols);
+        row_count = @intCast(tab.term.rows);
+    }
 
     const new_cs = global.renderer.cellSizeForDpi(new_dpi);
     const new_client_w = col_count * new_cs.cx + @as(i32, d3d11.scrollbarWidth(new_dpi));
