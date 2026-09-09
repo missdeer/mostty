@@ -85,4 +85,12 @@ void mostty_tab_set_selection(MosttyTab *tab, bool active, uint32_t start_col, u
 
 size_t mostty_encode_key(uint32_t key, uint32_t mods, bool app_cursor, uint8_t *buf, size_t cap);
 
+/* Pure input transforms. Paste needs at most len + 12 bytes; zero means empty
+   output or failure, and failed output must not be sent to the PTY. */
+size_t mostty_encode_paste(const uint8_t *ptr, size_t len, bool bracketed,
+                          bool normalize, uint8_t *buf, size_t cap);
+typedef struct { size_t offset; size_t len; } MosttySSHHost;
+/* Returns required count; cap == 0 queries it. Entries borrow input offsets. */
+size_t mostty_ssh_hosts(const uint8_t *ptr, size_t len, MosttySSHHost * _Nullable out, size_t cap);
+
 #endif

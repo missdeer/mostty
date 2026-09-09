@@ -763,22 +763,17 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     @objc func paste(_ sender: Any?) {
         guard let s = NSPasteboard.general.string(forType: .string) else { return }
-        // Terminals expect Enter as CR, including inside bracketed paste.
-        let normalized = s.replacingOccurrences(of: "\r\n", with: "\r")
-                          .replacingOccurrences(of: "\n", with: "\r")
-        pasteBytes(Array(normalized.utf8))
+        pasteBytes(Array(s.utf8), normalizeNewlines: true)
     }
 
-    private func pasteBytes(_ content: [UInt8]) {
+    private func pasteBytes(_ content: [UInt8], normalizeNewlines: Bool = false) {
         guard let t = tab, !terminated else { return }
-        var bytes = content
-        if mostty_tab_bracketed_paste(t) {
-            // Strip any embedded paste-end marker so clipboard content can't
-            // terminate bracketed paste early and inject the trailing bytes as
-            // commands (mirrors the Windows PasteEndStripper).
-            bytes = KeyInput.stripPasteEnd(bytes)
-            bytes = Array("\u{1b}[200~".utf8) + bytes + Array("\u{1b}[201~".utf8)
-        }
+        // Encoding can only shrink the content, plus two six-byte markers.
+        var bytes = [UInt8](repeating: 0, count: content.count + 12)
+        let n = mostty_encode_paste(content, content.count, mostty_tab_bracketed_paste(t),
+                                    normalizeNewlines, &bytes, bytes.count)
+        guard n > 0 else { return }
+        bytes.removeSubrange(n..<bytes.count)
         writeBytes(bytes)
         scrollToBottomOnInput()
     }

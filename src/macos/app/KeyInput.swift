@@ -1,6 +1,6 @@
 import AppKit
 
-// Mirrors the `Key` enum in capi.zig — values must stay in sync.
+// Mirrors the `Key` enum in terminal/key_encode.zig — values must stay in sync.
 enum MosttyKey: UInt32 {
     case up = 0, down = 1, right = 2, left = 3
     case home = 4, end = 5, pageUp = 6, pageDown = 7
@@ -117,34 +117,4 @@ enum KeyInput {
         return out.isEmpty ? nil : out
     }
 
-    /// Remove every embedded bracketed-paste end marker (`ESC [ 2 0 1 ~`) from
-    /// pasted bytes so the payload can't close paste mode early.
-    static func stripPasteEnd(_ bytes: [UInt8]) -> [UInt8] {
-        let marker: [UInt8] = [0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e]
-        // Fast path: without an ESC there is nothing to strip, which is the
-        // common case for plain-text pastes and avoids scanning at all.
-        guard bytes.count >= marker.count, bytes.contains(marker[0]) else { return bytes }
-        var out: [UInt8] = []
-        out.reserveCapacity(bytes.count)
-        var i = 0
-        while i < bytes.count {
-            if bytes[i] == marker[0] && matchesMarker(bytes, at: i, marker) {
-                i += marker.count
-            } else {
-                out.append(bytes[i])
-                i += 1
-            }
-        }
-        return out
-    }
-
-    private static func matchesMarker(_ bytes: [UInt8], at i: Int, _ marker: [UInt8]) -> Bool {
-        guard i + marker.count <= bytes.count else { return false }
-        var k = 1
-        while k < marker.count {
-            if bytes[i + k] != marker[k] { return false }
-            k += 1
-        }
-        return true
-    }
 }

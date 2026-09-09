@@ -11,62 +11,43 @@ const util = @import("../util.zig");
 
 const Window = state.Window;
 
-const SpecialKey = union(enum) {
-    cursor: u8,
-    tilde: u8,
-    fkey14: u8,
-};
+const key_encode = @import("../../terminal/key_encode.zig");
 
-fn vkToSpecial(wparam: win32.WPARAM) ?SpecialKey {
+fn vkToSpecial(wparam: win32.WPARAM) ?key_encode.Key {
     return switch (wparam) {
-        @intFromEnum(win32.VK_UP) => .{ .cursor = 'A' },
-        @intFromEnum(win32.VK_DOWN) => .{ .cursor = 'B' },
-        @intFromEnum(win32.VK_RIGHT) => .{ .cursor = 'C' },
-        @intFromEnum(win32.VK_LEFT) => .{ .cursor = 'D' },
-        @intFromEnum(win32.VK_HOME) => .{ .cursor = 'H' },
-        @intFromEnum(win32.VK_END) => .{ .cursor = 'F' },
-        @intFromEnum(win32.VK_INSERT) => .{ .tilde = 2 },
-        @intFromEnum(win32.VK_DELETE) => .{ .tilde = 3 },
-        @intFromEnum(win32.VK_PRIOR) => .{ .tilde = 5 },
-        @intFromEnum(win32.VK_NEXT) => .{ .tilde = 6 },
-        @intFromEnum(win32.VK_F1) => .{ .fkey14 = 'P' },
-        @intFromEnum(win32.VK_F2) => .{ .fkey14 = 'Q' },
-        @intFromEnum(win32.VK_F3) => .{ .fkey14 = 'R' },
-        @intFromEnum(win32.VK_F4) => .{ .fkey14 = 'S' },
-        @intFromEnum(win32.VK_F5) => .{ .tilde = 15 },
-        @intFromEnum(win32.VK_F6) => .{ .tilde = 17 },
-        @intFromEnum(win32.VK_F7) => .{ .tilde = 18 },
-        @intFromEnum(win32.VK_F8) => .{ .tilde = 19 },
-        @intFromEnum(win32.VK_F9) => .{ .tilde = 20 },
-        @intFromEnum(win32.VK_F10) => .{ .tilde = 21 },
-        @intFromEnum(win32.VK_F11) => .{ .tilde = 23 },
-        @intFromEnum(win32.VK_F12) => .{ .tilde = 24 },
+        @intFromEnum(win32.VK_UP) => .up,
+        @intFromEnum(win32.VK_DOWN) => .down,
+        @intFromEnum(win32.VK_RIGHT) => .right,
+        @intFromEnum(win32.VK_LEFT) => .left,
+        @intFromEnum(win32.VK_HOME) => .home,
+        @intFromEnum(win32.VK_END) => .end,
+        @intFromEnum(win32.VK_INSERT) => .insert,
+        @intFromEnum(win32.VK_DELETE) => .delete,
+        @intFromEnum(win32.VK_PRIOR) => .page_up,
+        @intFromEnum(win32.VK_NEXT) => .page_down,
+        @intFromEnum(win32.VK_F1) => .f1,
+        @intFromEnum(win32.VK_F2) => .f2,
+        @intFromEnum(win32.VK_F3) => .f3,
+        @intFromEnum(win32.VK_F4) => .f4,
+        @intFromEnum(win32.VK_F5) => .f5,
+        @intFromEnum(win32.VK_F6) => .f6,
+        @intFromEnum(win32.VK_F7) => .f7,
+        @intFromEnum(win32.VK_F8) => .f8,
+        @intFromEnum(win32.VK_F9) => .f9,
+        @intFromEnum(win32.VK_F10) => .f10,
+        @intFromEnum(win32.VK_F11) => .f11,
+        @intFromEnum(win32.VK_F12) => .f12,
         else => null,
     };
 }
 
-fn xtermModifier() u8 {
+fn keyModifiers() u32 {
     const shift = win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0;
     const alt = win32.GetKeyState(@intFromEnum(win32.VK_MENU)) < 0;
     const ctrl = win32.GetKeyState(@intFromEnum(win32.VK_CONTROL)) < 0;
-    return 1 + @as(u8, if (shift) 1 else 0) + @as(u8, if (alt) 2 else 0) + @as(u8, if (ctrl) 4 else 0);
-}
-
-fn formatSpecialKey(buf: *[16]u8, key: SpecialKey, mod: u8) []const u8 {
-    return switch (key) {
-        .cursor => |final| if (mod == 1)
-            std.fmt.bufPrint(buf, "\x1b[{c}", .{final}) catch unreachable
-        else
-            std.fmt.bufPrint(buf, "\x1b[1;{d}{c}", .{ mod, final }) catch unreachable,
-        .tilde => |num| if (mod == 1)
-            std.fmt.bufPrint(buf, "\x1b[{d}~", .{num}) catch unreachable
-        else
-            std.fmt.bufPrint(buf, "\x1b[{d};{d}~", .{ num, mod }) catch unreachable,
-        .fkey14 => |final| if (mod == 1)
-            std.fmt.bufPrint(buf, "\x1bO{c}", .{final}) catch unreachable
-        else
-            std.fmt.bufPrint(buf, "\x1b[1;{d}{c}", .{ mod, final }) catch unreachable,
-    };
+    return (if (shift) key_encode.mod_shift else @as(u32, 0)) |
+        (if (alt) key_encode.mod_alt else @as(u32, 0)) |
+        (if (ctrl) key_encode.mod_ctrl else @as(u32, 0));
 }
 
 fn handleShortcut(window: *Window, wparam: win32.WPARAM) bool {
@@ -160,7 +141,7 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
             break :seq_blk if (util.isShiftDown()) "\x1b[Z" else null;
         }
         if (vkToSpecial(wparam)) |key| {
-            break :seq_blk formatSpecialKey(&key_buf, key, xtermModifier());
+            break :seq_blk key_encode.encodeKey(key, keyModifiers(), false, &key_buf);
         }
         break :seq_blk null;
     };

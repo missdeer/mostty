@@ -406,25 +406,19 @@ enum SSHLaunchers {
         return parse(text)
     }
 
-    // Match Windows discovery: only concrete aliases in the top-level config.
     static func parse(_ text: String) -> [TerminalLauncher] {
-        let text = text.hasPrefix("\u{feff}") ? String(text.dropFirst()) : text
-        var launchers: [TerminalLauncher] = []
-        for line in text.components(separatedBy: "\n") {
-            let fields = line.split { $0 == " " || $0 == "\t" || $0 == "\r" }
-            guard fields.first?.lowercased() == "host" else { continue }
-            for field in fields.dropFirst() {
-                if field.hasPrefix("#") { break }
-                if field.contains(where: { "*?!\"".contains($0) }) { continue }
-                let host = String(field)
-                // Launchers run through $SHELL -lc; keep the alias one literal
-                // argument, and prevent leading '-' from becoming an option.
-                let quoted = "'" + host.replacingOccurrences(of: "'", with: "'\\''") + "'"
-                launchers.append(TerminalLauncher(label: "[SSH: \(host)]",
-                                                 command: "ssh -- \(quoted)", directory: ""))
-            }
+        let bytes = Array(text.utf8)
+        let count = mostty_ssh_hosts(bytes, bytes.count, nil, 0)
+        guard count > 0 else { return [] }
+        var hosts = [MosttySSHHost](repeating: MosttySSHHost(), count: count)
+        let actual = mostty_ssh_hosts(bytes, bytes.count, &hosts, hosts.count)
+        guard actual == count else { return [] }
+        return hosts.map { entry in
+            let host = String(decoding: bytes[entry.offset..<(entry.offset + entry.len)], as: UTF8.self)
+            // Shell quoting stays native; parsing only identifies aliases.
+            let quoted = "'" + host.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            return TerminalLauncher(label: "[SSH: \(host)]", command: "ssh -- \(quoted)", directory: "")
         }
-        return launchers
     }
 }
 

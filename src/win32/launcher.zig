@@ -34,25 +34,10 @@ fn loadSshHostsErr(arena: std.mem.Allocator) ![]const SshHost {
         error.FileNotFound => return &.{},
         else => return e,
     };
-    const bytes = if (std.mem.startsWith(u8, raw, "\xEF\xBB\xBF")) raw[3..] else raw;
-
     var hosts: std.ArrayListUnmanaged(SshHost) = .empty;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        if (line.len < 5) continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..4], "Host")) continue;
-        // Require whitespace after "Host" so "HostName" doesn't match.
-        if (line[4] != ' ' and line[4] != '\t') continue;
-        const rest = std.mem.trim(u8, line[4..], " \t");
-        var nit = std.mem.tokenizeAny(u8, rest, " \t");
-        while (nit.next()) |name| {
-            if (name[0] == '#') break; // trailing comment
-            if (std.mem.indexOfAny(u8, name, "*?!\"") != null) continue;
-            if (!std.unicode.utf8ValidateSlice(name)) continue;
-            try hosts.append(arena, .{ .name = try arena.dupe(u8, name) });
-        }
+    var it = @import("../ssh_config.zig").Iterator.init(raw);
+    while (it.next()) |name| {
+        try hosts.append(arena, .{ .name = try arena.dupe(u8, name) });
     }
     return hosts.toOwnedSlice(arena);
 }

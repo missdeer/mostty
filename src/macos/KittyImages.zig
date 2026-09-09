@@ -3,6 +3,7 @@ const KittyImages = @This();
 const std = @import("std");
 const vt = @import("vt");
 const graphics = @import("Apple.zig").graphics;
+const geometry = @import("../renderer/image_geometry.zig");
 
 const Entry = struct {
     image: *graphics.Image,
@@ -109,19 +110,15 @@ pub fn sync(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal
 
 fn append(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal, top_y: u32, image: vt.kitty.graphics.Image, placement_id: u32, z: i32, p: vt.kitty.graphics.RenderPlacement) !void {
     if (image.data.isPending() or p.dest_width == 0 or p.dest_height == 0) return;
-    const source_x = @min(image.width, p.source_x);
-    const source_y = @min(image.height, p.source_y);
-    const source_width = @min(image.width - source_x, if (p.source_width > 0) p.source_width else image.width);
-    const source_height = @min(image.height - source_y, if (p.source_height > 0) p.source_height else image.height);
-    if (source_width == 0 or source_height == 0) return;
+    const crop = geometry.sourceCrop(image.width, image.height, p.source_x, p.source_y, p.source_width, p.source_height) orelse return;
     const point = term.screens.active.pages.pointFromPin(.screen, p.top_left) orelse return;
     const x = @as(f64, @floatFromInt(p.top_left.x)) * @as(f64, @floatFromInt(term.width_px / term.cols)) + @as(f64, @floatFromInt(p.offset_x));
-    const y = (@as(f64, @floatFromInt(point.screen.y)) - @as(f64, @floatFromInt(top_y))) *
+    const y = @as(f64, @floatFromInt(geometry.relativeRow(point.screen.y, top_y))) *
         @as(f64, @floatFromInt(term.height_px / term.rows)) + @as(f64, @floatFromInt(p.offset_y));
     if (x >= @as(f64, @floatFromInt(term.width_px)) or y >= @as(f64, @floatFromInt(term.height_px)) or
         x + @as(f64, @floatFromInt(p.dest_width)) <= 0 or y + @as(f64, @floatFromInt(p.dest_height)) <= 0) return;
     if (!self.images.contains(image.id)) {
-        const rgba = try imageRgba(allocator, image);
+        const rgba = try @import("../renderer/image_pixels.zig").toRgba(allocator, image);
         defer allocator.free(rgba);
         const native = try graphics.Image.createRgba(rgba, image.width, image.height);
         errdefer native.release();
@@ -135,10 +132,10 @@ fn append(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal, 
         .y = y,
         .width = p.dest_width,
         .height = p.dest_height,
-        .source_x = source_x,
-        .source_y = source_y,
-        .source_width = source_width,
-        .source_height = source_height,
+        .source_x = crop.x,
+        .source_y = crop.y,
+        .source_width = crop.width,
+        .source_height = crop.height,
     });
 }
 
@@ -162,29 +159,4 @@ pub fn draw(self: *const KittyImages, context: *graphics.BitmapContext, layer: L
         // remain exact without allocating a new CGImage for each placement.
         ctx.drawImage(context, graphics.Rect.init(p.x - @as(f64, @floatFromInt(p.source_x)) * sx, top + @as(f64, @floatFromInt(p.source_y)) * sy - image_height, image_width, image_height), entry.image);
     }
-}
-
-fn imageRgba(allocator: std.mem.Allocator, image: vt.kitty.graphics.Image) ![]u8 {
-    const data = image.data.bytes() orelse return error.InvalidData;
-    const channels: usize = switch (image.format) {
-        .rgba => 4,
-        .rgb => 3,
-        .gray_alpha => 2,
-        .gray => 1,
-        .png => return error.InvalidData,
-    };
-    const count = try std.math.mul(usize, image.width, image.height);
-    if (data.len != try std.math.mul(usize, count, channels)) return error.InvalidData;
-    const rgba = try allocator.alloc(u8, try std.math.mul(usize, count, 4));
-    for (0..count) |i| {
-        const src = data[i * channels ..][0..channels];
-        const dst = rgba[i * 4 ..][0..4];
-        if (channels >= 3) {
-            @memcpy(dst[0..3], src[0..3]);
-        } else {
-            @memset(dst[0..3], src[0]);
-        }
-        dst[3] = if (channels == 2 or channels == 4) src[channels - 1] else 255;
-    }
-    return rgba;
 }

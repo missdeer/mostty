@@ -9,6 +9,7 @@ const std = @import("std");
 const vt = @import("vt");
 const TerminalSession = @import("../terminal/Session.zig");
 const Config = @import("../Config.zig");
+const cell_style = @import("../renderer/cell_style.zig");
 const url_hover = @import("../terminal/url_hover.zig");
 
 pub const Rgba = packed struct(u32) {
@@ -274,63 +275,28 @@ fn styleForCell(
     background: Rgba,
     term: *vt.Terminal,
 ) Style {
-    var result = Style{ .foreground = foreground, .background = background };
-    // `background` carries the window's background alpha; anything that resolves
-    // to an explicit color must be opaque instead, so track which one applies.
-    var default_background = true;
-    if (cell.style_id != 0) {
-        const style = page.styles.get(page.memory, cell.style_id).*;
-        result.foreground = resolveColor(style.fg_color, &term.colors.palette.current, foreground);
-        result.background = resolveColor(style.bg_color, &term.colors.palette.current, background);
-        result.bold = style.flags.bold;
-        result.italic = style.flags.italic;
-        result.faint = style.flags.faint;
-        result.invisible = style.flags.invisible;
-        result.underline = @intFromEnum(style.flags.underline);
-        result.strikethrough = style.flags.strikethrough;
-        result.overline = style.flags.overline;
-        if (style.flags.inverse) {
-            const swap = result.foreground;
-            result.foreground = result.background;
-            result.background = swap;
-            default_background = false;
-        } else {
-            default_background = switch (style.bg_color) {
-                .none => true,
-                else => false,
-            };
-        }
-    }
-
-    switch (cell.content_tag) {
-        .bg_color_palette => {
-            result.background = fromRgb(term.colors.palette.current[cell.content.color_palette.data]);
-            default_background = false;
-        },
-        .bg_color_rgb => {
-            result.background = fromRgb(cell.content.color_rgb);
-            default_background = false;
-        },
-        else => {},
-    }
+    const resolved = cell_style.forCell(cell, page, &term.colors.palette.current, cell_style.rgbToU24(.{ .r = foreground.r, .g = foreground.g, .b = foreground.b }), cell_style.rgbToU24(.{ .r = background.r, .g = background.g, .b = background.b }));
+    var result: Style = .{
+        .foreground = fromRgb(Config.u24ToRgb(resolved.foreground)),
+        .background = fromRgb(Config.u24ToRgb(resolved.background)),
+        .default_background = resolved.default_background,
+        .bold = resolved.flags.bold,
+        .italic = resolved.flags.italic,
+        .faint = resolved.flags.faint,
+        .invisible = resolved.flags.invisible,
+        .underline = @intFromEnum(resolved.flags.underline),
+        .strikethrough = resolved.flags.strikethrough,
+        .overline = resolved.flags.overline,
+    };
     if (result.faint) {
         result.foreground.r /= 2;
         result.foreground.g /= 2;
         result.foreground.b /= 2;
     }
-    result.background.a = if (default_background) background.a else 255;
-    result.default_background = default_background;
+    result.background.a = if (resolved.default_background) background.a else 255;
     result.foreground.a = 255;
     if (result.invisible) result.foreground = result.background;
     return result;
-}
-
-fn resolveColor(color: vt.Style.Color, palette: anytype, fallback: Rgba) Rgba {
-    return switch (color) {
-        .none => fallback,
-        .palette => |index| fromRgb(palette[index]),
-        .rgb => |rgb| fromRgb(rgb),
-    };
 }
 
 fn fromRgb(rgb: anytype) Rgba {

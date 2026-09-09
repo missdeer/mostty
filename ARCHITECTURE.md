@@ -23,6 +23,10 @@ src/
   terminal/Session.zig     platform-neutral VT state, stream, and effects owner
   terminal/url_hover.zig   shared viewport URL detection for Windows and macOS
   terminal/mouse_report.zig shared VT mouse-report encoding for Windows and macOS
+  terminal/key_encode.zig shared xterm special-key encoding
+  terminal/paste.zig       shared streaming paste framing and normalization
+  ssh_config.zig          shared top-level SSH Host alias iterator
+  input_capi.zig          allocation-free host bridge for keys, paste, SSH aliases
   macos/PtySession.zig     macOS shell process, PTY, and VT session owner
   macos/GridModel.zig      VT viewport to resolved renderer-cell conversion
   macos/CoreTextRenderer.zig CoreText rasterization and renderer resource owner
@@ -31,6 +35,9 @@ src/
   Config.zig               1.4 kLOC — config file parser, theme resolution, arena owner
   vendor/ghostty-sprite/   vendored Ghostty sprite face (block/box/braille/...)
   renderer/sprite.zig      shared ghostty-sprite dispatcher and alpha/BGRA output
+  renderer/cell_style.zig  shared VT colors, SGR flags, explicit-background resolution
+  renderer/image_pixels.zig shared Kitty decoded-pixel conversion to RGBA
+  renderer/image_geometry.zig shared image source crop and viewport row arithmetic
   win32/
     mostty.manifest        DPI/UAC manifest
     mostty.rc / icons      Win32 resources
@@ -231,7 +238,7 @@ Handlers by family:
 
 - **Keyboard** (`wnd/keyboard.zig`): `handleShortcut` intercepts
   Ctrl+T / Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1..9 / Ctrl+PageUp/Down
-  before VT dispatch. `vkToSpecial` + `xtermModifier` + `formatSpecialKey`
+  before VT dispatch. `vkToSpecial` + `keyModifiers` + shared `encodeKey`
   encode arrows/F-keys/Home/End/PageX/Insert/Delete using xterm CSI
   sequences (e.g. `\x1b[1;2C` for Shift+Right). Backspace = `\x7f`. Plain
   Tab falls through to `WM_CHAR`; Shift+Tab → `\x1b[Z`. `WM_CHAR` handles
@@ -959,10 +966,30 @@ shell stdout
 
 ### 9.2 Keyboard → PTY
 
+Both hosts map native events to `terminal/key_encode.zig`. The macOS C-ABI
+is implemented by `input_capi.zig`; Windows retains normal cursor sequences
+while macOS passes the live application-cursor mode. Clipboard normalization
+and bracketed-paste framing use `terminal/paste.zig`: Windows supplies decoded
+UTF-16 codepoints to its streaming state, and macOS encodes UTF-8 into a
+caller-owned buffer before writing. File-drop quoting remains platform-specific;
+macOS leaves newlines in quoted file paths intact as before.
+
+SSH menus share the borrowing alias iterator in `ssh_config.zig`. The macOS
+bridge returns offsets into Swift's input buffer, with no Zig allocation to
+release. File reads and shell quoting remain native. Interaction tests link
+the real `input_capi.zig` object alongside their window/PTY test doubles.
+
+The renderers share baseline cell colors and SGR flags through
+`renderer/cell_style.zig`. Faint, blink/reverse handling, selection, cursor,
+glyph shaping and GPU attribute packing retain their host behavior. Kitty
+image uploaders share RGBA conversion and source-crop arithmetic, while
+placement visibility, ordering, Unicode placeholders and native image-resource
+lifetimes remain in the existing platform pipelines.
+
 ```
 WM_KEYDOWN
   → handleShortcut (Ctrl+T/W/Tab/1..9/PgUp/PgDn etc.) — consume
-  → else vkToSpecial + xtermModifier → write CSI
+  → else vkToSpecial + keyModifiers + shared encodeKey → write CSI
 WM_CHAR
   → drop control duplicates that KEYDOWN already handled
   → reassemble UTF-16 surrogates via per-tab high_surrogate

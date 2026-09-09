@@ -7,42 +7,7 @@ const util = @import("util.zig");
 const Tab = state.Tab;
 const Window = state.Window;
 
-pub const paste_end = "\x1b[201~";
-
-pub const PasteEndStripper = struct {
-    matched: usize = 0,
-
-    pub fn finish(stripper: *PasteEndStripper, writer: *std.Io.Writer) error{WriteFailed}!void {
-        if (stripper.matched != 0) {
-            try writer.writeAll(paste_end[0..stripper.matched]);
-            stripper.matched = 0;
-        }
-    }
-
-    pub fn onCodepoint(
-        stripper: *PasteEndStripper,
-        writer: *std.Io.Writer,
-        codepoint: u21,
-    ) error{WriteFailed}!enum { consumed, ignored } {
-        if (codepoint == paste_end[stripper.matched]) {
-            stripper.matched += 1;
-            if (stripper.matched == paste_end.len) {
-                std.log.warn("stripped paste-end marker from clipboard data", .{});
-                stripper.matched = 0;
-            }
-            return .consumed;
-        }
-        if (stripper.matched != 0) {
-            try writer.writeAll(paste_end[0..stripper.matched]);
-            stripper.matched = 0;
-        }
-        if (codepoint == paste_end[0]) {
-            stripper.matched = 1;
-            return .consumed;
-        }
-        return .ignored;
-    }
-};
+const paste_core = @import("../terminal/paste.zig");
 
 pub fn copyToClipboard(hwnd: win32.HWND, utf8: [:0]const u8) void {
     if (win32.OpenClipboard(hwnd) == 0) {
@@ -166,11 +131,10 @@ pub fn onDropFiles(window: *Window, hdrop: win32.HDROP) void {
 
 pub fn pasteUtf16(tab: *Tab, utf16: [*:0]const u16, writer: *std.Io.Writer) error{ WriteFailed, Reported }!void {
     const bracketed = tab.term.modes.get(.bracketed_paste);
-    if (bracketed) try writer.writeAll("\x1b[200~");
-    var end_stripper: PasteEndStripper = .{};
+    var paste_state: paste_core.State = .{ .bracketed = bracketed };
+    try paste_state.begin(writer);
 
     var i: usize = 0;
-    var last_was_cr = false;
     while (utf16[i] != 0) {
         const cp: u21 = blk: {
             if (std.unicode.utf16IsHighSurrogate(utf16[i])) {
@@ -196,35 +160,14 @@ pub fn pasteUtf16(tab: *Tab, utf16: [*:0]const u16, writer: *std.Io.Writer) erro
             break :blk c;
         };
 
-        // Normalize line endings to CR. Windows clipboards store newlines
-        // as CRLF, but terminals treat Enter as a bare CR — passing the LF
-        // through leaves it as a stray byte the shell can't interpret, so
-        // pasted lines collapse onto one line. Matches xterm bracketed
-        // paste spec and what alacritty/kitty/foot do.
-        var out_cp: u21 = cp;
-        if (cp == '\n') {
-            if (last_was_cr) {
-                last_was_cr = false;
-                continue;
-            }
-            out_cp = '\r';
-        } else {
-            last_was_cr = (cp == '\r');
-        }
-
-        switch (if (bracketed) try end_stripper.onCodepoint(writer, out_cp) else .ignored) {
-            .consumed => {},
-            .ignored => {
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(out_cp, &utf8_buf) catch {
-                    std.log.err("paste: invalid codepoint U+{x} at index {}", .{ out_cp, i });
-                    return error.Reported;
-                };
-                try writer.writeAll(utf8_buf[0..len]);
+        paste_state.onCodepoint(writer, cp) catch |err| switch (err) {
+            error.WriteFailed => return error.WriteFailed,
+            else => {
+                std.log.err("paste: invalid codepoint U+{x} at index {}", .{ cp, i });
+                return error.Reported;
             },
-        }
+        };
     }
-    try end_stripper.finish(writer);
-    if (bracketed) try writer.writeAll(paste_end);
+    try paste_state.finish(writer);
     try writer.flush();
 }

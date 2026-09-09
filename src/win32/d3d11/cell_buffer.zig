@@ -22,6 +22,7 @@ const vt = @import("vt");
 const types = @import("../types.zig");
 const gpu = @import("gpu.zig");
 const color = @import("color.zig");
+const cell_style = @import("../../renderer/cell_style.zig");
 const emoji = @import("emoji.zig");
 const glyph_mod = @import("glyph.zig");
 const com = @import("com.zig");
@@ -414,55 +415,21 @@ fn visualFromCell(
     else
         &.{};
 
-    var cell_fg: u24 = eff_fg;
-    var cell_bg: u24 = eff_bg;
-    var is_default_bg = true;
-    var bold = false;
-    var italic = false;
-    var faint = false;
-    var invisible = false;
-    var attrs: u32 = 0;
-
-    if (cell.style_id != 0) {
-        const style = page.styles.get(page.memory, cell.style_id).*;
-        cell_fg = color.resolveColor(style.fg_color, palette, eff_fg);
-        cell_bg = color.resolveColor(style.bg_color, palette, eff_bg);
-        bold = style.flags.bold;
-        italic = style.flags.italic;
-        faint = style.flags.faint;
-        invisible = style.flags.invisible;
-        if (style.flags.blink) {
-            result.has_blink = true;
-            if (!blink_visible) invisible = true;
-        }
-        attrs |= @as(u32, @intFromEnum(style.flags.underline)) & gpu.cell_attr_underline_mask;
-        if (style.flags.strikethrough) attrs |= gpu.cell_attr_strikethrough;
-        if (style.flags.overline) attrs |= gpu.cell_attr_overline;
-        if (style.flags.inverse) {
-            const tmp = cell_fg;
-            cell_fg = cell_bg;
-            cell_bg = tmp;
-            is_default_bg = false;
-        } else {
-            is_default_bg = switch (style.bg_color) {
-                .none => true,
-                else => false,
-            };
-        }
+    const resolved = cell_style.forCell(cell, page, palette, eff_fg, eff_bg);
+    var cell_fg = resolved.foreground;
+    const cell_bg = resolved.background;
+    const is_default_bg = resolved.default_background;
+    const bold = resolved.flags.bold;
+    const italic = resolved.flags.italic;
+    const faint = resolved.flags.faint;
+    var invisible = resolved.flags.invisible;
+    var attrs: u32 = @as(u32, @intFromEnum(resolved.flags.underline)) & gpu.cell_attr_underline_mask;
+    if (resolved.flags.blink) {
+        result.has_blink = true;
+        if (!blink_visible) invisible = true;
     }
-
-    switch (cell.content_tag) {
-        .bg_color_palette => {
-            cell_bg = color.rgbToU24(palette[cell.content.color_palette.data]);
-            is_default_bg = false;
-        },
-        .bg_color_rgb => {
-            const rgb = cell.content.color_rgb;
-            cell_bg = @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
-            is_default_bg = false;
-        },
-        else => {},
-    }
+    if (resolved.flags.strikethrough) attrs |= gpu.cell_attr_strikethrough;
+    if (resolved.flags.overline) attrs |= gpu.cell_attr_overline;
     if (emoji.isColorGlyphRun(codepoint, grapheme)) attrs |= gpu.cell_attr_color_glyph;
     if (invisible) attrs |= gpu.cell_attr_invisible;
 

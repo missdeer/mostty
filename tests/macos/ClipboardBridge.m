@@ -160,7 +160,6 @@ size_t mostty_tab_selection_text(MosttyTab *tab, uint8_t *buf, size_t cap) {
     memcpy(buf, text, len);
     return len;
 }
-size_t mostty_encode_key(uint32_t key, uint32_t mods, bool app_cursor, uint8_t *buf, size_t cap) { return 0; }
 
 @interface ClipboardDragInfo : NSObject <NSDraggingInfo>
 @property(strong) NSPasteboard *draggingPasteboard;

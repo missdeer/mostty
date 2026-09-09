@@ -2,22 +2,11 @@
 //! faint dimming, and premultiplied-alpha-safe selection fades.
 
 const std = @import("std");
-const vt = @import("vt");
 const gpu = @import("gpu.zig");
 
 const Rgba8 = gpu.Rgba8;
 
-pub fn resolveColor(c: vt.Style.Color, palette: *const vt.color.Palette, default: u24) u24 {
-    return switch (c) {
-        .none => default,
-        .palette => |idx| rgbToU24(palette[idx]),
-        .rgb => |rgb| rgbToU24(rgb),
-    };
-}
-
-pub fn rgbToU24(rgb: vt.color.RGB) u24 {
-    return @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
-}
+pub const rgbToU24 = @import("../../renderer/cell_style.zig").rgbToU24;
 
 // SGR faint: halve perceived luminance. The shader decodes via pow(c, 2.2),
 // so a sRGB c/2 byte-domain divide would land at ~21% linear — far too dark.

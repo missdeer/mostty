@@ -6,6 +6,7 @@ const D3d11Renderer = @import("../d3d11.zig");
 const bg_image = @import("background_image.zig");
 const gpu = @import("gpu.zig");
 const types = @import("../types.zig");
+const geometry = @import("../../renderer/image_geometry.zig");
 
 const log = std.log.scoped(.kitty_images);
 
@@ -213,19 +214,8 @@ fn tryPreparePlacement(
     const dest_size = placement.pixelSize(image, term);
     if (dest_size.width == 0 or dest_size.height == 0) return;
 
-    const source_x = @min(image.width, placement.source_x);
-    const source_y = @min(image.height, placement.source_y);
-    const source_width = if (placement.source_width > 0)
-        @min(image.width - source_x, placement.source_width)
-    else
-        image.width - source_x;
-    const source_height = if (placement.source_height > 0)
-        @min(image.height - source_y, placement.source_height)
-    else
-        image.height - source_y;
-    if (source_width == 0 or source_height == 0) return;
-
-    const y_pos: i32 = @as(i32, @intCast(img_top_y)) - @as(i32, @intCast(top_y));
+    const crop = geometry.sourceCrop(image.width, image.height, placement.source_x, placement.source_y, placement.source_width, placement.source_height) orelse return;
+    const y_pos = std.math.cast(i32, geometry.relativeRow(img_top_y, top_y)) orelse return;
     try self.placements.append(alloc, .{
         .image_id = image.id,
         .x = @intCast(rect.top_left.x),
@@ -235,10 +225,10 @@ fn tryPreparePlacement(
         .height = dest_size.height,
         .cell_offset_x = placement.x_offset,
         .cell_offset_y = placement.y_offset,
-        .source_x = source_x,
-        .source_y = source_y,
-        .source_width = source_width,
-        .source_height = source_height,
+        .source_x = crop.x,
+        .source_y = crop.y,
+        .source_width = crop.width,
+        .source_height = crop.height,
     });
 }
 
@@ -255,7 +245,7 @@ fn uploadImageIfNeeded(
         if (entry.generation == image.generation) return;
     }
 
-    const rgba = try imageToRgba(alloc, image);
+    const rgba = try @import("../../renderer/image_pixels.zig").toRgba(alloc, image);
     defer alloc.free(rgba);
 
     // Secure the map slot before any GPU work is recorded. Uploading first
@@ -274,52 +264,6 @@ fn uploadImageIfNeeded(
         .height = image.height,
     };
     invalidated.* = true;
-}
-
-fn imageToRgba(alloc: std.mem.Allocator, image: vt.kitty.graphics.Image) ![]u8 {
-    const pixel_count: usize = @as(usize, image.width) * image.height;
-    const out = try alloc.alloc(u8, pixel_count * 4);
-    errdefer alloc.free(out);
-    const data = image.data.bytes() orelse return error.InvalidData;
-
-    switch (image.format) {
-        .rgba => {
-            if (data.len != out.len) return error.InvalidData;
-            @memcpy(out, data);
-        },
-        .rgb => {
-            if (data.len != pixel_count * 3) return error.InvalidData;
-            var i: usize = 0;
-            while (i < pixel_count) : (i += 1) {
-                out[i * 4 + 0] = data[i * 3 + 0];
-                out[i * 4 + 1] = data[i * 3 + 1];
-                out[i * 4 + 2] = data[i * 3 + 2];
-                out[i * 4 + 3] = 255;
-            }
-        },
-        .gray => {
-            if (data.len != pixel_count) return error.InvalidData;
-            for (data, 0..) |v, i| {
-                out[i * 4 + 0] = v;
-                out[i * 4 + 1] = v;
-                out[i * 4 + 2] = v;
-                out[i * 4 + 3] = 255;
-            }
-        },
-        .gray_alpha => {
-            if (data.len != pixel_count * 2) return error.InvalidData;
-            var i: usize = 0;
-            while (i < pixel_count) : (i += 1) {
-                const gray = data[i * 2 + 0];
-                out[i * 4 + 0] = gray;
-                out[i * 4 + 1] = gray;
-                out[i * 4 + 2] = gray;
-                out[i * 4 + 3] = data[i * 2 + 1];
-            }
-        },
-        .png => return error.InvalidData,
-    }
-    return out;
 }
 
 pub fn uploadTexture(
