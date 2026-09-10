@@ -247,6 +247,7 @@ pub fn computeTabBarHeight(
 ) i32 {
     const lh = font_mod.measureTabBarLineHeight(&dwrite_factory.IDWriteFactory, dpi, primary, font_size_pt_val);
     const base = if (lh > 0) lh else fallback_cy;
-    const pad: i32 = @intFromFloat(@round(win32.scaleDpi(f32, 4.0, dpi)));
-    return base + pad;
+    const pad: i32 = @intFromFloat(@round(win32.scaleDpi(f32, 12.0, dpi)));
+    const minimum: i32 = @intFromFloat(@round(win32.scaleDpi(f32, 36.0, dpi)));
+    return @max(minimum, base + pad);
 }

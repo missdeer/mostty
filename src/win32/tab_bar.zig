@@ -24,46 +24,40 @@ pub const TabBarLayout = struct {
     }
 };
 
-pub fn layoutTabBar(window: *Window, total_cols: usize) TabBarLayout {
+pub fn layoutTabBar(total_cols: usize, tab_count: usize, active_index: usize) TabBarLayout {
     var layout: TabBarLayout = .{ .entries_buf = undefined, .entries_len = 0, .new_tab_col = null };
-    if (total_cols == 0 or window.tabs.items.len == 0) return layout;
+    if (total_cols == 0 or tab_count == 0) return layout;
 
-    const new_tab_w: usize = 3; // " + "
+    const new_tab_w: usize = 4;
     const min_tab_w: usize = 6;
-    const ideal_tab_w: usize = 20;
 
     const usable_for_tabs = if (total_cols > new_tab_w) total_cols - new_tab_w else 0;
-    const n = window.tabs.items.len;
-    var tab_w = ideal_tab_w;
-    if (tab_w * n > usable_for_tabs) tab_w = usable_for_tabs / n;
-    if (tab_w < min_tab_w) tab_w = min_tab_w;
+    if (total_cols >= new_tab_w) layout.new_tab_col = total_cols - 2;
+    const n = @min(@min(tab_count, MAX_TABS), usable_for_tabs / min_tab_w);
+    if (n == 0) return layout;
+    // Keep the selected tab visible when the window cannot fit every tab.
+    const selected = @min(active_index, tab_count - 1);
+    const first = if (selected >= n) selected - n + 1 else 0;
 
-    var col: usize = 0;
-    for (window.tabs.items, 0..) |_, i| {
-        if (col >= total_cols) break;
-        var end = col + tab_w;
-        if (end > total_cols) end = total_cols;
-        if (end - col < 3) break;
-        const close_col = end - 2;
+    for (0..n) |i| {
+        const col = usable_for_tabs * i / n;
+        const end = usable_for_tabs * (i + 1) / n;
         if (layout.entries_len >= layout.entries_buf.len) break;
         layout.entries_buf[layout.entries_len] = .{
-            .tab_index = i,
+            .tab_index = first + i,
             .col_start = col,
             .col_end = end,
-            .close_col = close_col,
+            .close_col = col + 1,
         };
         layout.entries_len += 1;
-        col = end;
-    }
-    if (col + new_tab_w <= total_cols) {
-        layout.new_tab_col = col + 1;
     }
     return layout;
 }
 
 pub fn hitTestTabBar(window: *Window, total_cols: usize, mouse_x: i32, cs_x: i32) TabHit {
+    if (mouse_x < 0 or cs_x <= 0) return .none;
     const col: usize = @intCast(@max(0, @divTrunc(mouse_x, cs_x)));
-    const layout = layoutTabBar(window, total_cols);
+    const layout = layoutTabBar(total_cols, window.tabs.items.len, window.active_index);
     for (layout.entries()) |e| {
         if (col >= e.col_start and col < e.col_end) {
             if (col == e.close_col) return .{ .close = e.tab_index };
@@ -71,7 +65,7 @@ pub fn hitTestTabBar(window: *Window, total_cols: usize, mouse_x: i32, cs_x: i32
         }
     }
     if (layout.new_tab_col) |c| {
-        if (col == c) return .new_tab;
+        if (col >= c - 1 and col <= c + 1) return .new_tab;
     }
     return .none;
 }
@@ -87,7 +81,7 @@ pub const displayTitle = @import("../terminal/title.zig").displayTitle;
 // DirectWrite. `buf` must hold at least MAX_TABS entries; titles borrow each
 // tab's title buffer and are valid only for the current render call.
 pub fn buildTabBarDraw(window: *Window, total_cols: usize, buf: []types.TabDrawInfo) types.TabBarDraw {
-    const layout = layoutTabBar(window, total_cols);
+    const layout = layoutTabBar(total_cols, window.tabs.items.len, window.active_index);
     var n: usize = 0;
     for (layout.entries()) |e| {
         if (n >= buf.len) break;
@@ -117,4 +111,35 @@ pub fn buildTabBarDraw(window: *Window, total_cols: usize, buf: []types.TabDrawI
         .new_tab_col = if (layout.new_tab_col) |c| @intCast(c) else null,
         .new_tab_hovered = if (window.tab_bar_hover) |h| h == .new_tab else false,
     };
+}
+
+test "tabs fill available width equally and reserve the new-tab control" {
+    for ([_]usize{ 40, 101, 240 }) |width| {
+        const layout = layoutTabBar(width, 3, 0);
+        try std.testing.expectEqual(3, layout.entries_len);
+        try std.testing.expectEqual(0, layout.entries()[0].col_start);
+        try std.testing.expectEqual(width - 4, layout.entries()[2].col_end);
+        var previous_end: usize = 0;
+        for (layout.entries()) |entry| {
+            try std.testing.expectEqual(previous_end, entry.col_start);
+            const tab_width = entry.col_end - entry.col_start;
+            try std.testing.expect(tab_width >= (width - 4) / 3 and tab_width <= (width - 4) / 3 + 1);
+            try std.testing.expectEqual(entry.col_start + 1, entry.close_col);
+            previous_end = entry.col_end;
+        }
+        try std.testing.expect(layout.new_tab_col.? - 1 >= previous_end);
+        try std.testing.expect(layout.new_tab_col.? + 1 < width);
+    }
+}
+
+test "overflow keeps selected tab visible without displacing the new-tab control" {
+    const layout = layoutTabBar(40, 32, 31);
+    try std.testing.expectEqual(6, layout.entries_len);
+    try std.testing.expectEqual(31, layout.entries()[5].tab_index);
+    try std.testing.expectEqual(38, layout.new_tab_col.?);
+    try std.testing.expectEqual(0, layoutTabBar(0, 3, 0).entries_len);
+    try std.testing.expectEqual(0, layoutTabBar(40, 0, 0).entries_len);
+    const tiny = layoutTabBar(4, 3, 0);
+    try std.testing.expectEqual(0, tiny.entries_len);
+    try std.testing.expectEqual(2, tiny.new_tab_col.?);
 }

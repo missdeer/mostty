@@ -1,5 +1,6 @@
 #!/bin/bash
-# Run in a macOS GUI login session with Metal available, from the repository root.
+# Run from the repository root in a macOS GUI session with Metal and permission
+# to post pointer events (Accessibility). The tab-bar test restores the pointer.
 set -euo pipefail
 WORK="$PWD/tmp/macos-interaction-tests"
 mkdir -p "$WORK"

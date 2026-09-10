@@ -317,8 +317,8 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     // Tab bar gets first dibs on a fresh click.
     if (mouse_y < tbh) {
         tooltip.hide(window);
-        const cell_count = window_geom.computeGridCellCount(hwnd, cs);
-        const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
+        const total_cols: usize = @intCast(@divTrunc(@max(0, client_size.cx), cs.cx));
+        const hit = tab_bar.hitTestTabBar(window, total_cols, mouse_x, cs.cx);
         switch (hit) {
             .none => {},
             .activate => |idx| tab_mgmt.switchToTab(window, idx),
@@ -606,8 +606,8 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
     // Tab bar hover
     if (mouse_y < tbh) {
         clearUrlHover(window);
-        const cell_count = window_geom.computeGridCellCount(hwnd, cs);
-        const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
+        const total_cols: usize = @intCast(@divTrunc(@max(0, client_size.cx), cs.cx));
+        const hit = tab_bar.hitTestTabBar(window, total_cols, mouse_x, cs.cx);
         if (!util.hitEql(window.tab_bar_hover, hit)) {
             window.tab_bar_hover = if (hit == .none) null else hit;
             window.requestRender();
@@ -699,8 +699,8 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     const cs = global.renderer.common.cell_size;
     if (mouse_y < global.renderer.common.tab_bar_height) {
         tooltip.hide(window);
-        const cell_count = window_geom.computeGridCellCount(hwnd, cs);
-        const hit = tab_bar.hitTestTabBar(window, cell_count.col, mouse_x, cs.cx);
+        const total_cols: usize = @intCast(@divTrunc(@max(0, win32.getClientSize(hwnd).cx), cs.cx));
+        const hit = tab_bar.hitTestTabBar(window, total_cols, mouse_x, cs.cx);
         if (hit == .new_tab) {
             launcher.showLauncherMenu(window, mouse_x, mouse_y);
         }

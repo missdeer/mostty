@@ -1,4 +1,137 @@
 import AppKit
+import SwiftUI
+
+private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
+    let first = model.tabs[0]
+    first.title = "确认 Windows 和 macOS 标签栏渲染方式 | mostty"
+    model.newTab()
+    model.tabs[1].title = ":/Users/missdeer"
+    model.selectTab(at: 0)
+    let host = NSHostingView(rootView: TabBar(model: model))
+    let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1200, height: 36),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    window.appearance = NSAppearance(named: .darkAqua)
+    window.contentView = host
+    window.level = .floating
+    window.acceptsMouseMovedEvents = true
+    window.orderFront(nil)
+    let originalMouse = CGEvent(source: nil)?.location
+    defer {
+        window.orderOut(nil)
+        if let point = originalMouse {
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point,
+                    mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+    }
+    func settle() {
+        let deadline = Date(timeIntervalSinceNow: 0.05)
+        while let event = NSApp.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+            NSApp.sendEvent(event)
+        }
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+    }
+    func mouseEvent(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                          timestamp: ProcessInfo.processInfo.systemUptime,
+                          windowNumber: window.windowNumber, context: nil,
+                          eventNumber: 0, clickCount: type == .mouseMoved ? 0 : 1, pressure: 0)!
+    }
+    func click(_ view: NSView, at point: NSPoint) {
+        let location = view.convert(point, to: nil)
+        // NSButton's tracking loop consumes the queued mouse-up through AppKit.
+        NSApp.postEvent(mouseEvent(.leftMouseUp, at: location), atStart: true)
+        NSApp.sendEvent(mouseEvent(.leftMouseDown, at: location))
+        settle()
+    }
+    func moveMouse(_ view: NSView, to point: NSPoint) {
+        let screenPoint = window.convertPoint(toScreen: view.convert(point, to: nil))
+        let location = CGPoint(x: screenPoint.x, y: NSScreen.screens[0].frame.maxY - screenPoint.y)
+        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: location,
+                mouseButton: .left)?.post(tap: .cghidEventTap)
+        settle()
+    }
+    func descendants<T: NSView>(_ view: NSView, of type: T.Type) -> [T] {
+        (view as? T).map { [$0] } ?? view.subviews.flatMap { descendants($0, of: type) }
+    }
+    func snapshot(_ name: String) {
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            expect(false, "tab bar can render to a bitmap")
+            return
+        }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tmp/macos-interaction-tests/\(name).png")
+        do { try bitmap.representation(using: .png, properties: [:])!.write(to: url) }
+        catch { expect(false, "tab bar snapshot: \(error)") }
+    }
+    settle()
+    let chips = descendants(host, of: TabChipButton.self).sorted {
+        $0.convert($0.bounds, to: host).minX < $1.convert($1.bounds, to: host).minX
+    }
+    let plus = descendants(host, of: LauncherMenuButton.self).first!
+    expect(chips[0].isAccessibilityElement() && chips[0].accessibilityRole() == .radioButton &&
+           chips[0].accessibilityLabel() == first.title && chips[0].accessibilityChildren()?.isEmpty == true,
+           "accessibility exposes a named tab instead of its underlying button cell")
+    expect(chips.count == 2 && abs(chips[0].bounds.width - chips[1].bounds.width) < 1,
+           "different title lengths receive equal tab widths")
+    expect(chips[0].bounds.width > 500 && plus.convert(plus.bounds, to: host).maxX > 1180,
+           "tabs fill the strip and the new-tab button stays at the trailing edge")
+    expect(CGPreflightPostEventAccess(), "GUI test process is allowed to inject real pointer movement")
+    moveMouse(host, to: NSPoint(x: -20, y: -20))
+    snapshot("tabbar-normal")
+    moveMouse(chips[0], to: NSPoint(x: 100, y: 14))
+    expect(chips[0].closeButton.showsSymbol, "real pointer entry reveals the leading close control")
+    snapshot("tabbar-hover")
+    moveMouse(chips[0].closeButton, to: NSPoint(x: 10, y: 10))
+    expect(chips[0].closeButton.showsSymbol, "crossing from the tab into its child close button preserves hover")
+    moveMouse(host, to: NSPoint(x: -20, y: -20))
+    expect(!chips[0].closeButton.showsSymbol, "real pointer exit hides the close glyph")
+    click(chips[1], at: NSPoint(x: chips[1].bounds.midX, y: chips[1].bounds.midY))
+    expect(model.selectedID == model.tabs[1].id && chips[1].selected,
+           "self-drawn tab action selects the tab and updates its highlight")
+    first.title = String(repeating: "长标题 / Long title ", count: 20)
+    settle()
+    expect(chips[0].title == first.title && abs(chips[0].bounds.width - chips[1].bounds.width) < 1,
+           "live title updates reach the painter without expanding the tab")
+    window.setContentSize(NSSize(width: 480, height: 36))
+    settle()
+    expect(abs(chips[0].bounds.width - chips[1].bounds.width) < 1 &&
+           plus.convert(plus.bounds, to: host).maxX <= 480,
+           "narrow windows keep equal tabs and the new-tab control inside the window")
+    snapshot("tabbar-narrow")
+    let close = chips[1].closeButton
+    let point = NSPoint(x: close.frame.midX, y: close.frame.midY)
+    model.selectTab(at: 0)
+    settle()
+    expect(chips[1].hitTest(chips[1].convert(point, to: chips[1].superview)) === chips[1],
+           "an invisible close glyph does not intercept clicks intended to select a tab")
+    click(chips[1], at: point)
+    expect(model.tabs.count == 2 && model.selectedID == model.tabs[1].id,
+           "window-dispatched clicks in the unhovered leading area select rather than close")
+    moveMouse(close, to: NSPoint(x: close.bounds.midX, y: close.bounds.midY))
+    expect(close.showsSymbol, "entering directly over the close control reveals it before the click")
+    expect(chips[1].hitTest(chips[1].convert(point, to: chips[1].superview)) === close,
+           "the visible close control receives clicks independently of tab activation")
+    click(close, at: NSPoint(x: close.bounds.midX, y: close.bounds.midY))
+    expect(model.tabs.count == 1 && model.selectedID == first.id,
+           "self-drawn close control closes its own tab and preserves the remaining tab")
+    moveMouse(host, to: NSPoint(x: -20, y: -20))
+    click(plus, at: NSPoint(x: plus.bounds.midX, y: plus.bounds.midY))
+    expect(model.tabs.count == 2 && model.selectedID == model.tabs.last?.id,
+           "self-drawn plus opens and selects a new tab")
+    expect(chips[0].accessibilityPerformPress() && model.selectedID == first.id,
+           "accessibility press selects the tab without a pointer hover")
+    settle()
+    expect((chips[0].accessibilityValue() as? Int) == 1,
+           "accessibility reports the newly selected tab state")
+    let newChip = descendants(host, of: TabChipButton.self).first { $0 !== chips[0] }!
+    expect(!newChip.closeButton.showsSymbol, "new tab starts with its mouse-only close glyph hidden")
+    let closeAction = newChip.accessibilityCustomActions()?.first { $0.name == "Close Tab" }
+    expect(closeAction?.handler?() == true && model.tabs.count == 1 && model.selectedID == first.id,
+           "accessibility can close an unhovered background tab without selecting it")
+    first.title = "Terminal"
+}
 
 private final class OriginalDelegate: NSObject, NSWindowDelegate {
     var closes = 0
@@ -21,6 +154,7 @@ struct InteractionTests {
         }
         let model = AppModel.shared
         defer { model.shutdownAll() }
+        testTabBar(model, expect: expect)
         for _ in 1..<9 { model.newTab() }
         for index in 0..<9 {
             model.selectTab(at: index)

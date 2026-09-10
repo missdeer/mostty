@@ -7,7 +7,6 @@ const mouse = @import("wnd/mouse.zig");
 const state = @import("state.zig");
 const tab_bar = @import("tab_bar.zig");
 const types = @import("types.zig");
-const window_geom = @import("window_geom.zig");
 
 const Window = state.Window;
 const global = global_mod.global;
@@ -24,8 +23,7 @@ pub fn renderWindow(window: *Window) void {
     mouse.revalidateHoverForActiveTab(window);
 
     const cs = global.renderer.common.cell_size;
-    const cell_count = window_geom.computeGridCellCount(window.hwnd, cs);
-    const total_cols = cell_count.col;
+    const total_cols: usize = @intCast(@divTrunc(@max(0, win32.getClientSize(window.hwnd).cx), cs.cx));
     var tab_buf: [types.MAX_TABS]types.TabDrawInfo = undefined;
     const tabbar = tab_bar.buildTabBarDraw(window, total_cols, &tab_buf);
     const theme = &global.config.theme;

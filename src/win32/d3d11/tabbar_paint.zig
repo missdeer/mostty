@@ -201,27 +201,26 @@ test "band signature covers every paint input" {
     ));
 }
 
-// Draws a single character centered in [x, x+w) x [0, h) (used for the close
-// 'x' and new-tab '+'). Borrows the shared brush, setting its color first.
-fn drawCenteredChar(
+// Stroke the controls so their weight and alignment do not depend on the font.
+fn drawButton(
     rt: *win32.ID2D1RenderTarget,
     brush: *win32.ID2D1SolidColorBrush,
-    dwrite_factory: *win32.IDWriteFactory,
-    format: *win32.IDWriteTextFormat,
-    ch: u16,
+    plus: bool,
     x: f32,
-    w: f32,
     h: f32,
     fg: u24,
 ) void {
-    var str = [_:0]u16{ch};
-    var layout: *win32.IDWriteTextLayout = undefined;
-    if (dwrite_factory.CreateTextLayout(&str, 1, format, w, h, &layout) < 0) return;
-    defer _ = layout.IUnknown.Release();
-    _ = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
-    _ = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    const y = h / 2;
+    const radius = h * (if (plus) @as(f32, 0.16) else @as(f32, 0.10));
     brush.SetColor(&colorF(fg));
-    rt.DrawTextLayout(.{ .x = x, .y = 0 }, layout, &brush.ID2D1Brush, .{});
+    const stroke = @max(1, h / 24);
+    if (plus) {
+        rt.DrawLine(.{ .x = x - radius, .y = y }, .{ .x = x + radius, .y = y }, &brush.ID2D1Brush, stroke, null);
+        rt.DrawLine(.{ .x = x, .y = y - radius }, .{ .x = x, .y = y + radius }, &brush.ID2D1Brush, stroke, null);
+    } else {
+        rt.DrawLine(.{ .x = x - radius, .y = y - radius }, .{ .x = x + radius, .y = y + radius }, &brush.ID2D1Brush, stroke, null);
+        rt.DrawLine(.{ .x = x - radius, .y = y + radius }, .{ .x = x + radius, .y = y - radius }, &brush.ID2D1Brush, stroke, null);
+    }
 }
 
 // Paints the whole tab-bar band into `rt` (assumed sized client_w x band_h).
@@ -239,6 +238,7 @@ pub fn paint(
 ) void {
     const cw: f32 = @floatFromInt(cell_w);
     const bh: f32 = @floatFromInt(band_h);
+    const inset = bh / 9;
 
     const trimming = win32.DWRITE_TRIMMING{
         .granularity = win32.DWRITE_TRIMMING_GRANULARITY_CHARACTER,
@@ -249,21 +249,45 @@ pub fn paint(
     rt.BeginDraw();
     rt.Clear(&colorF(types.tab_bar_bg));
 
+    if (draw.tabs.len > 0) {
+        const track = win32.D2D1_ROUNDED_RECT{
+            .rect = .{
+                .left = @as(f32, @floatFromInt(draw.tabs[0].col_start * cell_w)) + inset,
+                .top = inset,
+                .right = @as(f32, @floatFromInt(draw.tabs[draw.tabs.len - 1].col_end * cell_w)) - inset,
+                .bottom = bh - inset,
+            },
+            .radiusX = (bh - inset * 2) / 2,
+            .radiusY = (bh - inset * 2) / 2,
+        };
+        brush.SetColor(&colorF(types.tab_inactive_bg));
+        rt.FillRoundedRectangle(&track, &brush.ID2D1Brush);
+    }
     for (draw.tabs) |t| {
         const x0: f32 = @floatFromInt(t.col_start * cell_w);
         const x1: f32 = @floatFromInt(t.col_end * cell_w);
-        const bg: u24 = if (t.active) types.tab_active_bg else if (t.hovered) types.tab_hover_bg else types.tab_bar_bg;
+        const hovered = t.hovered or t.close_hovered;
+        const bg: u24 = if (t.active) types.tab_active_bg else if (hovered) types.tab_hover_bg else types.tab_inactive_bg;
         const fg: u24 = if (t.active) types.tab_active_fg else types.tab_bar_fg;
 
-        // Tab background.
+        // A continuous rounded track, with a separate inset selected pill.
+        const pill = win32.D2D1_ROUNDED_RECT{
+            .rect = .{ .left = x0 + inset, .top = inset, .right = x1 - inset, .bottom = bh - inset },
+            .radiusX = (bh - inset * 2) / 2,
+            .radiusY = (bh - inset * 2) / 2,
+        };
         brush.SetColor(&colorF(bg));
-        rt.FillRectangle(&.{ .left = x0, .top = 0, .right = x1, .bottom = bh }, &brush.ID2D1Brush);
+        if (t.active or hovered) rt.FillRoundedRectangle(&pill, &brush.ID2D1Brush);
+        if (t.active) {
+            brush.SetColor(&colorF(types.tab_active_border));
+            rt.DrawRoundedRectangle(&pill, &brush.ID2D1Brush, @max(1, bh / 36), null);
+        }
 
-        // Title box: one column of left padding, ending one column before the
-        // close 'x' (matching the old cell layout's reserved " x").
-        const title_x0: f32 = @floatFromInt((t.col_start + 1) * cell_w);
-        const title_end_col: u32 = if (t.close_col > t.col_start + 1) t.close_col - 1 else t.col_start + 1;
-        const title_x1: f32 = @floatFromInt(title_end_col * cell_w);
+        // Symmetric reservations keep the title centered even with controls.
+        const show_shortcut = t.tab_number <= 9 and x1 - x0 >= cw * 16;
+        const side = if (show_shortcut) cw * 7 else cw * 2.5;
+        const title_x0 = x0 + side;
+        const title_x1 = x1 - side;
         const max_w = title_x1 - title_x0;
         if (max_w > 0) {
             var u16_buf: [512]u16 = undefined;
@@ -278,20 +302,40 @@ pub fn paint(
             if (dwrite_factory.CreateTextLayout(@ptrCast(u16_title.ptr), @intCast(u16_title.len), format, max_w, bh, &layout) >= 0) {
                 defer _ = layout.IUnknown.Release();
                 _ = layout.IDWriteTextFormat.SetTrimming(&trimming, sign);
+                _ = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_CENTER);
                 _ = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 brush.SetColor(&colorF(fg));
                 rt.DrawTextLayout(.{ .x = title_x0, .y = 0 }, layout, &brush.ID2D1Brush, win32.D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         }
 
-        // Close 'x'.
-        const close_fg: u24 = if (t.close_hovered) types.close_hover_fg else fg;
-        drawCenteredChar(rt, brush, dwrite_factory, format, 'x', @floatFromInt(t.close_col * cell_w), cw, bh, close_fg);
+        if (show_shortcut) {
+            const hint = [_:0]u16{ 'C', 't', 'r', 'l', '+', @as(u16, '0') + @as(u16, @intCast(t.tab_number)) };
+            var layout: *win32.IDWriteTextLayout = undefined;
+            if (dwrite_factory.CreateTextLayout(&hint, hint.len, format, cw * 6, bh, &layout) >= 0) {
+                defer _ = layout.IUnknown.Release();
+                _ = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_TRAILING);
+                _ = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                brush.SetColor(&colorF(if (t.active) fg else types.tab_bar_fg));
+                rt.DrawTextLayout(.{ .x = x1 - cw * 7, .y = 0 }, layout, &brush.ID2D1Brush, win32.D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+        }
+        if (hovered) {
+            const close_fg: u24 = if (t.close_hovered) types.close_hover_fg else fg;
+            drawButton(rt, brush, false, (@as(f32, @floatFromInt(t.close_col)) + 0.5) * cw, bh, close_fg);
+        }
     }
 
     if (draw.new_tab_col) |c| {
         const fg: u24 = if (draw.new_tab_hovered) types.new_tab_hover_fg else types.new_tab_button_fg;
-        drawCenteredChar(rt, brush, dwrite_factory, format, '+', @floatFromInt(c * cell_w), cw, bh, fg);
+        const x = (@as(f32, @floatFromInt(c)) + 0.5) * cw;
+        const radius = @min((bh - inset * 2) / 2, cw * 1.5);
+        const circle = win32.D2D1_ELLIPSE{ .point = .{ .x = x, .y = bh / 2 }, .radiusX = radius, .radiusY = radius };
+        brush.SetColor(&colorF(if (draw.new_tab_hovered) types.tab_hover_bg else types.tab_bar_bg));
+        rt.FillEllipse(&circle, &brush.ID2D1Brush);
+        brush.SetColor(&colorF(types.tab_hover_bg));
+        rt.DrawEllipse(&circle, &brush.ID2D1Brush, @max(1, bh / 36), null);
+        drawButton(rt, brush, true, x, bh, fg);
     }
 
     var tag1: u64 = undefined;

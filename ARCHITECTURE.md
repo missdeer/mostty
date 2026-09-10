@@ -837,13 +837,24 @@ shift monospace alignment.
 
 ### 6.7 Tab-bar paint, background image, chrome
 
-- **Tab bar** (`d3d11/tabbar_paint.zig`): proportional D2D painter — for
-  each tab, fills a rectangle (active/hover/inactive color) and draws the
-  title with the tab-bar text format, then centers `×` (close) and `+`
-  (new tab). The band is painted into an offscreen 96-DPI target owned by the
+- **Tab bar** (`d3d11/tabbar_paint.zig`): proportional D2D painter with
+  equal-width tabs filling the client width, a rounded inactive track and
+  selected pill, centered titles, trailing Ctrl+1…9 hints, a leading close
+  glyph on hover, and a separate circular new-tab button. Narrow windows
+  reserve the new-tab button and keep the selected tab in the visible range.
+  Layout and hit testing use the same column boundaries. The band is painted
+  into an offscreen 96-DPI target owned by the
   font service, imported through the keyed shared-texture bridge, and copied
   onto the top strip of the back buffer. Cells start *below* the band:
   `SV_Position.y - tab_bar_height` in the pixel shader.
+- **macOS tab bar** (`AppShell.swift`): SwiftUI allocates equal widths to
+  AppKit buttons that draw their own backgrounds, titles, ⌘1…9 hints and
+  control glyphs. AppKit retains button actions, accessibility and the
+  new-tab launcher's native context menu. Title observation invalidates the
+  painter without changing tab widths; this chrome is separate from Metal.
+  Hidden close glyphs do not intercept pointer clicks. Each accessible tab
+  exposes selection via Press and an independent Close Tab custom action,
+  so closing does not require mouse hover or a visible close glyph.
 - **Background image**: `reloadBackgroundImage` increments
   `bg_image_req_id` to stale any in-flight worker, then detaches
   `decodeWorker` which calls `gpu.decodeBackground` (WIC), posts

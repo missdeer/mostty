@@ -422,7 +422,82 @@ enum SSHLaunchers {
     }
 }
 
-final class LauncherMenuButton: NSButton {
+private enum TabPalette {
+    static let bar = NSColor(srgbRed: 0x27 / 255.0, green: 0x2a / 255.0, blue: 0x32 / 255.0, alpha: 1)
+    static let inactive = NSColor(srgbRed: 0x30 / 255.0, green: 0x33 / 255.0, blue: 0x3b / 255.0, alpha: 1)
+    static let selected = NSColor(srgbRed: 0x4b / 255.0, green: 0x4e / 255.0, blue: 0x55 / 255.0, alpha: 1)
+    static let border = NSColor(srgbRed: 0x66 / 255.0, green: 0x69 / 255.0, blue: 0x70 / 255.0, alpha: 1)
+    static let hover = NSColor(srgbRed: 0x3a / 255.0, green: 0x3d / 255.0, blue: 0x45 / 255.0, alpha: 1)
+    static let text = NSColor(srgbRed: 0xa4 / 255.0, green: 0xa5 / 255.0, blue: 0xaa / 255.0, alpha: 1)
+}
+
+/// AppKit retains button actions and accessibility; all chrome is drawn here.
+class TabSymbolButton: NSButton {
+    var isClose = false
+    var showsSymbol = true { didSet { needsDisplay = true } }
+    private var hovered = false
+    private var hoverTracking: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        focusRingType = .none
+    }
+
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    override var acceptsFirstResponder: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        showsSymbol ? super.hitTest(point) : nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking = hoverTracking { removeTrackingArea(tracking) }
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+        addTrackingArea(tracking)
+        hoverTracking = tracking
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard showsSymbol else { return }
+        let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+        if !isClose || hovered || isHighlighted {
+            (hovered || isHighlighted ? TabPalette.hover : TabPalette.bar).setFill()
+            circle.fill()
+        }
+        if !isClose {
+            TabPalette.hover.setStroke()
+            circle.lineWidth = 1
+            circle.stroke()
+        }
+        let radius: CGFloat = isClose ? 3 : 5
+        let x = bounds.midX, y = bounds.midY
+        let glyph = NSBezierPath()
+        if isClose {
+            glyph.move(to: NSPoint(x: x - radius, y: y - radius))
+            glyph.line(to: NSPoint(x: x + radius, y: y + radius))
+            glyph.move(to: NSPoint(x: x - radius, y: y + radius))
+            glyph.line(to: NSPoint(x: x + radius, y: y - radius))
+        } else {
+            glyph.move(to: NSPoint(x: x - radius, y: y))
+            glyph.line(to: NSPoint(x: x + radius, y: y))
+            glyph.move(to: NSPoint(x: x, y: y - radius))
+            glyph.line(to: NSPoint(x: x, y: y + radius))
+        }
+        (hovered || isHighlighted ? NSColor.white : TabPalette.text).setStroke()
+        glyph.lineWidth = 1.4
+        glyph.lineCapStyle = .round
+        glyph.stroke()
+    }
+}
+
+final class LauncherMenuButton: TabSymbolButton {
     var configuredLaunchers: () -> [TerminalLauncher] = { [] }
     var openTab: (TerminalLauncher?) -> Void = { _ in }
     var sshConfigURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory())
@@ -480,43 +555,156 @@ struct TabBar: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(model.tabs) { tab in
-                TabChip(tab: tab, model: model)
+        HStack(spacing: 6) {
+            HStack(spacing: 0) {
+                ForEach(model.tabs) { tab in
+                    TabChip(tab: tab, model: model)
+                        .frame(minWidth: 0, maxWidth: .infinity)
+                }
             }
+            .background(Color(nsColor: TabPalette.inactive), in: Capsule())
             LauncherButton(model: model)
-                .frame(width: 22, height: 22)
-            Spacer()
+                .frame(width: 28, height: 28)
         }
-        .padding(.horizontal, 8)
+        .frame(height: 28)
+        .padding(.horizontal, 10)
         .padding(.vertical, 4)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: TabPalette.bar))
     }
 }
 
-struct TabChip: View {
+struct TabChip: NSViewRepresentable {
     @ObservedObject var tab: TabItem
     @ObservedObject var model: AppModel
 
-    private var isSelected: Bool { model.selectedID == tab.id }
+    func makeNSView(context: Context) -> TabChipButton { TabChipButton(frame: .zero) }
 
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(tab.title)
-                .lineLimit(1)
-                .font(.system(size: 12))
-            Button(action: { model.close(tab.id) }) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9))
-            }
-            .buttonStyle(.borderless)
+    func updateNSView(_ button: TabChipButton, context: Context) {
+        button.title = tab.title
+        button.selected = model.selectedID == tab.id
+        button.number = (model.tabs.firstIndex { $0.id == tab.id } ?? 0) + 1
+        button.activateTab = { [weak model, weak tab] in
+            guard let tab = tab else { return }
+            model?.selectedID = tab.id
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(isSelected ? Color.accentColor.opacity(0.3) : Color.gray.opacity(0.15))
-        .cornerRadius(5)
-        .contentShape(Rectangle())
-        .onTapGesture { model.selectedID = tab.id }
+        button.closeTab = { [weak model, weak tab] in
+            guard let tab = tab else { return }
+            model?.close(tab.id)
+        }
+        button.toolTip = tab.title
+        button.setAccessibilityLabel(tab.title)
+        button.setAccessibilityValue(button.selected ? 1 : 0)
+        button.closeButton.setAccessibilityLabel("Close \(tab.title)")
+        button.needsDisplay = true
+    }
+}
+
+final class TabChipButton: NSButton {
+    var selected = false
+    var number = 1
+    var activateTab: () -> Void = {}
+    var closeTab: () -> Void = {}
+    let closeButton = TabSymbolButton(frame: .zero)
+    private var hovered = false
+    private var hoverTracking: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        focusRingType = .none
+        target = self
+        action = #selector(activate(_:))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.radioButton)
+        // Expose one tab element with selection and close actions. Closing must
+        // remain accessible even when the mouse-only close glyph is not shown.
+        setAccessibilityChildren([])
+        setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Close Tab", handler: { [weak self] in
+            guard let self = self else { return false }
+            self.closeTab()
+            return true
+        })])
+        closeButton.isClose = true
+        closeButton.showsSymbol = false
+        closeButton.target = self
+        closeButton.action = #selector(close(_:))
+        closeButton.toolTip = "Close Tab"
+        addSubview(closeButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    override var acceptsFirstResponder: Bool { false }
+    // Long titles must never impose a minimum width on the equal-width strip.
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 28) }
+
+    @objc private func activate(_ sender: Any?) { activateTab() }
+    @objc private func close(_ sender: Any?) { closeTab() }
+
+    override func accessibilityPerformPress() -> Bool {
+        activateTab()
+        return true
+    }
+
+    override func layout() {
+        super.layout()
+        closeButton.frame = NSRect(x: 5, y: (bounds.height - 20) / 2, width: 20, height: 20)
+        closeButton.isHidden = bounds.width < 50
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking = hoverTracking { removeTrackingArea(tracking) }
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+        addTrackingArea(tracking)
+        hoverTracking = tracking
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        closeButton.showsSymbol = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        closeButton.showsSymbol = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if selected || hovered || isHighlighted {
+            let pill = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                    xRadius: bounds.height / 2, yRadius: bounds.height / 2)
+            (selected ? TabPalette.selected : TabPalette.hover).setFill()
+            pill.fill()
+            if selected {
+                TabPalette.border.setStroke()
+                pill.lineWidth = 1
+                pill.stroke()
+            }
+        }
+        let shortcut = number <= 9 && bounds.width >= 120 ? "⌘\(number)" : ""
+        let side: CGFloat = shortcut.isEmpty ? 28 : 42
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        let font = NSFont.systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
+        let textHeight = ceil(font.ascender - font.descender)
+        let rect = NSRect(x: side, y: (bounds.height - textHeight) / 2,
+                          width: max(0, bounds.width - side * 2), height: textHeight)
+        let foreground = selected ? NSColor(white: 0.95, alpha: 1) : TabPalette.text
+        if rect.width > 0 {
+            (title as NSString).draw(in: rect, withAttributes: [
+                .font: font, .foregroundColor: foreground, .paragraphStyle: paragraph])
+        }
+        if !shortcut.isEmpty {
+            paragraph.alignment = .right
+            (shortcut as NSString).draw(in: NSRect(x: bounds.width - 38, y: rect.minY, width: 28, height: textHeight),
+                                       withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                                                        .foregroundColor: foreground, .paragraphStyle: paragraph])
+        }
     }
 }
 
