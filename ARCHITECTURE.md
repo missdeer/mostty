@@ -839,7 +839,7 @@ shift monospace alignment.
 
 - **Tab bar** (`d3d11/tabbar_paint.zig`): proportional D2D painter with
   equal-width tabs filling the client width, a rounded inactive track and
-  selected pill, centered titles, trailing Ctrl+1…9 hints, a leading close
+  selected pill, centered titles, leading Ctrl+1…9 hints, a trailing close
   glyph on hover, and a separate circular new-tab button. Narrow windows
   reserve the new-tab button and keep the selected tab in the visible range.
   Layout and hit testing use the same column boundaries. The band is painted

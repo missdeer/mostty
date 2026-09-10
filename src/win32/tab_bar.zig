@@ -47,7 +47,7 @@ pub fn layoutTabBar(total_cols: usize, tab_count: usize, active_index: usize) Ta
             .tab_index = first + i,
             .col_start = col,
             .col_end = end,
-            .close_col = col + 1,
+            .close_col = end - 2,
         };
         layout.entries_len += 1;
     }
@@ -124,7 +124,7 @@ test "tabs fill available width equally and reserve the new-tab control" {
             try std.testing.expectEqual(previous_end, entry.col_start);
             const tab_width = entry.col_end - entry.col_start;
             try std.testing.expect(tab_width >= (width - 4) / 3 and tab_width <= (width - 4) / 3 + 1);
-            try std.testing.expectEqual(entry.col_start + 1, entry.close_col);
+            try std.testing.expectEqual(entry.col_end - 2, entry.close_col);
             previous_end = entry.col_end;
         }
         try std.testing.expect(layout.new_tab_col.? - 1 >= previous_end);

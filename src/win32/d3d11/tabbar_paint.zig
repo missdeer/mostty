@@ -314,10 +314,10 @@ pub fn paint(
             var layout: *win32.IDWriteTextLayout = undefined;
             if (dwrite_factory.CreateTextLayout(&hint, hint.len, format, cw * 6, bh, &layout) >= 0) {
                 defer _ = layout.IUnknown.Release();
-                _ = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_TRAILING);
+                _ = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_LEADING);
                 _ = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 brush.SetColor(&colorF(if (t.active) fg else types.tab_bar_fg));
-                rt.DrawTextLayout(.{ .x = x1 - cw * 7, .y = 0 }, layout, &brush.ID2D1Brush, win32.D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                rt.DrawTextLayout(.{ .x = x0 + cw, .y = 0 }, layout, &brush.ID2D1Brush, win32.D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         }
         if (hovered) {
