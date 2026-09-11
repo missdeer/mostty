@@ -240,6 +240,10 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     const pane_run = b.addSystemCommand(&.{"/usr/bin/env"});
     pane_run.addFileArg(pane_exe);
     b.step("test-macos-panes", "Exercise native panes with real PTYs and Metal in a macOS GUI session").dependOn(&pane_run.step);
+    const pane_config_run = b.addSystemCommand(&.{"/usr/bin/env"});
+    pane_config_run.addFileArg(pane_exe);
+    pane_config_run.addArg("--config-reload");
+    b.step("test-macos-pane-config", "Test native pane reloads with temporary user config changes (restores original config)").dependOn(&pane_config_run.step);
 
     // The directory arg above supplies link-app.sh's source path but does not
     // register the individual sources as cache inputs, so editing a .swift file

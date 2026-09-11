@@ -21,6 +21,7 @@ with open(os.path.join(directory, name + ".pid"), "w") as file:
     file.write(str(os.getpid()))
 with open(os.path.join(directory, name + ".input"), "wb", buffering=0) as log:
     tick = 0
+    paused = False
     while True:
         if select.select([0], [], [], 0.1)[0]:
             data = os.read(0, 4096)
@@ -32,7 +33,15 @@ with open(os.path.join(directory, name + ".input"), "wb", buffering=0) as log:
             elif data == b"B":
                 print("\033[?2004h", end="", flush=True)
             elif data == b"G":
+                paused = True
                 pixels = base64.b64encode(bytes([255, 0, 0, 255]) * 4).decode()
-                print(f"\033_Ga=T,f=32,s=2,v=2,i=1,c=200,r=100,q=2;{pixels}\033\\", end="", flush=True)
+                print(f"\033[2J\033[H\033_Ga=T,f=32,s=2,v=2,i=1,c=200,r=100,q=2;{pixels}\033\\", end="", flush=True)
+            elif data == b"C":
+                paused = True
+                print("\033[2J\033[H", end="", flush=True)
+            elif data == b"R":
+                paused = False
+        if paused:
+            continue
         tick += 1
         print(f"{name} output {tick}\r\n", end="", flush=True)
