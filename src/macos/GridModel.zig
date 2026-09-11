@@ -221,7 +221,9 @@ pub fn build(
                 .style = style,
             });
 
-            col += width;
+            // The next VT cell is the wide glyph's spacer tail, which advances
+            // the column separately. Keep the viewport and page indices aligned.
+            col += 1;
             cell_i += 1;
         }
         try appendBlanks(allocator, &cells, row, col, cols, foreground, background, selection);
@@ -343,6 +345,56 @@ test "grid model preserves ordinary, wide, and styled VT cells" {
     }
     try std.testing.expect(found_wide);
     try std.testing.expect(found_styled);
+}
+
+test "consecutive wide glyphs keep following text at its VT columns" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try testSession(&session, &context, 8, 2);
+    defer session.deinit();
+    session.feed("A中文BCDE");
+
+    var frame = try build(std.testing.allocator, session.term, .{
+        .metrics = .{ .cell_width = 9, .cell_height = 18 },
+        .pixel_width = 72,
+        .pixel_height = 36,
+    });
+    defer frame.deinit();
+
+    // Each CJK glyph consumes exactly two columns, including its spacer tail.
+    // The ASCII suffix must fill the rest of the row without being dropped.
+    const codepoints = [_]u21{ 'A', '中', '文', 'B', 'C', 'D', 'E' };
+    const columns = [_]u16{ 0, 1, 3, 5, 6, 7, 0 };
+    for (codepoints, columns, 0..) |codepoint, col, i| {
+        const cell = frame.cells[i];
+        try std.testing.expectEqual(codepoint, cell.codepoint);
+        try std.testing.expectEqual(col, cell.col);
+        try std.testing.expectEqual(@as(u16, if (i == 6) 1 else 0), cell.row);
+        try std.testing.expectEqual(@as(u8, if (i == 1 or i == 2) 2 else 1), cell.width);
+    }
+}
+
+test "wide glyphs wrap without adding spacing on the next row" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try testSession(&session, &context, 5, 3);
+    defer session.deinit();
+    session.feed("ABCD中文AB");
+
+    var frame = try build(std.testing.allocator, session.term, .{
+        .metrics = .{ .cell_width = 9, .cell_height = 18 },
+        .pixel_width = 45,
+        .pixel_height = 54,
+    });
+    defer frame.deinit();
+
+    // A CJK glyph cannot fit in the final single column. That column stays
+    // blank, and the next row fits two CJK glyphs plus one ASCII character.
+    try std.testing.expectEqual(@as(u21, ' '), findCell(frame, 4, 0).codepoint);
+    try std.testing.expectEqual(@as(u21, '中'), findCell(frame, 0, 1).codepoint);
+    try std.testing.expectEqual(@as(u21, '文'), findCell(frame, 2, 1).codepoint);
+    try std.testing.expectEqual(@as(u21, 'A'), findCell(frame, 4, 1).codepoint);
+    try std.testing.expectEqual(@as(u21, 'B'), findCell(frame, 0, 2).codepoint);
 }
 
 test "URL hover underlines only detected cells across a soft wrap" {
