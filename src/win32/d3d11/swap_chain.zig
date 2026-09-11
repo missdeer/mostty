@@ -177,7 +177,7 @@ pub fn init(self: *D3d11Renderer, hwnd: win32.HWND, width: u32, height: u32) *wi
         if (hr < 0) com.fatalHr("DCompositionCreateDevice", hr);
     }
     {
-        const hr = self.dcomp_device.CreateTargetForHwnd(hwnd, 1, @ptrCast(&self.dcomp_target));
+        const hr = self.dcomp_device.CreateTargetForHwnd(hwnd, @intFromBool(self.composition_above_children), @ptrCast(&self.dcomp_target));
         if (hr < 0) com.fatalHr("CreateTargetForHwnd", hr);
     }
     {

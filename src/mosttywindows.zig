@@ -236,6 +236,7 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
     // address and we have an HWND to PostMessage results back to. Submit
     // callsites only fire from the render path (well after this point), so
     // there's no race between startup and the first job.
+    @import("win32/pane_native.zig").reflow(&global.window.?);
     global.renderer.setWorkerHwnd(gpa_alloc, hwnd);
 
     // Kick the background-image WIC decode onto a worker thread so the
@@ -307,9 +308,9 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
             }
         };
 
-        const n_tabs = window.tabs.items.len;
-        var handles_buf: [types.MAX_TABS]win32.HANDLE = undefined;
-        for (window.tabs.items, 0..) |t, i| {
+        const n_tabs = window.panes.items.len;
+        var handles_buf: [types.MAX_PANES]win32.HANDLE = undefined;
+        for (window.panes.items, 0..) |t, i| {
             handles_buf[i] = t.child_process.process_handle;
         }
         const wait_result = win32.MsgWaitForMultipleObjectsEx(
@@ -331,11 +332,11 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
         if (wait_result < n_tabs) {
             // Tab i's child process exited.
             const i = wait_result;
-            if (i < window.tabs.items.len) {
-                const tab = window.tabs.items[i];
+            if (i < window.panes.items.len) {
+                const tab = window.panes.items[i];
                 if (!tab.closing) {
                     tab.closing = true;
-                    _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
+                    _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_PANE, tab.id, 0);
                 }
             }
             global_mod.flushMessages();

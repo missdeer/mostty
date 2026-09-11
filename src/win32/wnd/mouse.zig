@@ -24,9 +24,9 @@ const TerminalMouse = struct {
     in_grid: bool,
 };
 
-fn terminalMouse(tab: *state.Tab, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) TerminalMouse {
+fn terminalMouse(tab: *state.Pane, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) TerminalMouse {
     const cs = global.renderer.common.cell_size;
-    const tbh = global.renderer.common.tab_bar_height;
+    const tbh = global_mod.tabBarHeight(hwnd);
     const client_size = win32.getClientSize(hwnd);
     const sb_px = Renderer.scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w = client_size.cx -| @as(i32, sb_px);
@@ -44,13 +44,14 @@ fn terminalMouse(tab: *state.Tab, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) 
     };
 }
 
-fn capturedMouseReportTab(window: *state.Window) ?*state.Tab {
+fn capturedMouseReportTab(window: *state.Window) ?*state.Pane {
     const tab_id = window.mouse_report_tab_id orelse return null;
     return window.findById(tab_id);
 }
 
 fn clearMouseReportCapture(window: *state.Window) void {
     window.mouse_capture = .none;
+    window.capture_pane_id = null;
     window.mouse_report_tab_id = null;
     _ = win32.ReleaseCapture();
 }
@@ -59,13 +60,13 @@ fn clearMouseReportCapture(window: *state.Window) void {
 // to its press-time tab; if that tab was closed mid-drag, clear the stale
 // capture and drop the current report rather than retargeting it to the
 // (now-unrelated) active tab.
-fn mouseReportTab(window: *state.Window) ?*state.Tab {
+fn mouseReportTab(window: *state.Window, hwnd: win32.HWND) ?*state.Pane {
     if (window.mouse_capture == .mouse_report) {
         if (capturedMouseReportTab(window)) |t| return t;
         clearMouseReportCapture(window);
         return null;
     }
-    return window.active();
+    return global_mod.inputPane(hwnd);
 }
 
 fn clearUrlHover(window: *state.Window) void {
@@ -80,12 +81,12 @@ fn clearUrlHover(window: *state.Window) void {
 // Resolve client-area (mouse_x, mouse_y) to a viewport (col, row) on the active
 // tab. Returns null when the point is above the tab bar, left of the grid, or
 // outside the terminal's columns/rows.
-fn cellAtClient(window: *state.Window, mouse_x: i32, mouse_y: i32) ?struct { col: u16, row: u16 } {
+fn cellAtClient(hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) ?struct { col: u16, row: u16 } {
     const cs = global.renderer.common.cell_size;
-    const tbh = global.renderer.common.tab_bar_height;
+    const tbh = global_mod.tabBarHeight(hwnd);
     const grid_y = mouse_y - tbh;
     if (grid_y < 0 or mouse_x < 0) return null;
-    const tab = window.active();
+    const tab = global_mod.inputPane(hwnd);
     const col_i = @divTrunc(mouse_x, cs.cx);
     const row_i = @divTrunc(grid_y, cs.cy);
     const cols_i: i32 = @intCast(tab.term.cols);
@@ -101,13 +102,13 @@ fn cellAtClient(window: *state.Window, mouse_x: i32, mouse_y: i32) ?struct { col
 // Cell-level throttle: WM_MOUSEMOVE fires per pixel; sub-cell motion can't
 // change which terminal cell is under the cursor, so we skip detectAt entirely
 // when the mouse stays in the same grid cell on the same tab.
-fn updateUrlHover(window: *state.Window, _: win32.HWND, mouse_x: i32, mouse_y: i32) void {
-    const cell = cellAtClient(window, mouse_x, mouse_y) orelse {
+fn updateUrlHover(window: *state.Window, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) void {
+    const cell = cellAtClient(hwnd, mouse_x, mouse_y) orelse {
         clearUrlHover(window);
         window.hover_cell = null;
         return;
     };
-    const tab = window.active();
+    const tab = global_mod.inputPane(hwnd);
     if (window.hover_cell) |hc| {
         if (hc.tab_id == tab.id and hc.col == cell.col and hc.row == cell.row) return;
     }
@@ -126,11 +127,11 @@ fn updateUrlHover(window: *state.Window, _: win32.HWND, mouse_x: i32, mouse_y: i
 
 // True when the mouse (in client coordinates) currently sits on the linkified
 // URL's underlined cells. Used by the WM_SETCURSOR hand-cursor decision.
-fn mouseIsOverUrl(window: *state.Window, mouse_x: i32, mouse_y: i32) bool {
+fn mouseIsOverUrl(window: *state.Window, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) bool {
     const h = window.hovered_url orelse return false;
-    if (h.tab_id != window.active().id) return false;
-    const cell = cellAtClient(window, mouse_x, mouse_y) orelse return false;
-    const cols: u16 = std.math.cast(u16, window.active().term.cols) orelse return false;
+    if (h.tab_id != global_mod.inputPane(hwnd).id) return false;
+    const cell = cellAtClient(hwnd, mouse_x, mouse_y) orelse return false;
+    const cols: u16 = std.math.cast(u16, global_mod.inputPane(hwnd).term.cols) orelse return false;
     if (cols == 0) return false;
     return h.hit.contains(cell.row, cell.col, cols - 1);
 }
@@ -162,9 +163,9 @@ fn openUrl(hwnd: win32.HWND, url: []const u8) bool {
 // the double-click handler because the first click of the dblclk pair sets
 // mouse_capture = .selecting, and any sub-pixel mouse motion between the
 // down/up/dblclk events clears window.hovered_url through the capture branch.
-fn detectUrlAtClient(window: *state.Window, mouse_x: i32, mouse_y: i32) ?url_hover.Hit {
-    const cell = cellAtClient(window, mouse_x, mouse_y) orelse return null;
-    return url_hover.detectAt(window.active().term, cell.col, cell.row);
+fn detectUrlAtClient(hwnd: win32.HWND, mouse_x: i32, mouse_y: i32) ?url_hover.Hit {
+    const cell = cellAtClient(hwnd, mouse_x, mouse_y) orelse return null;
+    return url_hover.detectAt(global_mod.inputPane(hwnd).term, cell.col, cell.row);
 }
 
 // Re-runs URL detection at the cached hover cell against the CURRENT viewport
@@ -177,7 +178,7 @@ fn detectUrlAtClient(window: *state.Window, mouse_x: i32, mouse_y: i32) ?url_hov
 // the caller is already mid-render and would just queue a redundant frame.
 pub fn revalidateHoverForActiveTab(window: *state.Window) void {
     const hc = window.hover_cell orelse return;
-    const tab = window.active();
+    const tab = window.findById(hc.tab_id) orelse return;
     if (hc.tab_id != tab.id) return;
     const cols: u16 = std.math.cast(u16, tab.term.cols) orelse return;
     const rows: u16 = std.math.cast(u16, tab.term.rows) orelse return;
@@ -217,7 +218,7 @@ fn anyButtonPressed() bool {
     return currentPressedButton() != null;
 }
 
-fn sendMouseReport(tab: *state.Tab, event: mouse_report.Event, grid: mouse_report.Grid) bool {
+fn sendMouseReport(tab: *state.Pane, event: mouse_report.Event, grid: mouse_report.Grid) bool {
     var data: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&data);
     mouse_report.encode(&writer, event, .{
@@ -243,7 +244,7 @@ fn reportButtonDown(
     mouse_y: i32,
     button: mouse_report.Button,
 ) bool {
-    const tab = mouseReportTab(window) orelse return false;
+    const tab = mouseReportTab(window, hwnd) orelse return false;
     if (!mouse_report.enabled(tab.term)) return false;
     const tm = terminalMouse(tab, hwnd, mouse_x, mouse_y);
     if (!tm.in_grid) return false;
@@ -256,6 +257,7 @@ fn reportButtonDown(
     if (window.mouse_capture != .mouse_report) {
         window.mouse_capture = .mouse_report;
         window.mouse_report_tab_id = tab.id;
+        window.capture_pane_id = global_mod.inputPane(hwnd).id;
         _ = win32.SetCapture(hwnd);
         // Entering capture: drop any URL underline so a click-and-hold doesn't
         // leave a stale highlight visible until the user moves the mouse.
@@ -292,7 +294,7 @@ fn reportButtonUp(
 }
 
 fn reportMotion(window: *state.Window, hwnd: win32.HWND, mouse_x: i32, mouse_y: i32, require_grid: bool) bool {
-    const tab = mouseReportTab(window) orelse return false;
+    const tab = mouseReportTab(window, hwnd) orelse return false;
     if (!mouse_report.enabled(tab.term)) return false;
     const tm = terminalMouse(tab, hwnd, mouse_x, mouse_y);
     if (require_grid and !tm.in_grid) return false;
@@ -309,7 +311,7 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.common.cell_size;
-    const tbh = global.renderer.common.tab_bar_height;
+    const tbh = global_mod.tabBarHeight(hwnd);
     const client_size = win32.getClientSize(hwnd);
     const sb_px = Renderer.scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w = client_size.cx -| @as(i32, sb_px);
@@ -338,7 +340,7 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     // Below tab bar: existing scrollbar / selection logic with y offset.
     const grid_mouse_y = mouse_y - tbh;
     if (mouse_x >= grid_w) {
-        const screen = window.active().term.screens.active;
+        const screen = global_mod.inputPane(hwnd).term.screens.active;
         const sb = screen.pages.scrollbar();
         if (sb.total > sb.len) {
             const win_h: f32 = @floatFromInt(client_size.cy - tbh);
@@ -354,15 +356,16 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
             } else {
                 window.mouse_capture = .scrollbar_drag;
                 window.scrollbar_drag_offset = track_height / 2.0;
-                window_geom.scrollbarDragTo(window.active(), mouse_yf - track_height / 2.0, win_h, track_height);
+                window_geom.scrollbarDragTo(global_mod.inputPane(hwnd), mouse_yf - track_height / 2.0, win_h, track_height);
             }
+            window.capture_pane_id = global_mod.inputPane(hwnd).id;
             _ = win32.SetCapture(hwnd);
             clearUrlHover(window);
             window.requestRender();
         }
     } else {
-        const screen = window.active().term.screens.active;
-        window.selection_fade = 0;
+        const screen = global_mod.inputPane(hwnd).term.screens.active;
+        global_mod.inputPane(hwnd).selection_fade = 0;
         _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
         const col: usize = @intCast(@divTrunc(@max(mouse_x, 0), cs.cx));
         const row: usize = @intCast(@divTrunc(@max(grid_mouse_y, 0), cs.cy));
@@ -371,6 +374,7 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
             const sel = vt.Selection.init(pin, pin, false);
             screen.select(sel) catch util.oom(error.OutOfMemory);
             window.mouse_capture = .selecting;
+            window.capture_pane_id = global_mod.inputPane(hwnd).id;
             _ = win32.SetCapture(hwnd);
             clearUrlHover(window);
             window.requestRender();
@@ -387,7 +391,7 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
     const window = global_mod.windowFromHwnd(hwnd);
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
-    const tbh = global.renderer.common.tab_bar_height;
+    const tbh = global_mod.tabBarHeight(hwnd);
     const cs = global.renderer.common.cell_size;
     const client_size = win32.getClientSize(hwnd);
     const sb_px = Renderer.scrollbarWidth(win32.dpiFromHwnd(hwnd));
@@ -408,16 +412,17 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
     // Shift-double-click falls through to the normal word-selection path
     // so the user can still copy the URL text.
     if (!util.isShiftDown()) {
-        if (detectUrlAtClient(window, mouse_x, mouse_y)) |h| {
+        if (detectUrlAtClient(hwnd, mouse_x, mouse_y)) |h| {
             if (openUrl(hwnd, h.url())) {
                 // Drop the .selecting capture set by the preceding LBUTTONDOWN
                 // and the lingering selection so the URL stays visually a link,
                 // not a selection.
                 if (window.mouse_capture == .selecting) {
                     window.mouse_capture = .none;
+                    window.capture_pane_id = null;
                     _ = win32.ReleaseCapture();
                 }
-                window.active().term.screens.active.clearSelection();
+                global_mod.inputPane(hwnd).term.screens.active.clearSelection();
                 window.requestRender();
                 return 0;
             }
@@ -431,7 +436,7 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
     if (!util.isShiftDown() and reportButtonDown(window, hwnd, mouse_x, mouse_y, .left)) return 0;
 
     const grid_mouse_y = mouse_y - tbh;
-    const screen = window.active().term.screens.active;
+    const screen = global_mod.inputPane(hwnd).term.screens.active;
     const col: usize = @intCast(@divTrunc(@max(mouse_x, 0), cs.cx));
     const row: usize = @intCast(@divTrunc(@max(grid_mouse_y, 0), cs.cy));
     var pin = screen.pages.pin(.{ .viewport = .{ .x = @intCast(col), .y = @intCast(row) } }) orelse return 0;
@@ -453,12 +458,13 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
 
     // Cancel any in-progress fade from the prior single-click release so the
     // freshly-expanded selection doesn't immediately start dimming.
-    window.selection_fade = 0;
+    global_mod.inputPane(hwnd).selection_fade = 0;
     _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
 
     // Re-capture so the upcoming WM_LBUTTONUP runs the .selecting branch and
     // copies the word to the clipboard — same exit path as a normal drag.
     window.mouse_capture = .selecting;
+    window.capture_pane_id = global_mod.inputPane(hwnd).id;
     _ = win32.SetCapture(hwnd);
     window.requestRender();
     return 0;
@@ -473,13 +479,15 @@ pub fn onLButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
         .none => {},
         .scrollbar_drag => {
             window.mouse_capture = .none;
+            window.capture_pane_id = null;
             _ = win32.ReleaseCapture();
             window.requestRender();
         },
         .selecting => {
             window.mouse_capture = .none;
+            window.capture_pane_id = null;
             _ = win32.ReleaseCapture();
-            const screen = window.active().term.screens.active;
+            const screen = global_mod.inputPane(hwnd).term.screens.active;
             if (screen.selection) |sel| {
                 const alloc = global.gpa.allocator();
                 const text = screen.selectionString(alloc, .{ .sel = sel }) catch util.oom(error.OutOfMemory);
@@ -487,7 +495,7 @@ pub fn onLButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
                 if (text.len > 0) {
                     paste.copyToClipboard(hwnd, text);
                 }
-                window.selection_fade = 1.0;
+                global_mod.inputPane(hwnd).selection_fade = 1.0;
                 _ = win32.SetTimer(hwnd, types.TIMER_SELECTION_FADE, 16, null);
             }
         },
@@ -503,13 +511,13 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     // ALL wheel handling — both the report and the local-scroll fallback —
     // to the press-time tab. Without this, a wheel outside the grid or a
     // captured tab whose mouse mode was disabled mid-drag would leak input
-    // into window.active().
-    const captured = window.mouse_capture == .mouse_report;
-    const tab = if (captured) mouseReportTab(window) orelse return 0 else window.active();
+    // into global_mod.inputPane(hwnd).
+    const tab = if (window.capture_pane_id) |id| window.findById(id) orelse return 0 else global_mod.inputPane(hwnd);
     if (!util.isShiftDown() and mouse_report.enabled(tab.term)) {
         var pt: win32.POINT = .{ .x = win32.xFromLparam(lparam), .y = win32.yFromLparam(lparam) };
-        _ = win32.ScreenToClient(hwnd, &pt);
-        const tm = terminalMouse(tab, hwnd, pt.x, pt.y);
+        const target_hwnd = tab.hwnd orelse hwnd;
+        _ = win32.ScreenToClient(target_hwnd, &pt);
+        const tm = terminalMouse(tab, target_hwnd, pt.x, pt.y);
         if (tm.in_grid) {
             _ = sendMouseReport(tab, .{
                 .action = .press,
@@ -529,16 +537,18 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     // Reset on direction reversal: a stale sub-notch residual in the
     // opposite direction would otherwise cancel part of the new flick
     // and swallow a notch the user physically produced.
-    if ((delta > 0 and window.wheel_accum < 0) or (delta < 0 and window.wheel_accum > 0)) {
-        window.wheel_accum = 0;
+    if ((delta > 0 and tab.wheel_accum < 0) or (delta < 0 and tab.wheel_accum > 0)) {
+        tab.wheel_accum = 0;
     }
-    window.wheel_accum += @as(i32, delta);
-    const notches = @divTrunc(window.wheel_accum, WHEEL_DELTA);
+    tab.wheel_accum += @as(i32, delta);
+    const notches = @divTrunc(tab.wheel_accum, WHEEL_DELTA);
     if (notches == 0) return 0;
-    window.wheel_accum -= notches * WHEEL_DELTA;
+    tab.wheel_accum -= notches * WHEEL_DELTA;
     const scroll_lines: isize = -@as(isize, notches) * 3;
     const screen = tab.term.screens.active;
+    const old_offset = if (@import("../diag.zig").isEnabled()) screen.pages.scrollbar().offset else 0;
     screen.scroll(.{ .delta_row = scroll_lines });
+    if (@import("../diag.zig").isEnabled()) std.log.info("pane scroll: id={} hwnd={} before={} after={}", .{ tab.id, @intFromPtr(tab.hwnd orelse hwnd), old_offset, screen.pages.scrollbar().offset });
     // Don't clearUrlHover here. The mouse hasn't moved, so hover_cell still
     // points at the cell physically under the cursor. The render-path
     // revalidation in renderWindow will re-detect against whatever scrolled
@@ -550,7 +560,7 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
 
 pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    if (!window.tracking_mouse) {
+    if (window.tracking_hwnd != hwnd) {
         var tme = win32.TRACKMOUSEEVENT{
             .cbSize = @sizeOf(win32.TRACKMOUSEEVENT),
             .dwFlags = win32.TME_LEAVE,
@@ -559,11 +569,17 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
         };
         _ = win32.TrackMouseEvent(&tme);
         window.tracking_mouse = true;
+        window.tracking_hwnd = hwnd;
     }
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.common.cell_size;
-    const tbh = global.renderer.common.tab_bar_height;
+    const tbh = global_mod.tabBarHeight(hwnd);
+    const hover_id = if (hwnd == window.hwnd) null else @as(?types.TabId, global_mod.inputPane(hwnd).id);
+    if (window.hover_pane_id != hover_id) {
+        window.hover_pane_id = hover_id;
+        window.requestRender();
+    }
     const client_size = win32.getClientSize(hwnd);
     const grid_w = client_size.cx -| @as(i32, Renderer.scrollbarWidth(win32.dpiFromHwnd(hwnd)));
 
@@ -576,14 +592,14 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
             .none => {},
             .scrollbar_drag => {
                 const win_h: f32 = @floatFromInt(client_size.cy - tbh);
-                const sb = window.active().term.screens.active.pages.scrollbar();
+                const sb = global_mod.inputPane(hwnd).term.screens.active.pages.scrollbar();
                 const min_track_height: f32 = 20.0;
                 const track_height = @max(min_track_height, @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total)) * win_h);
-                window_geom.scrollbarDragTo(window.active(), @as(f32, @floatFromInt(grid_mouse_y)) - window.scrollbar_drag_offset, win_h, track_height);
+                window_geom.scrollbarDragTo(global_mod.inputPane(hwnd), @as(f32, @floatFromInt(grid_mouse_y)) - window.scrollbar_drag_offset, win_h, track_height);
                 window.requestRender();
             },
             .selecting => {
-                const screen = window.active().term.screens.active;
+                const screen = global_mod.inputPane(hwnd).term.screens.active;
                 const clamped_x: i32 = @max(0, @min(mouse_x, grid_w - 1));
                 const clamped_y: i32 = @max(0, @min(grid_mouse_y, client_size.cy - tbh - 1));
                 const col: usize = @intCast(@divTrunc(clamped_x, cs.cx));
@@ -661,6 +677,9 @@ pub fn onKillFocus(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LR
 
 pub fn onMouseLeave(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
+    if (window.tracking_hwnd != hwnd) return 0;
+    window.tracking_hwnd = null;
+    window.hover_pane_id = null;
     window.tracking_mouse = false;
     if (window.mouse_in_scrollbar) {
         window.mouse_in_scrollbar = false;
@@ -687,7 +706,7 @@ pub fn onSetCursor(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
     var pt: win32.POINT = undefined;
     if (0 == win32.GetCursorPos(&pt)) return null;
     if (0 == win32.ScreenToClient(hwnd, &pt)) return null;
-    if (!mouseIsOverUrl(window, pt.x, pt.y)) return null;
+    if (!mouseIsOverUrl(window, hwnd, pt.x, pt.y)) return null;
     _ = win32.SetCursor(win32.LoadCursorW(null, win32.IDC_HAND));
     return 1;
 }
@@ -697,7 +716,7 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
     const mouse_x: i32 = win32.xFromLparam(lparam);
     const mouse_y: i32 = win32.yFromLparam(lparam);
     const cs = global.renderer.common.cell_size;
-    if (mouse_y < global.renderer.common.tab_bar_height) {
+    if (mouse_y < global_mod.tabBarHeight(hwnd)) {
         tooltip.hide(window);
         const total_cols: usize = @intCast(@divTrunc(@max(0, win32.getClientSize(hwnd).cx), cs.cx));
         const hit = tab_bar.hitTestTabBar(window, total_cols, mouse_x, cs.cx);
@@ -707,7 +726,7 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
         return 0;
     }
     if (!util.isShiftDown() and reportButtonDown(window, hwnd, mouse_x, mouse_y, .right)) return 0;
-    paste.pasteClipboard(hwnd, window.active());
+    paste.pasteClipboard(hwnd, global_mod.inputPane(hwnd));
     return 0;
 }
 

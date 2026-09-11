@@ -14,7 +14,7 @@ const util = @import("../util.zig");
 const window_geom = @import("../window_geom.zig");
 
 const Error = err_mod.Error;
-const Tab = state.Tab;
+const Tab = state.Pane;
 const TabId = types.TabId;
 const Window = state.Window;
 const global = global_mod.global;
@@ -32,11 +32,12 @@ const config_reload_max_retries: u32 = 3;
 pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     if (wparam == types.TIMER_SELECTION_FADE) {
         const window = global_mod.windowFromHwnd(hwnd);
-        window.selection_fade -= 0.05;
-        if (window.selection_fade <= 0) {
-            window.selection_fade = 0;
+        const pane = global_mod.inputPane(hwnd);
+        pane.selection_fade -= 0.05;
+        if (pane.selection_fade <= 0) {
+            pane.selection_fade = 0;
             _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
-            window.active().term.screens.active.clearSelection();
+            pane.term.screens.active.clearSelection();
         }
         window.requestRender();
     }
@@ -176,7 +177,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
     // render-interval-*-ms may have changed; re-apply against the current
     // session state. No-op when the effective interval is unchanged.
     if (global.window) |*window| {
-        for (window.tabs.items) |tab| tab.session.setImagesEnabled(global.config.images_enabled);
+        for (window.panes.items) |tab| tab.session.setImagesEnabled(global.config.images_enabled);
         window.applyRenderInterval(
             global.config.render_interval_local_ms,
             global.config.render_interval_remote_ms,
@@ -194,31 +195,16 @@ fn reloadConfig(hwnd: win32.HWND) void {
             // WM_WINDOWPOSCHANGED on restore re-syncs to the real grid.
             const iconic = win32.IsIconic(hwnd) != 0;
             if (!iconic) {
-                const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.common.cell_size);
-                for (window.tabs.items) |tab| {
-                    if (tab.closing) continue;
-                    if (tab.term.cols != cell_count.col or tab.term.rows != cell_count.row) {
-                        tab.session.resize(cell_count.col, cell_count.row) catch |e|
-                            std.debug.panic("Terminal.resize: {}", .{e});
-                        var resize_err: Error = undefined;
-                        tab.child_process.resize(&resize_err, cell_count) catch |e| switch (e) {
-                            error.Closed => {
-                                tab.closing = true;
-                                _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
-                            },
-                            error.Error => std.debug.panic("{f}", .{resize_err}),
-                        };
-                    }
-                    tab_mgmt.syncTerminalPixelSize(tab);
-                }
+                @import("../pane_native.zig").reflow(window);
             }
+
             window.requestRender();
         }
     }
 
     if (theme_changed) {
         if (global.window) |*window| {
-            for (window.tabs.items) |tab| {
+            for (window.panes.items) |tab| {
                 global.config.theme.rebaseTerminal(tab.term);
                 tab_mgmt.syncTerminalPixelSize(tab);
             }
@@ -313,6 +299,25 @@ pub fn onSysCommand(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?wi
     if (masked == types.IDM_TOGGLE_FULLSCREEN) {
         toggleFullscreen(hwnd);
         return 0;
+    }
+    switch (masked) {
+        types.IDM_SPLIT_COLUMNS => {
+            tab_mgmt.splitActive(global_mod.windowFromHwnd(hwnd), .columns);
+            return 0;
+        },
+        types.IDM_SPLIT_ROWS => {
+            tab_mgmt.splitActive(global_mod.windowFromHwnd(hwnd), .rows);
+            return 0;
+        },
+        types.IDM_CLOSE_PANE => {
+            tab_mgmt.closeActivePane(global_mod.windowFromHwnd(hwnd));
+            return 0;
+        },
+        types.IDM_MAXIMIZE_PANE => {
+            @import("../pane_native.zig").toggleMaximize(global_mod.windowFromHwnd(hwnd));
+            return 0;
+        },
+        else => {},
     }
     if (masked >= types.IDM_THEME_BASE and masked < types.IDM_THEME_END) {
         applyThemePickById(hwnd, masked);
@@ -557,7 +562,7 @@ fn applyThemePickById(hwnd: win32.HWND, id: usize) void {
     global.config.color_overrides.applyTo(&new_theme);
     global.config.theme = new_theme;
 
-    for (window.tabs.items) |tab| {
+    for (window.panes.items) |tab| {
         global.config.theme.rebaseTerminal(tab.term);
     }
     setActiveThemeName(window, name_u8);
@@ -626,7 +631,7 @@ pub fn onDropFiles(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win
     const window = global_mod.windowFromHwnd(hwnd);
     if (wparam == 0) return 0;
     const hdrop: win32.HDROP = @ptrFromInt(wparam);
-    paste.onDropFiles(window, hdrop);
+    paste.onDropFiles(window, hwnd, hdrop);
     return 0;
 }
 
@@ -737,7 +742,7 @@ fn armPtyDrainContinuation(window: *Window, tab: *Tab) void {
 fn drainPendingPtyTabs() void {
     if (global.window == null) return;
     const window = &global.window.?;
-    for (window.tabs.items) |tab| {
+    for (window.panes.items) |tab| {
         if (tab.closing) continue;
         if (!tab.pty_ring.posted.load(.acquire)) continue;
         if (!tab.pty_ring.hasData()) {
@@ -774,7 +779,12 @@ pub fn onAppGlyphReady(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?wi
     const result: *Renderer.RasterResult = @ptrFromInt(@as(usize, @bitCast(lparam)));
     const gpa = global.gpa.allocator();
     defer result.deinit(gpa);
-    const uploaded = global.renderer.applyGlyphResult(result);
+    const uploaded = if (result.surface_id == 0) global.renderer.applyGlyphResult(result) else blk: {
+        const window = if (global.window) |*w| w else break :blk false;
+        const pane = window.findById(result.surface_id) orelse break :blk false;
+        if (pane.renderer) |*renderer| break :blk renderer.applyGlyphResult(result);
+        break :blk false;
+    };
     if (uploaded) {
         if (global.window) |*window| window.requestRender();
     }

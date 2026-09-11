@@ -16,7 +16,8 @@ const window_geom = @import("window_geom.zig");
 
 const ChildProcess = cp_mod.ChildProcess;
 const Error = err_mod.Error;
-const Tab = state.Tab;
+const Tab = state.Pane;
+const native = @import("pane_native.zig");
 const TabId = types.TabId;
 const Window = state.Window;
 const global = global_mod.global;
@@ -34,7 +35,7 @@ fn onTitleChanged(context: *anyopaque, term: *vt.Terminal) void {
     const n = @min(title.len, tab.title_buf.len);
     @memcpy(tab.title_buf[0..n], title[0..n]);
     tab.title_len = n;
-    tooltip.refreshIfShowing(window, tab);
+    tooltip.refreshIfShowing(window, tab.tab);
     window.requestRender();
 }
 
@@ -86,33 +87,52 @@ pub fn newTab(window: *Window) void {
 }
 
 pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) void {
-    if (window.tabs.items.len >= types.MAX_TABS) {
-        std.log.warn("tab limit reached ({}); not opening new tab", .{types.MAX_TABS});
+    if (window.tabs.items.len >= types.MAX_TABS or window.panes.items.len >= types.MAX_PANES) {
+        std.log.warn("tab or pane limit reached", .{});
         return;
     }
+    const gpa = global.gpa.allocator();
+    const id = allocatePaneId(window) orelse return;
+    const tab = gpa.create(state.Tab) catch util.oom(error.OutOfMemory);
+    tab.* = .{ .id = id, .window = window, .layout = state.SplitLayout.init(gpa, id) catch util.oom(error.OutOfMemory) };
+    if (createPane(window, tab, id, launcher) == null) {
+        tab.layout.deinit();
+        gpa.destroy(tab);
+        return;
+    }
+    window.tabs.append(gpa, tab) catch util.oom(error.OutOfMemory);
+    window.active_index = window.tabs.items.len - 1;
+    native.reflow(window);
+    window.onActiveChanged();
+    native.focusActive(window);
+}
+
+fn allocatePaneId(window: *Window) ?types.TabId {
+    if (window.next_pane_id == std.math.maxInt(types.TabId)) {
+        std.log.err("pane identity space exhausted", .{});
+        return null;
+    }
+    const id = window.next_pane_id;
+    window.next_pane_id += 1;
+    return id;
+}
+
+fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*const Config.Launcher) ?*Tab {
     const cs = global.renderer.common.cell_size;
     const cell_count = window_geom.computeGridCellCount(window.hwnd, cs);
-
     const tab = global.gpa.allocator().create(Tab) catch util.oom(error.OutOfMemory);
     tab.* = .{
-        .id = window.next_tab_id,
+        .id = id,
+        .tab = owner,
         .child_process = undefined,
         .session = undefined,
         .term = undefined,
-        // Seed the tab with the system default input language (MOSTTY-44): a new
-        // tab starts on the default keyboard (e.g. English) and switching back to
-        // it later restores that, regardless of what the previous tab was using.
         .input_layout = state.systemDefaultInputLayout(),
     };
-    // Init the SPSC ring AFTER the field-default block (which would otherwise
-    // overwrite `pty_ring` with `undefined`). The reader thread spawned by
-    // startConPtyWin32 takes `&tab.pty_ring` — stable because Tab is
-    // heap-allocated and freed only after destroyTab joins the reader.
     tab.pty_ring = pty_ring_mod.PtyRing.init(global.gpa.allocator(), &tab.reader_stop) catch |e| switch (e) {
         error.OutOfMemory => util.oom(error.OutOfMemory),
         error.CreateEventFailed => win32.panicWin32("CreateEventW (pty_ring)", win32.GetLastError()),
     };
-    window.next_tab_id += 1;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -154,7 +174,7 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
             std.log.err("launcher '{s}' failed to start: {f}", .{ launcher.?.label, err });
             tab.pty_ring.deinit(global.gpa.allocator());
             global.gpa.allocator().destroy(tab);
-            return;
+            return null;
         }
         std.debug.panic("{f}", .{err});
     };
@@ -177,16 +197,17 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
     syncTerminalPixelSize(tab);
     global.config.theme.applyToNewTerminal(tab.term);
 
-    window.tabs.append(global.gpa.allocator(), tab) catch util.oom(error.OutOfMemory);
-    window.active_index = window.tabs.items.len - 1;
-    window.onActiveChanged();
+    window.panes.append(global.gpa.allocator(), tab) catch util.oom(error.OutOfMemory);
+    return tab;
 }
 
 pub fn switchToTab(window: *Window, new_idx: usize) void {
     if (new_idx == window.active_index) return;
     if (new_idx >= window.tabs.items.len) return;
     window.active_index = new_idx;
+    native.reflow(window);
     window.onActiveChanged();
+    native.focusActive(window);
 }
 
 pub fn closeTabByIndex(window: *Window, idx: usize) void {
@@ -218,7 +239,7 @@ pub fn confirmAndCloseTab(window: *Window, tab_id: TabId) void {
     )) return;
     // Re-look the index: the modal's nested message pump may have
     // shifted indices (or destroyed the target tab entirely).
-    if (window.findIndexById(tab_id)) |idx| {
+    if (window.findTabIndexById(tab_id)) |idx| {
         closeTabByIndex(window, idx);
     }
 }
@@ -230,23 +251,54 @@ pub fn destroyAllTabs(window: *Window) void {
     }
 }
 
-pub fn destroyTab(window: *Window, tab: *Tab) void {
-    // Unhook from window.tabs before stopping the reader: a queued
-    // WM_APP_CHILD_PROCESS_DATA fired by the reader before we joined will
-    // resolve via findById(tab_id) → null and drop harmlessly (tab ids are
-    // monotonic and never reused). closing=true is set first to also short-
-    // circuit any handler that does find the tab in-between.
+pub fn destroyTab(window: *Window, tab: *state.Tab) void {
     tab.closing = true;
+    var i: usize = 0;
+    while (i < window.panes.items.len) {
+        const pane = window.panes.items[i];
+        if (pane.tab == tab) releasePane(window, pane) else i += 1;
+    }
+    removeTab(window, tab);
+}
+
+fn removeTab(window: *Window, tab: *state.Tab) void {
     tooltip.hide(window);
-    const removed_idx_opt = window.findIndexById(tab.id);
-    if (removed_idx_opt) |idx| {
-        _ = window.tabs.orderedRemove(idx);
-        if (window.tabs.items.len == 0) {
-            window.active_index = 0;
-        } else if (window.active_index >= window.tabs.items.len) {
-            window.active_index = window.tabs.items.len - 1;
-        } else if (window.active_index > idx) {
-            window.active_index -= 1;
+    const idx = window.findTabIndexById(tab.id) orelse return;
+    _ = window.tabs.orderedRemove(idx);
+    if (window.active_index > idx) window.active_index -= 1;
+    if (window.active_index >= window.tabs.items.len) window.active_index = window.tabs.items.len -| 1;
+    tab.layout.deinit();
+    global.gpa.allocator().destroy(tab);
+    if (window.tabs.items.len == 0) {
+        win32.PostQuitMessage(0);
+        return;
+    }
+    native.reflow(window);
+    window.onActiveChanged();
+    native.focusActive(window);
+}
+
+pub fn destroyPane(window: *Window, pane: *Tab) void {
+    const tab = pane.tab;
+    const id = pane.id;
+    releasePane(window, pane);
+    _ = tab.layout.close(id);
+    if (tab.layout.count == 0) {
+        removeTab(window, tab);
+    } else {
+        native.reflow(window);
+        window.onActiveChanged();
+        native.focusActive(window);
+    }
+}
+
+fn releasePane(window: *Window, tab: *Tab) void {
+    tab.closing = true;
+    native.destroy(window, tab);
+    for (window.panes.items, 0..) |pane, i| {
+        if (pane == tab) {
+            _ = window.panes.orderedRemove(i);
+            break;
         }
     }
 
@@ -279,12 +331,44 @@ pub fn destroyTab(window: *Window, tab: *Tab) void {
     // Ring deinit AFTER thread.join — reader holds &tab.pty_ring until exit.
     tab.pty_ring.deinit(global.gpa.allocator());
     global.gpa.allocator().destroy(tab);
+}
 
-    if (window.tabs.items.len == 0) {
-        win32.PostQuitMessage(0);
+pub fn splitActive(window: *Window, axis: state.SplitLayout.Axis) void {
+    if (!native.supported()) {
+        _ = win32.MessageBoxW(window.hwnd, win32.L("Native split panes currently require D3D11. The selected renderer has not been changed."), win32.L("Mostty split panes"), .{ .ICONASTERISK = 1 });
         return;
     }
+    if (window.tabs.items.len == 0 or window.panes.items.len >= types.MAX_PANES) return;
+    native.reflow(window);
+    const tab = window.activeTab();
+    const previous = tab.layout.active.?;
+    if (!tab.layout.canSplit(previous, axis)) {
+        std.log.warn("pane {} is too small to split", .{previous});
+        return;
+    }
+    const id = allocatePaneId(window) orelse return;
+    const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0) &global.config.launchers[0] else null;
+    const pane = createPane(window, tab, id, launcher) orelse return;
+    tab.layout.split(previous, id, axis) catch |err| {
+        releasePane(window, pane);
+        std.log.warn("cannot split pane {}: {s}", .{ previous, @errorName(err) });
+        return;
+    };
+    native.reflow(window);
     window.onActiveChanged();
+    native.focusActive(window);
+}
+
+pub fn closeActivePane(window: *Window) void {
+    if (window.tabs.items.len == 0) return;
+    const id = window.active().id;
+    if (window.confirming_close) return;
+    window.confirming_close = true;
+    defer window.confirming_close = false;
+    if (!confirmYesNo(window.hwnd, win32.L("Close this pane?"), win32.L("Mostty"))) return;
+    const pane = window.findById(id) orelse return;
+    pane.closing = true;
+    _ = win32.PostMessageW(window.hwnd, types.WM_APP_CLOSE_PANE, id, 0);
 }
 
 pub fn writeToPty(tab: *Tab, bytes: []const u8) void {

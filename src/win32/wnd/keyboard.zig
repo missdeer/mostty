@@ -54,6 +54,39 @@ fn handleShortcut(window: *Window, wparam: win32.WPARAM) bool {
     const ctrl = util.isCtrlDown();
     const shift = util.isShiftDown();
     if (!ctrl) return false;
+    if (util.isAltDown()) {
+        const direction: ?state.SplitLayout.Direction = switch (wparam) {
+            @intFromEnum(win32.VK_LEFT) => .left,
+            @intFromEnum(win32.VK_RIGHT) => .right,
+            @intFromEnum(win32.VK_UP) => .up,
+            @intFromEnum(win32.VK_DOWN) => .down,
+            else => null,
+        };
+        if (direction) |d| {
+            @import("../pane_native.zig").focusDirection(window, d);
+            return true;
+        }
+        return false;
+    }
+    if (shift) switch (wparam) {
+        @intFromEnum(win32.VK_D) => {
+            tab_mgmt.splitActive(window, .columns);
+            return true;
+        },
+        @intFromEnum(win32.VK_E) => {
+            tab_mgmt.splitActive(window, .rows);
+            return true;
+        },
+        @intFromEnum(win32.VK_W) => {
+            tab_mgmt.closeActivePane(window);
+            return true;
+        },
+        @intFromEnum(win32.VK_RETURN) => {
+            @import("../pane_native.zig").toggleMaximize(window);
+            return true;
+        },
+        else => {},
+    };
     if (!shift) {
         switch (wparam) {
             @intFromEnum(win32.VK_T) => {
@@ -64,7 +97,7 @@ fn handleShortcut(window: *Window, wparam: win32.WPARAM) bool {
                 // tabs can be empty when WM_KEYDOWN is dispatched from a
                 // nested pump during teardown; bounds-check before active().
                 if (window.tabs.items.len > 0) {
-                    tab_mgmt.confirmAndCloseTab(window, window.active().id);
+                    tab_mgmt.confirmAndCloseTab(window, window.activeTab().id);
                 }
                 return true;
             },
@@ -106,7 +139,7 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
     // Shortcut interception first.
     if (handleShortcut(window, wparam)) return 0;
 
-    const tab = window.active();
+    const tab = global_mod.inputPane(hwnd);
     const pty = tab.child_process.pty orelse {
         std.log.err("pty closed", .{});
         return 0;
@@ -124,7 +157,7 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
     const screen = tab.term.screens.active;
     if (screen.selection != null) {
         screen.clearSelection();
-        window.selection_fade = 0;
+        tab.selection_fade = 0;
         _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
         window.requestRender();
     }
@@ -159,13 +192,19 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
 // state) so a held chord doesn't flip-flop. Anything else (Alt+F4, Alt+Space,
 // ...) falls through to DefWindowProcW via the null return.
 pub fn onSysKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
+    const window = global_mod.windowFromHwnd(hwnd);
+    if (handleShortcut(window, wparam)) return 0;
+    if (wparam == @intFromEnum(win32.VK_F4) and util.isAltDown()) {
+        _ = win32.PostMessageW(window.hwnd, win32.WM_CLOSE, 0, 0);
+        return 0;
+    }
     // Strictly plain Alt+Enter: Ctrl+Alt+Enter / Shift+Alt+Enter are reserved
     // for the PTY / app shortcuts.
     if (wparam == @intFromEnum(win32.VK_RETURN) and
         util.isAltDown() and !util.isCtrlDown() and !util.isShiftDown())
     {
         const prev_down = (@as(usize, @bitCast(lparam)) >> 30) & 1 != 0;
-        if (!prev_down) misc.toggleFullscreen(hwnd);
+        if (!prev_down) misc.toggleFullscreen(global_mod.windowFromHwnd(hwnd).hwnd);
         return 0;
     }
     return null;
@@ -182,7 +221,7 @@ pub fn onSysChar(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LR
 
 pub fn onChar(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const tab = window.active();
+    const tab = global_mod.inputPane(hwnd);
     const pty = tab.child_process.pty orelse {
         std.log.err("pty closed", .{});
         return 0;
@@ -199,6 +238,7 @@ pub fn onChar(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LR
     const ctrl = util.isCtrlDown();
     const shift = util.isShiftDown();
     // Backspace is handled in WM_KEYDOWN (sends \x7f)
+    if (ctrl and shift and !util.isAltDown() and (char == 0x04 or char == 0x05 or char == 0x17 or char == 0x0d or char == 0x0a)) return 0;
     if (char == 0x08) return 0;
     // Shift+Tab is handled in WM_KEYDOWN (sends \x1b[Z); plain Tab falls through as \t
     if (char == 0x09 and shift) return 0;

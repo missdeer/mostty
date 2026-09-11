@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     };
     const vt = b.dependency("ghostty", dep_opts).module("ghostty-vt");
     const test_step = b.step("test", "Run unit tests");
+    addLayoutTests(b, target, optimize, test_step);
     addCoreTests(b, target, optimize, vt, test_step);
     addMacosGridTests(b, target, optimize, vt, test_step);
 
@@ -15,6 +16,23 @@ pub fn build(b: *std.Build) void {
         .windows => buildWindows(b, target, optimize, vt, test_step),
         .macos => buildMacos(b, target, optimize, vt, test_step),
         else => unreachable,
+    }
+}
+
+fn addLayoutTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/SplitLayout.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const layout_step = b.step("test-layout", "Test the shared pane layout rules");
+    if (canRunTarget(b, target)) {
+        const run = b.addRunArtifact(tests);
+        layout_step.dependOn(&run.step);
+        test_step.dependOn(&run.step);
+    } else {
+        layout_step.dependOn(&tests.step);
+        test_step.dependOn(&tests.step);
     }
 }
 

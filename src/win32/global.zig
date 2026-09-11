@@ -16,8 +16,16 @@ pub const global = struct {
 };
 
 pub fn windowFromHwnd(hwnd: win32.HWND) *state.Window {
-    std.debug.assert(hwnd == global.window.?.hwnd);
+    std.debug.assert(hwnd == global.window.?.hwnd or global.window.?.paneFromHwnd(hwnd) != null);
     return &global.window.?;
+}
+
+pub fn inputPane(hwnd: win32.HWND) *state.Pane {
+    return global.window.?.paneFromHwnd(hwnd).?;
+}
+
+pub fn tabBarHeight(hwnd: win32.HWND) i32 {
+    return if (global.window != null and hwnd == global.window.?.hwnd) global.renderer.common.tab_bar_height else 0;
 }
 
 pub fn flushMessages() void {

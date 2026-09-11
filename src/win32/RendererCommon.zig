@@ -7,6 +7,9 @@ cell_size: win32.SIZE,
 tab_bar_height: i32,
 font_ligatures: bool,
 remote_or_software_adapter: bool,
+// Zero identifies the main surface; panes use their never-reused pane ID.
+surface_id: u32 = 0,
+focused: bool = true,
 // Whether TIMER_TEXT_BLINK is currently armed. Every backend re-derives the
 // desired state from `build.has_blink` on every frame; without this the
 // renderer issues a SetTimer or KillTimer syscall per frame forever.

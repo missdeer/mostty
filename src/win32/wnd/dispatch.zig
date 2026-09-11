@@ -26,6 +26,7 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = win32.WM_CLOSE, .handler = &lifecycle.onClose },
     .{ .msg = win32.WM_DESTROY, .handler = &lifecycle.onDestroy },
     .{ .msg = types.WM_APP_CLOSE_TAB, .handler = &lifecycle.onAppCloseTab },
+    .{ .msg = types.WM_APP_CLOSE_PANE, .handler = &lifecycle.onAppClosePane },
     // mouse
     .{ .msg = win32.WM_LBUTTONDOWN, .handler = &mouse.onLButtonDown },
     .{ .msg = win32.WM_LBUTTONUP, .handler = &mouse.onLButtonUp },
@@ -95,7 +96,7 @@ comptime {
     }
 }
 
-fn handlerFor(msg: u32) ?HandlerFn {
+pub fn handlerFor(msg: u32) ?HandlerFn {
     // The crash MessageBox runs a modal loop that pumps this thread's queue, so
     // dispatch is re-entered while the process is already dying. Running a
     // handler there panics a second time and buries the first crash site.
@@ -115,6 +116,9 @@ pub fn WndProc(
     wparam: win32.WPARAM,
     lparam: win32.LPARAM,
 ) callconv(.winapi) win32.LRESULT {
+    if (@import("../global.zig").global.window) |*window| {
+        if (@import("../pane_native.zig").mainMessage(window, msg, wparam, lparam)) |result| return result;
+    }
     if (handlerFor(msg)) |handler| {
         if (handler(hwnd, wparam, lparam)) |result| return result;
     }

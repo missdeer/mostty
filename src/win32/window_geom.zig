@@ -163,15 +163,19 @@ pub fn calcWindowRect(
 pub fn computeGridCellCount(hwnd: win32.HWND, cs: win32.SIZE) GridPos {
     const client_size = win32.getClientSize(hwnd);
     const sb_px: i32 = Renderer.scrollbarWidth(win32.dpiFromHwnd(hwnd));
+    return gridCellCount(client_size, cs, sb_px, global_mod.tabBarHeight(hwnd));
+}
+
+pub fn gridCellCount(client_size: win32.SIZE, cs: win32.SIZE, sb_px: i32, band: i32) GridPos {
     const grid_w = client_size.cx -| sb_px;
-    const grid_h = @max(0, client_size.cy - tabBarHeight()); // reserve the tab-bar band
+    const grid_h = @max(0, client_size.cy - band);
     return .{
         .col = @intCast(@max(1, @divTrunc(grid_w, cs.cx))),
         .row = @intCast(@max(1, @divTrunc(grid_h, cs.cy))),
     };
 }
 
-pub fn scrollbarDragTo(tab: *state.Tab, track_top: f32, win_h: f32, track_height: f32) void {
+pub fn scrollbarDragTo(tab: *state.Pane, track_top: f32, win_h: f32, track_height: f32) void {
     const screen = tab.term.screens.active;
     const sb = screen.pages.scrollbar();
     if (sb.total <= sb.len) return;
@@ -181,4 +185,16 @@ pub fn scrollbarDragTo(tab: *state.Tab, track_top: f32, win_h: f32, track_height
     const ratio = std.math.clamp(track_top / scrollable, 0.0, 1.0);
     const target_row: usize = @intFromFloat(ratio * @as(f32, @floatFromInt(max_offset)));
     screen.scroll(.{ .row = target_row });
+}
+
+test "pane grid scales with DPI and reserves no parent tab band" {
+    const expected: GridPos = .{ .col = 94, .row = 32 };
+    for ([_]i32{ 96, 144, 192 }) |dpi| {
+        const size: win32.SIZE = .{ .cx = @divTrunc(960 * dpi, 96), .cy = @divTrunc(640 * dpi, 96) };
+        const cell: win32.SIZE = .{ .cx = @divTrunc(10 * dpi, 96), .cy = @divTrunc(20 * dpi, 96) };
+        try std.testing.expectEqual(expected, gridCellCount(size, cell, @divTrunc(14 * dpi, 96), 0));
+        // A parent band belongs to the main surface, never a pane's client rect.
+        try std.testing.expectEqual(@as(u16, 30), gridCellCount(size, cell, @divTrunc(14 * dpi, 96), @divTrunc(40 * dpi, 96)).row);
+    }
+    try std.testing.expectEqual(GridPos{ .col = 1, .row = 1 }, gridCellCount(.{ .cx = 0, .cy = 0 }, .{ .cx = 10, .cy = 20 }, 14, 0));
 }

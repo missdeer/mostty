@@ -81,24 +81,7 @@ pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARA
     const iconic = win32.IsIconic(hwnd) != 0;
 
     if (pos.flags.NOSIZE == 0 and !iconic) {
-        const cell_count = window_geom.computeGridCellCount(hwnd, global.renderer.common.cell_size);
-
-        for (window.tabs.items) |tab| {
-            if (tab.closing) continue;
-            if (tab.term.cols != cell_count.col or tab.term.rows != cell_count.row) {
-                tab.session.resize(cell_count.col, cell_count.row) catch |e|
-                    std.debug.panic("Terminal.resize: {}", .{e});
-                var resize_err: Error = undefined;
-                tab.child_process.resize(&resize_err, cell_count) catch |e| switch (e) {
-                    error.Closed => {
-                        tab.closing = true;
-                        _ = win32.PostMessageW(hwnd, types.WM_APP_CLOSE_TAB, tab.id, 0);
-                    },
-                    error.Error => std.debug.panic("{f}", .{resize_err}),
-                };
-            }
-            tab_mgmt.syncTerminalPixelSize(tab);
-        }
+        @import("../pane_native.zig").reflow(window);
     }
 
     // Nothing to paint while minimized; leave render_pending alone so any
@@ -152,7 +135,7 @@ pub fn onGetDpiScaledSize(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.
     var col_count: i32 = @max(1, @divTrunc(grid_w, cs.cx));
     var row_count: i32 = @max(1, @divTrunc(grid_h_cur, cs.cy));
     const window = global_mod.windowFromHwnd(hwnd);
-    if (window.tabs.items.len > 0) {
+    if (window.tabs.items.len > 0 and window.activeTab().layout.count == 1) {
         const tab = window.active();
         col_count = @intCast(tab.term.cols);
         row_count = @intCast(tab.term.rows);
@@ -193,6 +176,7 @@ pub fn onDpiChanged(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     };
     util.setWindowPosRect(hwnd, rect);
     window.bounds = null;
+    @import("../pane_native.zig").reflow(window);
     window.requestRender();
     return 0;
 }

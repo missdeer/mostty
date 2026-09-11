@@ -198,6 +198,7 @@ pub fn generateGlyph(
 /// reused for a different glyph. Without them a late result paints the wrong
 /// character into a slot that now belongs to someone else.
 pub fn applyRasterResult(self: anytype, result: *glyph_worker.RasterResult) bool {
+    if (result.surface_id != self.common.surface_id) return false;
     if (result.cache_gen != self.cache_gen) return false;
     if (self.glyph_cache == null) return false;
     const cache = &self.glyph_cache.?;
@@ -255,6 +256,7 @@ fn submitRasterJob(
     _ = layout_format.IUnknown.AddRef();
     _ = self.font_service.rendering_params.IUnknown.AddRef();
     job.* = .{
+        .surface_id = self.common.surface_id,
         .key = key,
         .codepoint = codepoint,
         .grapheme = grapheme_dup,
@@ -378,6 +380,7 @@ fn submitRunRasterJob(
     }
 
     job.* = .{
+        .surface_id = self.common.surface_id,
         .key = pending[0].key,
         .codepoint = 0,
         .grapheme = &.{},
@@ -914,6 +917,7 @@ fn rasterSyncToCpu(
 ) ?*glyph_worker.RasterResult {
     const fs = self.font_service;
     var job: glyph_worker.RasterJob = .{
+        .surface_id = self.common.surface_id,
         .key = undefined,
         .codepoint = codepoint,
         // Borrowed for the duration of this call only; the inline rasterizer

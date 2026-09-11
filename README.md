@@ -15,7 +15,7 @@ A fast, lightweight native terminal emulator with libghostty at its core. Runs n
 
 Both Windows and macOS provide:
 
-- **Tabbed sessions.** Multiple independent shells in one window, with per-tab terminal state and titles. Right-click `+` to choose a configured launcher or an SSH host discovered from `~/.ssh/config`. Tabs close when their shell exits; closing the last tab quits the app. Manual tab/window closure prompts for confirmation by default.
+- **Tabbed sessions.** Multiple independent shells in one window, with independent terminal state and titles. Right-click `+` to choose a configured launcher or an SSH host discovered from `~/.ssh/config`. Tabs close when their shell exits; closing the last tab quits the app. Manual tab/window closure prompts for confirmation by default.
 - **Live configuration and themes.** Change fonts, terminal colors, the palette, cursor and selection colors, transparency, blur, and render cadence through a plain-text config file. Saving the file updates running tabs. Bundled and user-installed Ghostty-compatible color themes can also be selected from a menu. Launcher and environment changes apply to new sessions; maximize/fullscreen settings apply at startup.
 - **Unicode text and terminal glyphs.** Native font rendering with bold/italic faces, wide characters, grapheme clusters, and system font fallback. Shared procedural glyph rendering keeps box drawing, blocks, braille, Powerline separators, and legacy computing symbols aligned to the cell grid.
 - **Selection and clipboard.** Drag to select text and release to copy automatically. Double-click selects words with CJK-aware punctuation boundaries and correct handling of wide characters and wrapped text. Multiline paste normalizes line endings to terminal Enter; bracketed paste is used when requested by the application, with embedded paste-end markers removed.
@@ -62,6 +62,15 @@ reload can replace those opacity and blur overrides. The active renderer stays
 fixed until restart. See [Command-line options](configurations.md#command-line-options)
 for all accepted options, including legacy font options that are parsed but
 not applied.
+
+Windows D3D11 supports native panes within each tab: use the split shortcuts below,
+click or navigate by direction to focus a pane, and drag dividers to resize.
+The window’s system menu also exposes split, close-pane and maximize/restore
+commands when another app intercepts a keyboard shortcut. Pane maximize/restore
+and tab switching retain the running shells. Closing a pane
+collapses its region; closing the last pane closes the tab. The per-window limit
+is 63 sessions across at most 32 tabs. Research backends keep their single-surface
+behavior and explicitly reject split requests without changing renderer.
 
 Renderer changes require a restart. Unsupported drivers or presentation capabilities are reported at startup; research backends may offer an explicit D3D11 fallback but never switch silently. See [Configuration](configurations.md#renderer) for requirements and backend-specific behavior.
 
@@ -113,6 +122,11 @@ The default terminal font is **Menlo at 13pt**. Font size and regular/bold/itali
 | Select tab 1-9 | `Ctrl+1` through `Ctrl+9` | `Cmd+1` through `Cmd+9` |
 | Copy selection | Automatic on selection release | Automatic on selection release, or `Cmd+C` |
 | Paste | `Ctrl+V`, `Ctrl+Shift+V`, or `Shift+Insert` | `Cmd+V` |
+| Split left/right | `Ctrl+Shift+D` | — |
+| Split up/down | `Ctrl+Shift+E` | — |
+| Close active pane | `Ctrl+Shift+W` | — |
+| Focus pane by direction | `Ctrl+Alt+Arrow` | — |
+| Maximize/restore pane | `Ctrl+Shift+Enter` | — |
 | Toggle fullscreen | `Alt+Enter` | `Ctrl+Cmd+F` |
 | Open configuration | Window system menu > Open Settings File... | `Cmd+,` |
 

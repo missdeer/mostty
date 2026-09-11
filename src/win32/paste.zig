@@ -4,7 +4,7 @@ const win32 = @import("win32").everything;
 const state = @import("state.zig");
 const util = @import("util.zig");
 
-const Tab = state.Tab;
+const Tab = state.Pane;
 const Window = state.Window;
 
 const paste_core = @import("../terminal/paste.zig");
@@ -80,10 +80,10 @@ pub fn pasteClipboard(hwnd: win32.HWND, tab: *Tab) void {
     };
 }
 
-pub fn onDropFiles(window: *Window, hdrop: win32.HDROP) void {
+pub fn onDropFiles(window: *Window, hwnd: win32.HWND, hdrop: win32.HDROP) void {
     defer win32.DragFinish(hdrop);
 
-    const tab = window.active();
+    const tab = window.paneFromHwnd(hwnd) orelse return;
     const pty = tab.child_process.pty orelse {
         std.log.err("drop: pty closed", .{});
         return;

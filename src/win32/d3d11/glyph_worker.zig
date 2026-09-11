@@ -32,6 +32,7 @@ pub const RunSlot = struct {
 };
 
 pub const RasterJob = struct {
+    surface_id: u32 = 0,
     key: GlyphIndexCache.Key,
     codepoint: u21,
     grapheme: []u21,
@@ -61,6 +62,7 @@ pub const RasterJob = struct {
 };
 
 pub const RasterResult = struct {
+    surface_id: u32 = 0,
     slot: u32,
     slot_gen: u32,
     cache_gen: u32,
@@ -311,7 +313,7 @@ fn run(self: *Worker) void {
         if (result) |r| {
             postRasterResult(self.gpa, hwnd_raw, r);
         } else {
-            postRasterFailure(self.gpa, hwnd_raw, job.slot, job.slot_gen, job.cache_gen, job.key);
+            postRasterFailure(self.gpa, hwnd_raw, job.surface_id, job.slot, job.slot_gen, job.cache_gen, job.key);
         }
 
         job.destroy(self.gpa);
@@ -335,6 +337,7 @@ fn postRasterResult(gpa: std.mem.Allocator, hwnd_raw: usize, result: *RasterResu
 fn postRasterFailure(
     gpa: std.mem.Allocator,
     hwnd_raw: usize,
+    surface_id: u32,
     slot: u32,
     slot_gen: u32,
     cache_gen: u32,
@@ -342,6 +345,7 @@ fn postRasterFailure(
 ) void {
     const result = gpa.create(RasterResult) catch com.oom(error.OutOfMemory);
     result.* = .{
+        .surface_id = surface_id,
         .slot = slot,
         .slot_gen = slot_gen,
         .cache_gen = cache_gen,
@@ -637,6 +641,7 @@ fn rasterToWicBuffer(
         return null;
     };
     result.* = .{
+        .surface_id = job.surface_id,
         .slot = job.slot,
         .slot_gen = job.slot_gen,
         .cache_gen = job.cache_gen,
@@ -752,6 +757,7 @@ fn rasterRunAndPostResults(
             return;
         };
         result.* = .{
+            .surface_id = job.surface_id,
             .slot = slot.slot,
             .slot_gen = slot.slot_gen,
             .cache_gen = job.cache_gen,
@@ -767,6 +773,6 @@ fn rasterRunAndPostResults(
 
 fn postRunFailures(gpa: std.mem.Allocator, hwnd_raw: usize, job: *const RasterJob, start: usize) void {
     for (job.run_slots[start..job.run_slot_count]) |slot| {
-        postRasterFailure(gpa, hwnd_raw, slot.slot, slot.slot_gen, job.cache_gen, slot.key);
+        postRasterFailure(gpa, hwnd_raw, job.surface_id, slot.slot, slot.slot_gen, job.cache_gen, slot.key);
     }
 }

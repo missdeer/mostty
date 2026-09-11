@@ -34,6 +34,10 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     if (win32.GetSystemMenu(hwnd, win32.FALSE)) |menu| {
         _ = win32.AppendMenuW(menu, win32.MF_SEPARATOR, 0, null);
         _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_TOGGLE_FULLSCREEN, win32.L("Full screen\tAlt+Enter"));
+        _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_SPLIT_COLUMNS, win32.L("Split left/right\tCtrl+Shift+D"));
+        _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_SPLIT_ROWS, win32.L("Split up/down\tCtrl+Shift+E"));
+        _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_CLOSE_PANE, win32.L("Close pane\tCtrl+Shift+W"));
+        _ = win32.AppendMenuW(menu, win32.MF_STRING, types.IDM_MAXIMIZE_PANE, win32.L("Maximize/restore pane\tCtrl+Shift+Enter"));
         if (win32.CreatePopupMenu()) |sub| {
             window.theme_submenu = sub;
             // Cast HMENU to the uintptr id slot AppendMenuW expects for MF_POPUP.
@@ -88,7 +92,14 @@ pub fn onDestroy(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRES
 pub fn onAppCloseTab(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
     const tab_id: TabId = @intCast(wparam);
-    const tab = window.findById(tab_id) orelse return 0;
-    tab_mgmt.destroyTab(window, tab);
+    const idx = window.findTabIndexById(tab_id) orelse return 0;
+    tab_mgmt.destroyTab(window, window.tabs.items[idx]);
+    return 0;
+}
+
+pub fn onAppClosePane(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    const window = global_mod.windowFromHwnd(hwnd);
+    const pane = window.findById(@intCast(wparam)) orelse return 0;
+    tab_mgmt.destroyPane(window, pane);
     return 0;
 }

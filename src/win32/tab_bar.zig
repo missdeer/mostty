@@ -102,7 +102,7 @@ pub fn buildTabBarDraw(window: *Window, total_cols: usize, buf: []types.TabDrawI
             .active = e.tab_index == window.active_index,
             .hovered = tab_hovered,
             .close_hovered = close_hovered,
-            .title = displayTitle(tab.title_buf[0..tab.title_len]),
+            .title = displayTitle(tab.active().title_buf[0..tab.active().title_len]),
         };
         n += 1;
     }

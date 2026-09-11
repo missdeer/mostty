@@ -64,7 +64,7 @@ const DebugStats = struct {
     rows_skipped: u64 = 0,
 };
 
-const DeviceSource = enum { dedicated, font_service };
+const DeviceSource = enum { dedicated, font_service, shared_renderer };
 
 // D3D11 core
 common: *RendererCommon,
@@ -82,6 +82,7 @@ image_const_buf: *win32.ID3D11Buffer,
 image_blend_state: *win32.ID3D11BlendState,
 
 // DirectComposition
+composition_above_children: bool = false,
 dcomp_device: *win32.IDCompositionDevice = undefined,
 dcomp_target: *win32.IDCompositionTarget = undefined,
 dcomp_visual: *win32.IDCompositionVisual = undefined,
@@ -363,6 +364,37 @@ pub fn init(
     };
 }
 
+/// Create a pane surface without creating another GPU device or font service.
+/// Immutable shaders and the UI-thread command context are retained; drawing
+/// caches, textures and presentation resources start empty for this surface.
+/// Dynamic constant buffers use WRITE_DISCARD, so ordered draws can share them.
+pub fn initSurface(parent: *D3d11Renderer, common: *RendererCommon) D3d11Renderer {
+    inline for (.{
+        parent.device,
+        parent.context,
+        parent.vertex_shader,
+        parent.pixel_shader,
+        parent.const_buf,
+        parent.image_pixel_shader,
+        parent.image_const_buf,
+        parent.image_blend_state,
+    }) |object| _ = object.IUnknown.AddRef();
+    return .{
+        .common = common,
+        .font_service = parent.font_service,
+        .device = parent.device,
+        .context = parent.context,
+        .device_source = .shared_renderer,
+        .composition_above_children = true,
+        .vertex_shader = parent.vertex_shader,
+        .pixel_shader = parent.pixel_shader,
+        .const_buf = parent.const_buf,
+        .image_pixel_shader = parent.image_pixel_shader,
+        .image_const_buf = parent.image_const_buf,
+        .image_blend_state = parent.image_blend_state,
+    };
+}
+
 // --- Narrow GPU contract consumed by the backend-agnostic shared layer ---
 //
 // Everything above this line is D3D11's own business. These are the only
@@ -535,7 +567,7 @@ pub fn deinit(self: *D3d11Renderer) void {
     // path delegates this mutation to FontService so the shared-context
     // ownership is explicit; its D3D state is not used concurrently.
     switch (self.device_source) {
-        .dedicated => {
+        .dedicated, .shared_renderer => {
             self.context.ClearState();
             self.context.Flush();
         },
@@ -704,6 +736,27 @@ pub fn render(
     self.maybeLogDiag(prepared.client_w, prepared.client_h, prepared.shader_col, prepared.term_shader_row);
 }
 
+pub fn renderChrome(self: *D3d11Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
+    const prepared = prepareFrame(self, hwnd, term, false) orelse return;
+    const rgba = [4]f32{
+        std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
+        std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
+        std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
+        opacity,
+    };
+    self.context.ClearRenderTargetView(self.grid_rtv.?, &rgba[0]);
+    // Child surfaces supply their own alpha. Leaving parent pixels underneath
+    // would apply background opacity twice and make split panes more opaque.
+    const context1 = com.queryInterface(self.context, win32.ID3D11DeviceContext1);
+    defer _ = context1.IUnknown.Release();
+    const transparent = [4]f32{ 0, 0, 0, 0 };
+    if (pane_rects.len > 0) context1.ClearView(&self.grid_rtv.?.ID3D11View, &transparent[0], pane_rects.ptr, @intCast(pane_rects.len));
+    self.context.OMSetRenderTargets(0, null, null);
+    swap_chain_mod.acquireBackBufferTexture(self, prepared.swap_chain);
+    self.context.CopyResource(&self.back_buffer_tex.?.ID3D11Resource, &self.grid_texture.?.ID3D11Resource);
+    paintChromeAndPresent(self, prepared, tabbar, remote_session);
+}
+
 fn prepareFrame(
     self: *D3d11Renderer,
     hwnd: win32.HWND,
@@ -788,7 +841,7 @@ fn prepareFrame(
     // message pump. On timeout or failure, proceed with the frame — the queue
     // gate is best-effort, not a correctness invariant.
     if (self.frame_latency_waitable) |h| {
-        _ = win32.WaitForSingleObjectEx(h, 100, 0);
+        _ = win32.WaitForSingleObjectEx(h, if (self.common.surface_id == 0) 100 else 0, 0);
     }
 
     // Persistent grid texture + scissor rasterizer state. Both are safe to
@@ -1149,4 +1202,62 @@ test "D3D11 accepts every generated DirectX shader asset" {
 test "a failed second D3D11 device creation retains the font service device" {
     try std.testing.expectEqual(DeviceSource.dedicated, deviceSourceForCreateResult(0));
     try std.testing.expectEqual(DeviceSource.font_service, deviceSourceForCreateResult(-1));
+}
+
+test "a glyph failure from another pane cannot cancel this pane's pending slot" {
+    const allocator = std.testing.allocator;
+    var common: RendererCommon = undefined;
+    common.surface_id = 8;
+    var renderer: D3d11Renderer = undefined;
+    renderer.common = &common;
+    renderer.cache_gen = 1;
+    renderer.glyph_cache = try GlyphIndexCache.init(allocator, 2);
+    defer renderer.glyph_cache.?.deinit(allocator);
+    const key: GlyphIndexCache.Key = .init('x', &.{}, .single, .regular);
+    const reserved = (try renderer.glyph_cache.?.reserve(allocator, key)).newly_reserved_pending;
+    var result: RasterResult = .{
+        .surface_id = 7,
+        .slot = reserved.index,
+        .slot_gen = reserved.slot_gen,
+        .cache_gen = renderer.cache_gen,
+        .key = key,
+        .bytes = &.{},
+        .w = 0,
+        .h = 0,
+        .is_color = false,
+        .failed = true,
+    };
+    try std.testing.expect(!renderer.applyGlyphResult(&result));
+    try std.testing.expect((try renderer.glyph_cache.?.reserve(allocator, key)) == .already_pending);
+    result.surface_id = common.surface_id;
+    try std.testing.expect(renderer.applyGlyphResult(&result));
+    try std.testing.expect((try renderer.glyph_cache.?.reserve(allocator, key)) == .newly_reserved_pending);
+}
+
+test "pane surfaces share GPU infrastructure and own separate drawing resources" {
+    var common: RendererCommon = undefined;
+    var fonts = FontService.init(&common, 96, .{}, true, null);
+    defer fonts.deinit();
+    var parent = try D3d11Renderer.init(&common, &fonts, null);
+    defer parent.deinit();
+    var pane_common = common;
+    pane_common.surface_id = 1;
+    pane_common.tab_bar_height = 0;
+    var pane = D3d11Renderer.initSurface(&parent, &pane_common);
+    defer pane.deinit();
+    try std.testing.expect(pane.device == parent.device);
+    try std.testing.expect(pane.context == parent.context);
+    try std.testing.expect(pane.font_service == parent.font_service);
+    try std.testing.expect(pane.vertex_shader == parent.vertex_shader);
+    try std.testing.expect(pane.common != parent.common);
+    try std.testing.expect(pane.cellsResize(4));
+    try std.testing.expect(parent.cellsResize(4));
+    try std.testing.expect(pane.shader_cells.cell_buf != parent.shader_cells.cell_buf);
+    _ = pane.atlasEnsure(.{ .x = 32, .y = 32 });
+    _ = parent.atlasEnsure(.{ .x = 32, .y = 32 });
+    try std.testing.expect(pane.glyph_texture.obj != null);
+    try std.testing.expect(parent.glyph_texture.obj != null);
+    try std.testing.expect(pane.glyph_texture.obj != parent.glyph_texture.obj);
+    try std.testing.expectEqual(@as(i32, 0), pane.common.tab_bar_height);
+    try std.testing.expect(parent.common.tab_bar_height > 0);
 }

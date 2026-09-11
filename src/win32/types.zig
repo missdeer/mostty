@@ -4,6 +4,8 @@ const win32 = @import("win32").everything;
 pub const TabId = u32;
 
 pub const MAX_TABS: usize = 32;
+// One process handle per pane plus the message-queue slot in the wait set.
+pub const MAX_PANES: usize = 63;
 
 pub const TabHit = union(enum) {
     none,
@@ -47,6 +49,7 @@ pub const WM_APP_BG_IMAGE_DECODED = win32.WM_APP + 3;
 // + slot identity, uploads to the atlas texture, marks the cache slot ready,
 // and frees the struct + bytes.
 pub const WM_APP_GLYPH_READY = win32.WM_APP + 4;
+pub const WM_APP_CLOSE_PANE = win32.WM_APP + 5;
 pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;
@@ -60,6 +63,10 @@ pub const CONFIG_RELOAD_DEBOUNCE_MS: u32 = 150;
 // 16, since DefWindowProc masks WM_SYSCOMMAND wparam with 0xFFF0.
 pub const IDM_OPEN_SETTINGS: usize = 0x0010;
 pub const IDM_TOGGLE_FULLSCREEN: usize = 0x0020;
+pub const IDM_SPLIT_COLUMNS: usize = 0x0030;
+pub const IDM_SPLIT_ROWS: usize = 0x0040;
+pub const IDM_CLOSE_PANE: usize = 0x0050;
+pub const IDM_MAXIMIZE_PANE: usize = 0x0060;
 
 // Theme submenu IDs occupy 0x1000..0x5000 in steps of 16: clear of
 // IDM_OPEN_SETTINGS and the system range (>=0xF000). The Theme menu is

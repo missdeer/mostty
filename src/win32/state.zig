@@ -14,7 +14,27 @@ const MouseCapture = types.MouseCapture;
 const WindowBounds = types.WindowBounds;
 const ChildProcess = cp_mod.ChildProcess;
 
+pub const SplitLayout = @import("../SplitLayout.zig");
+
 pub const Tab = struct {
+    id: TabId,
+    window: *Window,
+    layout: SplitLayout,
+    closing: bool = false,
+
+    pub fn active(self: *Tab) *Pane {
+        return self.window.findById(self.layout.active.?).?;
+    }
+};
+
+pub const Pane = struct {
+    tab: *Tab,
+    hwnd: ?win32.HWND = null,
+    common: @import("RendererCommon.zig") = undefined,
+    renderer: ?@import("d3d11.zig") = null,
+    font_generation: u32 = 0,
+    selection_fade: f32 = 0,
+    wheel_accum: i32 = 0,
     id: TabId,
     child_process: ChildProcess,
     session: TerminalSession,
@@ -54,23 +74,28 @@ pub const Window = struct {
     dwm_redirected: bool = false,
     bounds: ?WindowBounds = null,
     tabs: std.ArrayListUnmanaged(*Tab) = .empty,
+    // Borrowed registry for HWND, PTY wake-up and process-exit routing.
+    panes: std.ArrayListUnmanaged(*Pane) = .empty,
+    layout_updating: bool = false,
+    divider_drag: ?struct { tab_id: TabId, split_id: SplitLayout.SplitId, offset: f64, axis: SplitLayout.Axis } = null,
     active_index: usize = 0,
-    next_tab_id: TabId = 1,
+    next_pane_id: TabId = 1,
     // window-scope interaction state
     tracking_mouse: bool = false,
+    tracking_hwnd: ?win32.HWND = null,
+    hover_pane_id: ?types.TabId = null,
     mouse_in_scrollbar: bool = false,
-    selection_fade: f32 = 0,
     mouse_capture: MouseCapture = .none,
     // Tab id captured at mouse_report press time. Mouse reports during the
     // captured drag write to this tab even if the user Ctrl+Tabs the active
     // tab mid-drag; null when no mouse-report capture is in flight.
     mouse_report_tab_id: ?TabId = null,
+    capture_pane_id: ?TabId = null,
     scrollbar_drag_offset: f32 = 0,
     // Accumulates sub-notch WM_MOUSEWHEEL deltas for the local-scroll path.
     // Hi-res wheels / precision touchpads deliver many messages with small
     // deltas per physical notch; without accumulation each message would
     // scroll a full step and the viewport would race.
-    wheel_accum: i32 = 0,
     resizing: bool = false,
     tab_bar_hover: ?TabHit = null,
     // Native Win32 tooltip control for tab-bar hover; null if creation failed.
@@ -154,8 +179,17 @@ pub const Window = struct {
         row: u16,
     };
 
-    pub fn active(self: *Window) *Tab {
+    pub fn activeTab(self: *Window) *Tab {
         return self.tabs.items[self.active_index];
+    }
+
+    pub fn active(self: *Window) *Pane {
+        return self.activeTab().active();
+    }
+
+    pub fn paneFromHwnd(self: *Window, hwnd: win32.HWND) ?*Pane {
+        for (self.panes.items) |pane| if (pane.hwnd == hwnd) return pane;
+        return if (hwnd == self.hwnd and self.tabs.items.len > 0) self.active() else null;
     }
 
     pub fn requestRender(self: *Window) void {
@@ -259,12 +293,12 @@ pub const Window = struct {
         self.diag_render_max_us = 0;
     }
 
-    pub fn findById(self: *Window, id: TabId) ?*Tab {
-        for (self.tabs.items) |t| if (t.id == id) return t;
+    pub fn findById(self: *Window, id: TabId) ?*Pane {
+        for (self.panes.items) |t| if (t.id == id) return t;
         return null;
     }
 
-    pub fn findIndexById(self: *Window, id: TabId) ?usize {
+    pub fn findTabIndexById(self: *Window, id: TabId) ?usize {
         for (self.tabs.items, 0..) |t, i| if (t.id == id) return i;
         return null;
     }
@@ -298,7 +332,7 @@ pub const Window = struct {
         // (and TSF) perform the switch. ActivateKeyboardLayout's flag set has no
         // plain "just activate this HKL" value, so it is the wrong tool here.
         _ = win32.PostMessageW(
-            self.hwnd,
+            self.active().hwnd orelse self.hwnd,
             win32.WM_INPUTLANGCHANGEREQUEST,
             0,
             @bitCast(@intFromPtr(hkl)),
@@ -306,8 +340,9 @@ pub const Window = struct {
     }
 
     pub fn onActiveChanged(self: *Window) void {
-        self.selection_fade = 0;
-        _ = win32.KillTimer(self.hwnd, types.TIMER_SELECTION_FADE);
+        const pane = self.active();
+        pane.selection_fade = 0;
+        if (pane.hwnd) |hwnd| _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
         // A URL hover belongs to a specific tab — switching tabs makes the
         // cached cell coordinates point at unrelated content. Drop both the
         // hover and the cell throttle so the next mouse move re-evaluates
@@ -374,64 +409,92 @@ fn testWindow() Window {
     return .{ .hwnd = undefined };
 }
 
+fn addTestTab(window: *Window, tab: *Tab, pane: *Pane, id: TabId, hkl: win32.HKL) !void {
+    const allocator = std.testing.allocator;
+    tab.* = .{ .id = id, .window = window, .layout = try SplitLayout.init(allocator, id) };
+    pane.* = undefined;
+    pane.id = id;
+    pane.tab = tab;
+    pane.hwnd = null;
+    pane.input_layout = hkl;
+    try window.tabs.append(allocator, tab);
+    try window.panes.append(allocator, pane);
+}
+
+fn deinitTestTabs(window: *Window) void {
+    for (window.tabs.items) |tab| tab.layout.deinit();
+    window.tabs.deinit(std.testing.allocator);
+    window.panes.deinit(std.testing.allocator);
+}
+
 test "a tab resolves to the layout it was seeded with at creation" {
-    const alloc = std.testing.allocator;
     const seeded: win32.HKL = @ptrFromInt(0x0409);
     var tab: Tab = undefined;
-    tab.input_layout = seeded;
-
+    var pane: Pane = undefined;
     var window = testWindow();
-    try window.tabs.append(alloc, &tab);
-    defer window.tabs.deinit(alloc);
-
-    // newTabWithLauncher seeds input_layout with the system default input
-    // language, so that is what a later switch back to this tab restores.
+    defer deinitTestTabs(&window);
+    try addTestTab(&window, &tab, &pane, 1, seeded);
     try std.testing.expectEqual(seeded, window.activeInputLayout());
 }
 
-test "recording a layout on the active tab is what later resolves" {
-    const alloc = std.testing.allocator;
+test "recording a layout on the active pane is what later resolves" {
     const english: win32.HKL = @ptrFromInt(0x0409);
     const chinese: win32.HKL = @ptrFromInt(0x0804);
     var tab: Tab = undefined;
-    tab.input_layout = english;
-
+    var pane: Pane = undefined;
     var window = testWindow();
-    try window.tabs.append(alloc, &tab);
-    defer window.tabs.deinit(alloc);
-
+    defer deinitTestTabs(&window);
+    try addTestTab(&window, &tab, &pane, 1, english);
     window.recordActiveInputLayout(chinese);
-    // Once the user switches input method, that choice replaces the seed as what
-    // the tab restores to on reactivation.
     try std.testing.expectEqual(chinese, window.activeInputLayout());
 }
 
-test "each tab keeps its own input method independent of the others" {
-    const alloc = std.testing.allocator;
-    const chinese: win32.HKL = @ptrFromInt(0x0804);
+test "panes retain independent input methods across pane and tab switches" {
     const english: win32.HKL = @ptrFromInt(0x0409);
-    // Both tabs were seeded English at creation; A then switches to Chinese.
+    const chinese: win32.HKL = @ptrFromInt(0x0804);
     var tab_a: Tab = undefined;
-    tab_a.input_layout = english;
     var tab_b: Tab = undefined;
-    tab_b.input_layout = english;
-
+    var pane_a: Pane = undefined;
+    var pane_b: Pane = undefined;
+    var pane_c: Pane = undefined;
     var window = testWindow();
-    try window.tabs.append(alloc, &tab_a);
-    try window.tabs.append(alloc, &tab_b);
-    defer window.tabs.deinit(alloc);
-
-    window.active_index = 0;
+    defer deinitTestTabs(&window);
+    try addTestTab(&window, &tab_a, &pane_a, 1, english);
+    try addTestTab(&window, &tab_b, &pane_b, 2, english);
     window.recordActiveInputLayout(chinese);
-
-    // Switching to tab B must not inherit A's Chinese — B keeps its own seed.
-    window.active_index = 1;
+    try tab_a.layout.setBounds(.{ .x = 0, .y = 0, .width = 100, .height = 100 }, .{ .width = 1, .height = 1 }, 1);
+    try tab_a.layout.split(1, 3, .columns);
+    pane_c = undefined;
+    pane_c.id = 3;
+    pane_c.tab = &tab_a;
+    pane_c.input_layout = english;
+    try window.panes.append(std.testing.allocator, &pane_c);
     try std.testing.expectEqual(english, window.activeInputLayout());
-
-    // Switching back to tab A restores Chinese, and B independently keeps
-    // English — the per-tab memory is isolated.
-    window.active_index = 0;
+    try std.testing.expect(tab_a.layout.focus(1));
     try std.testing.expectEqual(chinese, window.activeInputLayout());
     window.active_index = 1;
     try std.testing.expectEqual(english, window.activeInputLayout());
+    window.active_index = 0;
+    try std.testing.expectEqual(chinese, window.activeInputLayout());
+}
+
+test "HWND and asynchronous IDs resolve their owning pane without moving focus" {
+    const english: win32.HKL = @ptrFromInt(0x0409);
+    var tab_a: Tab = undefined;
+    var tab_b: Tab = undefined;
+    var pane_a: Pane = undefined;
+    var pane_b: Pane = undefined;
+    var window = testWindow();
+    window.hwnd = @ptrFromInt(100);
+    defer deinitTestTabs(&window);
+    try addTestTab(&window, &tab_a, &pane_a, 1, english);
+    try addTestTab(&window, &tab_b, &pane_b, 2, english);
+    pane_a.hwnd = @ptrFromInt(101);
+    pane_b.hwnd = @ptrFromInt(102);
+    try std.testing.expectEqual(&pane_b, window.paneFromHwnd(pane_b.hwnd.?).?);
+    try std.testing.expectEqual(&pane_a, window.active());
+    _ = window.panes.orderedRemove(1);
+    try std.testing.expectEqual(@as(?*Pane, null), window.findById(2));
+    try std.testing.expectEqual(@as(?*Pane, null), window.paneFromHwnd(pane_b.hwnd.?));
+    try std.testing.expectEqual(&pane_a, window.active());
 }

@@ -25,6 +25,7 @@ src/
   terminal/mouse_report.zig shared VT mouse-report encoding for Windows and macOS
   terminal/key_encode.zig shared xterm special-key encoding
   terminal/paste.zig       shared streaming paste framing and normalization
+  SplitLayout.zig          platform-neutral split tree, pane IDs, focus and geometry
   ssh_config.zig          shared top-level SSH Host alias iterator
   input_capi.zig          allocation-free host bridge for keys, paste, SSH aliases
   macos/PtySession.zig     macOS shell process, PTY, and VT session owner
@@ -54,9 +55,10 @@ src/
     config_watch.zig       ReadDirectoryChangesW watcher → WM_APP_CONFIG_CHANGED
     launcher.zig           launcher popup menu + ~/.ssh/config host parsing
 
-    # Per-tab plumbing
-    child_process.zig      ConPTY spawn, env block, reader thread
-    tab_mgmt.zig           Windows session hooks and tab lifecycle
+    # Per-tab / per-pane plumbing
+    child_process.zig      ConPTY spawn, env block, reader thread per pane
+    tab_mgmt.zig           Windows tab, pane and session lifecycle
+    pane_native.zig        child HWNDs, per-pane D3D11 surfaces and layout reflow
     tab_bar.zig            tab-bar layout + hit testing (paint is in d3d11/)
 
     # Window procedure (UI thread) — split by message family
@@ -94,7 +96,7 @@ src/
     d3d11/glyph.zig        glyph rasterization (DirectWrite + sprite + emoji)
     d3d11/emoji.zig        color-glyph detection, Segoe UI Emoji routing
     d3d11/background_image.zig   async WIC decode, fit/position geometry
-    d3d11/kitty_images.zig per-tab Kitty image texture cache + draw pass
+    d3d11/kitty_images.zig per-pane Kitty image texture cache + draw pass
     d3d11/tabbar_paint.zig D2D tab-bar band painter
     d3d11/color.zig        palette resolution, faint dim, selection lerp
     d3d11/com.zig          tiny COM Release helpers
@@ -113,12 +115,12 @@ import).
 
 ## 2. Process & Threading Model
 
-Mostty is a single-process, multi-thread program:
+Mostty is a single-process, multi-thread program. A Windows tab owns a SplitLayout; each leaf owns a child HWND, ConPTY, TerminalSession, PTY ring and isolated drawing cache. The process FontService and GPU device/shaders are shared across pane surfaces.
 
 | Thread | Purpose | Notes |
 | --- | --- | --- |
 | UI thread | Win32 message loop, all D3D11/D2D rendering, all VT stream parsing, all Terminal mutation | The only thread that touches `vt.Terminal` |
-| Reader thread (per tab) | Blocks in `ReadFile` on the ConPTY output pipe; memcpy's bytes into `Tab.pty_ring` (SPSC) and `PostMessageW`s a wake-up | Spawned in `child_process.startConPtyWin32` (before `CreatePseudoConsole`), joined in `tab_mgmt.destroyTab` |
+| Reader thread (per pane) | Blocks in `ReadFile` on the ConPTY output pipe; memcpy's bytes into `Pane.pty_ring` (SPSC) and `PostMessageW`s a wake-up | Spawned in `child_process.startConPtyWin32` (before `CreatePseudoConsole`), joined in `tab_mgmt.releasePane` |
 | Config-watch thread (1) | Blocks in `ReadDirectoryChangesW`, posts `WM_APP_CONFIG_CHANGED` | Detached |
 | Background-image decode (transient) | WIC decode of `background-image` on hot-reload or first paint | Detached, result posted via `WM_APP_BG_IMAGE_DECODED` |
 
@@ -126,24 +128,24 @@ Ownership rules:
 
 - `vt.Terminal`, the title buffer, `high_surrogate`, and all GPU upload state
   are touched only on the UI thread.
-- Reader → UI hand-off is **asynchronous** via a per-tab SPSC byte ring
+- Reader → UI hand-off is **asynchronous** via a per-pane SPSC byte ring
   (`src/win32/pty_ring.zig`) plus `PostMessageW(WM_APP_CHILD_PROCESS_DATA,
-  wparam=tab_id)`. The reader memcpy's `ReadFile` output into the ring;
+  wparam=pane_id)`. The reader memcpy's `ReadFile` output into the ring;
   the UI thread drains bounded 256-byte slices for a small initial budget
   (~2 ms) and arms a short `TIMER_PTY_DRAIN` continuation while data
   remains. Continuations use a larger backlog budget (~8 ms) so the UI
   stays responsive without starving PTY throughput.
   Notification is edge-triggered via an atomic `posted` bool: at most one
-  wake-up chain is in flight per tab. When the ring is full the reader
+  wake-up chain is in flight per pane. When the ring is full the reader
   parks on the ring's auto-reset `wake_event`; the UI thread signals that
   event on every drain.
-- Tab close uses `reader_stop` (`std.atomic.Value(bool)`) + `CancelIoEx`
+- Pane close uses `reader_stop` (`std.atomic.Value(bool)`) + `CancelIoEx`
   (unblocks `ReadFile`) + `SetEvent(pty_ring.wake_event)` (unblocks a
   full-ring writer), then a direct `thread.join` — no UI message pump
   needed, because the reader no longer calls into the UI thread
   synchronously. Stale `WM_APP_CHILD_PROCESS_DATA` posts that race with
-  teardown resolve via `findById(tab_id) → null` and drop harmlessly;
-  tab ids are monotonic and never reused.
+  teardown resolve via `findById(pane_id) → null` and drop harmlessly;
+  pane IDs are monotonic and never reused.
 
 ---
 
@@ -182,29 +184,12 @@ Entry sequence in `mosttywindows.zig`:
        still arrive.
    11. `ShowWindow` (maximized if configured or requested by the launcher), `SetForegroundWindow`,
        `BringWindowToTop`, then `config_watch.start(hwnd)`.
-3. **Main loop** (`mosttywindows.zig:207`):
-   ```
-   while (true) {
-     // Resolve current window. While no tabs exist, drain WM only.
-     window = waitForWindowWithTabs();
-
-     // Wait for tab process death OR window messages.
-     wait = MsgWaitForMultipleObjectsEx(
-              tab_process_handles, INFINITE,
-              QS_ALLINPUT, {ALERTABLE, INPUTAVAILABLE});
-
-     if (wait identifies tab i) {
-       // Child process exited.
-       if (!tab.closing) {
-         tab.closing = true;
-         PostMessage(hwnd, WM_APP_CLOSE_TAB, tab.id, 0);
-       }
-     }
-     flushMessages(); // peek-drain the queue
-   }
-   ```
-   The tab-list is re-snapshotted every loop iteration — tabs can close
-   mid-flight, so we always look up by `TabId`, never by index across messages.
+3. **Main loop**: snapshot all pane process handles, then call
+   `MsgWaitForMultipleObjectsEx` for a process exit or queued messages. A signaled
+   process sets that pane closing and posts `WM_APP_CLOSE_PANE` with its ID.
+   The next iteration rebuilds the snapshot; message handlers resolve IDs through
+   `Window.panes`, never indices retained across dispatch. The 63-pane limit
+   leaves one slot for window messages in the Win32 wait set.
 
 ---
 
@@ -226,8 +211,8 @@ Handlers by family:
   control, and spawns the first tab. `WM_CLOSE` runs the "close window and
   all tabs?" confirmation (guarded by `confirming_close` so Alt+F4 hammering
   can't stack nested dialogs). `WM_DESTROY` tears down everything and
-  `PostQuitMessage(0)`. `WM_APP_CLOSE_TAB` (custom) routes by `TabId` into
-  `tab_mgmt.destroyTab`.
+  `PostQuitMessage(0)`. `WM_APP_CLOSE_TAB` resolves a tab ID and releases all its
+  panes; `WM_APP_CLOSE_PANE` resolves a pane ID and collapses only that leaf.
 
 - **Paint** (`wnd/paint.zig`): `WM_ERASEBKGND` returns 1 (DComposition owns
   the background). `WM_PAINT` clears `render_pending`, calls `timedRender`,
@@ -243,7 +228,7 @@ Handlers by family:
   sequences (e.g. `\x1b[1;2C` for Shift+Right). Backspace = `\x7f`. Plain
   Tab falls through to `WM_CHAR`; Shift+Tab → `\x1b[Z`. `WM_CHAR` handles
   control-key suppression (so Ctrl+T isn't sent twice), UTF-16 surrogate
-  reassembly via per-tab `high_surrogate`, and pushes the final UTF-8 to the
+  reassembly via per-pane `high_surrogate`, and pushes the final UTF-8 to the
   PTY. Alt+Enter is consumed in `WM_SYSKEYDOWN` (only on the fresh press)
   and routed to `misc.toggleFullscreen`.
 
@@ -267,8 +252,8 @@ Handlers by family:
    - mouse_report → send SGR/X10 release report; clear mouse_report_tab_id
   ```
 
-  Mouse-report capture pins the originating tab id (`mouse_report_tab_id`)
-  so a Ctrl+Tab mid-drag doesn't steer reports into the wrong tab. The
+  Mouse-report capture pins the originating pane ID (`mouse_report_tab_id`)
+  so a Ctrl+Tab mid-drag does not steer reports into the wrong session. The
   scroll wheel accumulates in `Window.wheel_accum` and only steps when it
   crosses `WHEEL_DELTA = 120` — hi-res wheels and precision touchpads
   deliver many sub-notch deltas per physical click, and stepping per
@@ -282,9 +267,9 @@ Handlers by family:
     `reloadConfig`; `TIMER_TEXT_BLINK` ticks SGR blink phase;
     `TIMER_RENDER_FRAME` is the render throttle (see §6);
     `TIMER_PTY_DRAIN` continues bounded PTY backlog drains.
-  - `WM_APP_CHILD_PROCESS_DATA` (`wparam = tab_id`) is the reader-thread →
+  - `WM_APP_CHILD_PROCESS_DATA` (`wparam = pane_id`) is the reader-thread →
     UI wake-up. Handler repeatedly drains at most 256 bytes from the ring
-    into `Tab.session.feed` until the initial ~2 ms budget is spent,
+    into `Pane.session.feed` until the initial ~2 ms budget is spent,
     `SetEvent`s the ring's `wake_event` (resumes a full-ring writer), and
     — only if bytes were drained — increments the per-second PTY byte
     counter and calls `requestRender`. If data remains, it arms
@@ -313,81 +298,45 @@ Handlers by family:
 
 ## 5. Tabs, ConPTY, and the VT Stream
 
-### 5.1 Tab lifecycle (`tab_mgmt.zig`)
+### 5.1 Tab and pane lifecycle (`tab_mgmt.zig`)
 
-`newTab`/`newTabWithLauncher`:
+A `Tab` owns the shared `SplitLayout`, its ID, and a window reference.
+A heap-allocated `Pane` owns the ConPTY process, `TerminalSession`, PTY ring,
+reader stop flag, child HWND and D3D11 surface. `Window.panes` is a borrowed
+registry for stable-ID and HWND lookup; `Window.tabs` is the tab-bar order.
+The first pane ID also seeds its tab ID, but lookup namespaces stay separate.
+There are at most 32 tabs and 63 pane processes per window, leaving one slot
+for messages in the Win32 process wait set. IDs increase and are never reused.
 
-1. Bounds-check against `MAX_TABS = 32`.
-2. Allocate `Tab` (gpa); run the `tab.* = .{...}` field-default block.
-3. Init `tab.pty_ring` (1 MiB byte buffer + auto-reset `wake_event`) — must
-   come **after** the field-default block, otherwise `pty_ring` is
-   re-stamped with `undefined`.
-4. Pick the grid size (`window_geom.computeGridCellCount`).
-5. `ChildProcess.startConPtyWin32`, taking `&tab.pty_ring`:
-   - Create input pipe (PTY-read / our-write) and output pipe (our-read /
-     PTY-write) with inheritable handles.
-   - Spawn `readConsoleThread` (`std.Thread`) on `our_read`. It can park
-     in `ReadFile` (interruptible by `CancelIoEx`) or in
-     `WaitForSingleObject(pty_ring.wake_event)` when the ring is full.
-     The thread is created **before** `CreatePseudoConsole`. The
-     accompanying `errdefer` block doesn't just `thread.join()` — it
-     stops the reader (`reader_stop.store(true)`), wakes both park points
-     (`SetEvent(wake_event)` + `CancelIoEx`), and — when fired before
-     `CreatePseudoConsole` takes pipe ownership — closes `pty_write` /
-     `pty_read` directly so a reader caught between its stop-check and
-     `ReadFile` gets `BROKEN_PIPE` instead of hanging the join. After
-     `CreatePseudoConsole` succeeds the PTY owns those handles and the
-     LIFO-earlier `ClosePseudoConsole` errdefer handles the close.
-   - Create the pseudoconsole. `child_process.zig` first tries
-     `MOSTTY_CONPTY_DLL`, then `<Mostty.exe dir>\conpty\conpty.dll`, and
-     finally the system `CreatePseudoConsole`. Dynamic ConPTY loads use
-     `ConptyCreatePseudoConsole` / `ConptyResizePseudoConsole` /
-     `ConptyClosePseudoConsole`; the loaded DLL is intentionally kept for
-     process lifetime because ConPTY cleanup can outlive `HPCON` close.
-     Release artifacts put Microsoft Terminal's `conpty.dll` and matching
-     `OpenConsole.exe` in `dist/conpty/` so Kitty APC data reaches the VT
-     parser instead of being filtered by older inbox ConPTY builds.
-   - Close the PTY-side pipe ends now that the PTY owns them.
-   - Build a process attribute list with
-     `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.
-   - Merge env: `GetEnvironmentStringsW` + per-launcher `env` overrides,
-     case-insensitive last-wins dedup, then force `TERM=xterm-256color`
-     unless overridden.
-   - `CreateProcessW(CREATE_SUSPENDED)` so the job object can be applied,
-     then `ResumeThread`.
-6. Initialize `TerminalSession` in place at the chosen size. It owns the
-   `vt.Terminal`, arena, persistent stream, and shared effects; `Tab.term` is a
-   borrowed alias retained for renderer and interaction callers.
-7. Supply the Windows effects callbacks (`title_changed`, `write_pty`, `size`)
-   and apply theme colors.
-8. Append, set active, `Window.onActiveChanged` (resets viewport, clears
-   selection, drops URL hover, requests render).
+New-tab creation allocates the root layout and first pane, initializes the ring
+before starting its reader, starts ConPTY, initializes the terminal session and
+callbacks, then publishes the tab. The D3D11 adapter creates the child surface,
+reflows its region and focuses the new pane. A split first checks minimum size,
+creates the session, then publishes the new leaf; failure disposes the new
+session without changing the original focus or geometry.
 
-`destroyTab`:
+ConPTY creation starts the reader before `CreatePseudoConsole`. It tries
+`MOSTTY_CONPTY_DLL`, the bundled `conpty/conpty.dll`, then the system API.
+Each pane gets its own pipe pair, process, job and ring. Readers post the stable
+pane ID to the main HWND; all terminal parsing and effects remain on the UI
+thread. The main loop waits on every pane process, including hidden tabs, and
+posts `WM_APP_CLOSE_PANE` when one exits.
 
-1. `tab.closing = true` (the UI handler still drains the ring with a
-   no-op cb to keep the reader productive, but skips `TerminalSession`).
-2. Unhook from `window.tabs`. Queued `WM_APP_CHILD_PROCESS_DATA` posts
-   for this tab id will resolve via `findById → null` and drop; tab ids
-   are monotonic and never reused.
-3. Stop the reader. Three wake mechanisms used together:
-   - `reader_stop.store(true, .release)`
-   - `CancelIoEx(read)` — unblocks an in-flight `ReadFile`.
-   - `SetEvent(pty_ring.wake_event)` — unblocks a `WaitForSingleObject`
-     on a full ring.
-   - `closePty()` — closes the our-write side and `ClosePseudoConsole`s
-     the `HPCON`. Belt-and-suspenders against the narrow race where the
-     reader is between its loop-top stop-check and the `ReadFile` call:
-     `CancelIoEx` is then a no-op (no I/O pending), but the closed PTY
-     makes `ReadFile` return `BROKEN_PIPE` as soon as the reader enters
-     it.
-4. `thread.join()` the reader — direct, no UI message pump.
-5. Close the read pipe, the job (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
-   kills any orphans the child spawned), and the process handle.
-6. Deinit `TerminalSession`, then `pty_ring`
-   (last — the reader thread held `&tab.pty_ring` until join).
-7. If the window has no tabs left, `PostMessage(WM_QUIT)`; else
-   `onActiveChanged`.
+Pane close marks it closing, releases its capture and presentation resources,
+unhooks it from the registry, sets the reader stop flag, calls `CancelIoEx`,
+signals the ring wake event, closes ConPTY and joins the reader. Only then are
+its remaining handles, terminal session and ring released. Late PTY or glyph
+messages cannot resolve the removed ID. The layout collapses the sibling into
+the removed leaf’s parent. The last pane removes its tab; the last tab quits.
+Whole-tab close releases each owned pane, while whole-window close repeats that
+for every tab. Each manual action has a distinct confirmation message. Split, close-pane and
+maximize/restore actions are also exposed in the native system menu, for cases
+where another application intercepts a shortcut.
+
+The adapter rounds rectangle edges together to partition child HWNDs without
+pixel overlap. It resizes each pane’s VT and ConPTY to the same row/column pair,
+subtracting that pane’s scrollbar; hidden tabs retain their sessions and update
+geometry. Maximized-away panes keep their session and last size until restored.
 
 ### 5.2 Reader thread (`child_process.zig:readConsoleThread`)
 
@@ -399,7 +348,7 @@ loop:
     on ERROR_OPERATION_ABORTED                   → exit (CancelIoEx)
   if !pty_ring.write(buf[0..n]): exit            // stop tripped while ring-full
   if pty_ring.posted.swap(true, .acq_rel) == false:
-    while PostMessageW(hwnd, WM_APP_CHILD_PROCESS_DATA, tab_id, 0) == 0:
+    while PostMessageW(hwnd, WM_APP_CHILD_PROCESS_DATA, pane_id, 0) == 0:
       if reader_stop.load(.acquire):
         pty_ring.posted.store(false, .release); exit  // tail bytes dropped
       log warn (attempt 1, then every 100)
@@ -425,7 +374,7 @@ is paired with `reader_stop` being set by `destroyTab`.
 
 ### 5.3 Terminal session and effects (`terminal/Session.zig`, `tab_mgmt.zig`)
 
-Each `Tab` owns a platform-neutral `TerminalSession`, which owns the upstream
+Each Windows `Pane` owns a platform-neutral `TerminalSession`, which owns the upstream
 `vt.Terminal`, its arena, and the persistent `vt.TerminalStream`. Wide-character
 overwrite consistency is handled by `libghostty-vt`; Mostty does not pre-process
 print actions.
@@ -496,14 +445,14 @@ The flow per chunk of PTY bytes is:
 ```
 ReadFile bytes
   → PtyRing.write (memcpy into ring; blocks on wake_event when full)
-  → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, wparam=tab_id)
+  → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, wparam=pane_id)
 [on UI thread, later — drain coalesces multiple reader writes]
   → PtyRing.drainMax(256 B) loop, capped at ~2 ms for initial wake-ups
     or ~8 ms for TIMER_PTY_DRAIN backlog continuations
     → up to two contiguous slices passed to
-       Tab.session.feed
+       Pane.session.feed
        → vt.TerminalStream parser dispatches: print, control, CSI, OSC, DCS, ...
-         → Handler effects mutate Tab.term (screen state)
+         → Handler effects mutate Pane.term (screen state)
          → write-PTY replies (CSI 18 t etc.) go back via ChildProcess
   → SetEvent(pty_ring.wake_event)  (resumes a full-ring writer)
   → if bytes drained > 0:
@@ -518,14 +467,14 @@ ReadFile bytes
 
 ### 5.4 Kitty graphics
 
-Kitty graphics support is wired through `Tab.session` and
+Kitty graphics support is wired through `Pane.session` and
 `libghostty-vt`'s Kitty image storage:
 
 1. The child app writes APC sequences into ConPTY. Kitty sequences start
    with `ESC _ G` and terminate with ST (`ESC` followed by `\`). The
    bundled Microsoft Terminal ConPTY is used when available because the
    Windows inbox ConPTY can discard APC payloads before Mostty sees them.
-2. The UI thread drains PTY bytes into `Tab.session.feed`. The handler
+2. The UI thread drains PTY bytes into `Pane.session.feed`. The handler
    lets `libghostty-vt` parse Kitty graphics, including direct RGB/gray
    payloads, PNG payloads decoded by `png_decode.zig`, placements, deletes,
    and ACK responses.
@@ -566,8 +515,7 @@ and removes Sixel from the shared DA1 capability response.
 
 ### 6.1 Renderer facade and backends
 
-The process-global `Renderer` (`Renderer.zig`) is the only boundary used by
-window, input, layout, and render orchestration code. It owns a process-lifetime
+The process-global `Renderer` (`Renderer.zig`) owns the selected backend and a process-lifetime
 `FontService`, a backend-independent `RendererCommon` (cell size, tab-bar
 height, ligature setting, and adapter classification), plus a tagged backend
 union. D3D11 remains the default validated variant; D3D12, OpenGL 4.6, Vulkan
@@ -584,6 +532,15 @@ tab-bar band use keyed shared textures: the service writes under key 0 and
 hands off key 1; D3D11 imports the texture on its own device, copies the result,
 then returns key 0. Atlas slots, result validation, and presentation remain
 backend responsibilities.
+
+D3D11 creates the main chrome surface and one child-HWND surface per pane.
+`initSurface` retains the main device, context, shaders and dynamic constant
+buffers and borrows `FontService`; it does not repeat device/font initialization.
+Each surface owns its cell/shadow buffers, atlas, grid texture, image cache and
+swapchain. Font changes invalidate each surface before it draws again. Glyph
+jobs/results carry a stable surface ID as well as cache and slot generations.
+The main composition target is below child windows and clears pane regions to
+transparent, so a pane applies its own background opacity once.
 
 The `d3d11` struct owns:
 
@@ -700,13 +657,15 @@ retain the M5a CPU handoff. Observed vendor results live in
 
 ### 6.2 Per-frame orchestration
 
-`render.zig:renderWindow` is the only caller of `renderer.render`. It
-reads the active `Tab.term`, computes selection/cursor state, and hands
-everything to:
+`render.zig:renderWindow` paints main chrome then every visible D3D11 pane with
+its own terminal, selection, hover and focused-cursor state. Hidden sessions
+continue consuming PTY output. Research backends retain the single-surface
+facade path; requesting a split reports its D3D11 requirement without switching
+backend. A pane frame runs:
 
 1. **prepareFrame** (`d3d11.zig`): client-size query; swap-chain
    create-or-resize; cheap occlusion test (`Present(0, TEST)`);
-   `WaitForSingleObjectEx(frame_latency_waitable, 100 ms, 0)` to gate
+   `WaitForSingleObjectEx` (100 ms on main chrome, nonblocking on pane surfaces) to gate
    CPU frame production on DXGI queue availability (placed after the
    OCCLUDED gate so hidden windows don't stall; bounded timeout so a
    stuck waitable — GPU TDR mid-recovery, DWM hiccup — can't freeze
@@ -715,7 +674,7 @@ everything to:
    tab-bar) against the prior frame; write `GridConfig` constants
    (cell size, counts, scrollbar, `bg_image_dest`).
 2. **Kitty image sync** (`d3d11/kitty_images.zig`): mirror the active
-   tab's Kitty image storage into D3D textures, prune deleted image IDs,
+   pane's Kitty image storage into D3D textures, prune deleted image IDs,
    sort visible placements by z-order, and mark the grid for full redraw
    when image placement state changes.
 3. **buildAndUpload** (`d3d11/cell_buffer.zig`): per-row, build a scratch
@@ -940,7 +899,7 @@ filesystem change
   → arm TIMER_CONFIG_RELOAD (150 ms debounce coalesces save bursts)
   → reloadConfig:
        parse → diff against current global.config
-       if font changed:   renderer.updateFont, reflow all Tab.term + ConPTY
+       if font changed:   renderer.updateFont, reflow all Pane.term + ConPTY
        if theme changed:  rebase term colors, sync theme submenu check
        if blur changed:   util.applyBlurBehind
        if image changed:  renderer.reloadBackgroundImage
@@ -962,7 +921,7 @@ shell stdout
   → ConPTY pipe
   → readConsoleThread (per tab)
       → PtyRing.write (memcpy, blocks on wake_event if full)
-      → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, tab_id)
+      → edge-triggered PostMessage(WM_APP_CHILD_PROCESS_DATA, pane_id)
 [UI thread, asynchronously]
   → onAppChildProcessData
       → drainMax(256 B) loop → TerminalSession.feed (up to two contiguous slices)
@@ -1003,41 +962,27 @@ WM_KEYDOWN
   → else vkToSpecial + keyModifiers + shared encodeKey → write CSI
 WM_CHAR
   → drop control duplicates that KEYDOWN already handled
-  → reassemble UTF-16 surrogates via per-tab high_surrogate
+  → reassemble UTF-16 surrogates via per-pane high_surrogate
   → encode to UTF-8 → ChildProcess.writeFlushAll
 ```
 
-### 9.3 Tab open / close
+### 9.3 Tab, pane and session commands
+
+Windows split commands update `SplitLayout`; `Ctrl+Shift+D` splits left/right and `Ctrl+Shift+E` splits up/down. `Ctrl+Alt+Arrow` follows physical pane geometry without wrapping. `Ctrl+Shift+Enter` maximizes/restores the focused pane while retaining every session. `Ctrl+Shift+W` closes one pane; only the last pane closes its tab. Divider capture stores a split ID, and child HWND input, IME and capture are resolved through the pane registry. Non-D3D11 backends remain single-surface until independently validated and are never silently replaced.
+
+### 9.4 Tab open / close
 
 ```
-newTab:
-  alloc Tab (field-default block)
-  init tab.pty_ring (1 MiB buf + auto-reset wake_event)  — AFTER tab.* = .{...}
-  startConPtyWin32 (creates pipes → spawns readConsoleThread holding
-                    &tab.pty_ring → CreatePseudoConsole → CreateProcessW →
-                    ResumeThread). Startup-error cleanup wakes the reader
-                    (reader_stop + SetEvent + CancelIoEx) before join.
-  init TerminalSession in place → apply tab_mgmt platform effects
-  append, set active, onActiveChanged, requestRender
-
-destroyTab:
-  closing = true                         (handler drains no-op until we run)
-  unhook from window.tabs                (queued posts findById → null)
-  reader_stop.store(true)
-  CancelIoEx(read)                       (unblocks ReadFile)
-  SetEvent(pty_ring.wake_event)          (unblocks full-ring writer)
-  closePty()                             (close our_write + ClosePseudoConsole;
-                                          guarantees BROKEN_PIPE on our_read
-                                          if reader was between stop-check
-                                          and ReadFile when CancelIoEx fired)
-  thread.join()                          (direct — no UI message pump)
-  close read pipe, job, process handle
-  deinit TerminalSession
-  deinit pty_ring                        (AFTER join — reader owned &pty_ring)
-  if tabs.len == 0: PostMessage(WM_QUIT)
+newTab: allocate tab layout → create first pane session → publish tab → reflow
+splitActive: check minimum → create pane session → publish split → reflow/focus
+destroyPane: remove native surface and registry entry → stop and join reader
+             → free session → collapse layout → remove empty tab
+destroyTab: release all owned panes → remove tab
 ```
 
-### 9.4 Mouse selection
+See §5.1 for failure handling and teardown ordering.
+
+### 9.5 Mouse selection
 
 ```
 WM_LBUTTONDOWN (no Shift, no mouse-report)
@@ -1050,7 +995,7 @@ WM_LBUTTONUP (capture .selecting)
   → arm TIMER_SELECTION_FADE (16 ms tick, fade over ~1 s)
 ```
 
-### 9.5 Mouse-report
+### 9.6 Mouse-report
 
 ```
 PTY enables mouse mode (SET DEC mode)
@@ -1068,8 +1013,8 @@ WM_LBUTTONUP
 ## 10. Invariants & Gotchas
 
 - **Never index tabs by position across messages.** Tabs can close
-  mid-flight. Use `findById` / `findIndexById`.
-- **While the per-tab ring is non-empty, a `WM_APP_CHILD_PROCESS_DATA`
+  mid-flight. Use `findById` for pane IDs and `findTabIndexById` for tab IDs.
+- **While the per-pane ring is non-empty, a `WM_APP_CHILD_PROCESS_DATA`
   post is either in flight or about to be sent.** The reader maintains
   this via an edge-triggered `posted.swap(true, .acq_rel)` after every
   successful `PtyRing.write` (which itself did `head.store(.release)`).
@@ -1099,14 +1044,12 @@ WM_LBUTTONUP
   no-op there, but a closed PTY makes `ReadFile` return `BROKEN_PIPE`
   on entry. The startup `errdefer` chain in `startConPtyWin32` uses the
   same trio for the same reason.
-- **`PtyRing` lifetime: init in `newTab` AFTER the `tab.* = .{...}`
-  field-default block (which would otherwise overwrite it), deinit in
-  `destroyTab` AFTER `thread.join`.** The reader thread holds
-  `&tab.pty_ring`, which is stable for that window because `Tab` is
-  heap-allocated and never moves.
+- **`PtyRing` lifetime: initialize after the pane field-default block, and
+  deinitialize only after the reader joins.** The reader borrows the ring inside
+  a heap-allocated `Pane` whose address never changes.
 - **`vt.Terminal` is UI-thread-only.** No locks; the contract is enforced
   by the single-consumer ring drain.
-- **`high_surrogate` is per-tab.** Switching the active tab between the
+- **`high_surrogate` is per-pane.** Switching the active tab between the
   high and low `WM_CHAR` would otherwise smear the surrogate.
 - **`render_timer_armed` must not be set if `SetTimer` failed** — that
   would freeze the renderer.
@@ -1115,8 +1058,8 @@ WM_LBUTTONUP
 - **Swap chain is 3-buffer FLIP + `MaxFrameLatency = 1` + waitable-gated.**
   The three components go together: dropping to 2 buffers reintroduces
   drag-time stutter; dropping the latency cap or the waitable wait adds
-  input lag from queued frames. The waitable wait is bounded (100 ms) and
-  best-effort — a failed/timed-out wait proceeds with the frame.
+  input lag from queued frames. Main chrome waits at most 100 ms; pane surfaces
+  use a nonblocking probe so per-pane waits cannot accumulate on the UI thread.
 - **DComposition tree lifetime is tied to `swap_chain`.** `dcomp_visual`,
   `dcomp_target`, `dcomp_device`, and `swap_chain` are all created together
   in `swap_chain.init` and left `undefined` until then. `deinit` gates the

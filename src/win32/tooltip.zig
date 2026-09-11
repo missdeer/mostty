@@ -76,9 +76,9 @@ fn writeTooltipText(window: *state.Window, tab: *state.Tab) void {
     const cap = buf.len - 1; // reserve sentinel
 
     var written: usize = 0;
-    const title_u8 = tab.title_buf[0..tab.title_len];
+    const title_u8 = tab.active().title_buf[0..tab.active().title_len];
     if (title_u8.len == 0) {
-        const idx = window.findIndexById(tab.id) orelse 0;
+        const idx = window.findTabIndexById(tab.id) orelse 0;
         var s_buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&s_buf, "tab {d}", .{idx + 1}) catch s_buf[0..0];
         const need = std.unicode.calcUtf16LeLen(s) catch s.len;

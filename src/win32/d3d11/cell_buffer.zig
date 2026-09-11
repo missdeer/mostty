@@ -206,7 +206,7 @@ pub fn buildAndUpload(
         // Cursor inversion is applied inline (not in a separate post-pass)
         // so that wide CJK glyphs get BOTH halves flipped, not just the
         // left one.
-        const cursor_visible = screen.viewportIsBottom() and term.modes.get(.cursor_visible);
+        const cursor_visible = self.common.focused and screen.viewportIsBottom() and term.modes.get(.cursor_visible);
         const cursor_on_row = cursor_visible and screen.cursor.y == screen_row;
         const cursor_bg_rgba = Rgba8.fromU24(if (term.colors.cursor.get()) |c| color.rgbToU24(c) else eff_fg);
         const cursor_fg_rgba = Rgba8.fromU24(cursor_text orelse eff_bg);

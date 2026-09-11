@@ -12,7 +12,7 @@ const Window = state.Window;
 const global = global_mod.global;
 
 pub fn renderWindow(window: *Window) void {
-    if (window.confirming_renderer_fallback) return;
+    if (window.confirming_renderer_fallback or window.tabs.items.len == 0 or window.layout_updating) return;
 
     // Revalidate cached URL hover against current viewport contents. Anything
     // that asked for a repaint (PTY data, resize, keyboard-driven viewport
@@ -41,6 +41,29 @@ pub fn renderWindow(window: *Window) void {
             .end_col = h.hit.end_col,
         };
     };
+    if (@import("pane_native.zig").supported()) {
+        var pane_rects: [types.MAX_PANES]win32.RECT = undefined;
+        var pane_rect_count: usize = 0;
+        for (window.panes.items) |pane| {
+            if (pane.tab != window.activeTab()) continue;
+            const r = pane.tab.layout.paneRect(pane.id) orelse continue;
+            pane_rects[pane_rect_count] = .{ .left = @intFromFloat(@round(r.x)), .top = @intFromFloat(@round(r.y)), .right = @intFromFloat(@round(r.x + r.width)), .bottom = @intFromFloat(@round(r.y + r.height)) };
+            pane_rect_count += 1;
+        }
+        global.renderer.backend.?.d3d11.renderChrome(window.hwnd, window.active().term, tabbar, theme.background, global.config.background_opacity, window.remote_session, pane_rects[0..pane_rect_count]);
+        for (window.panes.items) |pane| {
+            if (pane.closing or pane.tab != window.activeTab() or pane.tab.layout.paneRect(pane.id) == null) continue;
+            @import("pane_native.zig").syncSurface(pane);
+            const highlight: ?types.UrlHighlight = if (window.hovered_url) |h| blk: {
+                if (h.tab_id != pane.id) break :blk null;
+                break :blk .{ .start_row = h.hit.start_row, .start_col = h.hit.start_col, .end_row = h.hit.end_row, .end_col = h.hit.end_col };
+            } else null;
+            const captured = win32.GetCapture() == pane.hwnd;
+            pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false }, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, if (captured and window.mouse_capture == .selecting) 1.0 else pane.selection_fade, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
+            _ = win32.ValidateRect(pane.hwnd.?, null);
+        }
+        return;
+    }
     if (global.renderer.render(
         window.hwnd,
         window.active().id,
@@ -48,7 +71,7 @@ pub fn renderWindow(window: *Window) void {
         tabbar,
         window.resizing,
         window.mouse_in_scrollbar,
-        if (window.mouse_capture == .selecting) 1.0 else window.selection_fade,
+        if (window.mouse_capture == .selecting) 1.0 else window.active().selection_fade,
         theme.cursor_text,
         theme.selection_background,
         theme.selection_foreground,
@@ -85,6 +108,7 @@ pub fn renderWindow(window: *Window) void {
         };
         window.confirming_renderer_fallback = false;
         global.config.renderer = .d3d11;
+        @import("pane_native.zig").reflow(window);
         global.renderer.reloadBackgroundImage(global.gpa.allocator(), &global.config, window.hwnd);
         std.log.warn("renderer: user accepted runtime fallback from {s} to d3d11", .{failure.backendName()});
         _ = win32.InvalidateRect(window.hwnd, null, 0);
@@ -93,11 +117,12 @@ pub fn renderWindow(window: *Window) void {
 
 // Pixel position of the top-left of the active tab's cursor cell, including
 // the tab-bar band offset at the top.
-pub fn caretPixelPos(window: *Window) ?win32.POINT {
-    if (window.tabs.items.len == 0) return null;
-    const screen = window.active().term.screens.active;
+pub fn caretPixelPos(hwnd: win32.HWND) ?win32.POINT {
+    const window = global_mod.windowFromHwnd(hwnd);
+    const pane = window.paneFromHwnd(hwnd) orelse return null;
+    const screen = pane.term.screens.active;
     const cs = global.renderer.common.cell_size;
     const x: i32 = @as(i32, @intCast(screen.cursor.x)) * cs.cx;
-    const y: i32 = @as(i32, @intCast(screen.cursor.y)) * cs.cy + global.renderer.common.tab_bar_height;
+    const y: i32 = @as(i32, @intCast(screen.cursor.y)) * cs.cy + global_mod.tabBarHeight(hwnd);
     return .{ .x = x, .y = y };
 }
