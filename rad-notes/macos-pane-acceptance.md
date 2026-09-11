@@ -39,6 +39,8 @@ or independent window per pane is created. Keyboard mappings are in README.
   Single external reviewer mode was used because Codex authored the change.
   The automated acceptance follow-up also passed one independent Antigravity
   review round with no actionable findings.
+  The final acceptance-record update passed one independent Antigravity review
+  round with no actionable findings.
 
 Local logs are `tmp/MOSTTY-75-unit-tests.log`,
 `tmp/macos-interaction-tests/run.log`, `tmp/MOSTTY-75-clipboard.log`, and
@@ -48,20 +50,27 @@ command above from a macOS GUI login session with Metal available. It uses the
 current user configuration, temporarily uses and restores the clipboard, and
 stores probe output under `tmp/macos-pane-tests`.
 
-## Acceptance still requiring verification
+## Final acceptance — 2026-09-11
 
-- Physical cross-display transitions and the appearance/location of the native
-  Chinese IME candidate window after pane focus changes. Programmatic 1x/2x
-  reflow and candidate-anchor tests are narrower evidence.
-- Visual inspection of final desktop compositing for multi-pane Kitty clipping
-  and transparent/blurred backgrounds. Renderer texture pixels, native view
-  bounds, opacity and backdrop ownership now have automated runtime coverage;
-  those checks do not sample the final WindowServer-composited desktop.
-- Final menu/keyboard interaction and divider affordance checks on the final
-  rebuilt application. Last-pane shell exit, minimum window reflow and divider
-  clamping now have automated native coverage.
+The user confirmed that these checks passed on the current Mostty build:
 
-The user will verify physical displays and the native Chinese IME candidate
-window later; these are not marked complete by automated scale/anchor tests.
+- Physical cross-display scaling and the native Chinese IME candidate window.
+- Split, directional focus, maximize/restore, and close through menus and
+  shortcuts; divider dragging and minimum sizes.
+- Pane-local Kitty clipping and desktop compositing with transparent/blurred
+  backgrounds.
 
-MOSTTY-75 must remain open until these runtime acceptance items are recorded.
+These are user-observed results, distinct from the automated scale, IME-anchor,
+texture-pixel and native-view checks above. The agent's native UI controller
+became unavailable during final interaction checks; the user confirmed that
+Mostty remained responsive and completed the remaining desktop verification.
+
+At source commit `42faa062c446e0ccaabbba56563ddf0bc77b0461`,
+`zig build --summary failures` succeeded and
+`zig build test-macos-panes --summary failures` passed all 36 checks with zero
+failures. The initial sandboxed pane run was interrupted after macOS GUI service
+errors; the successful run used access outside the sandbox. Its default-theme
+warning was specific to the standalone harness; the theme was verified present
+in the application bundle. The current user configuration was retained.
+
+All outstanding MOSTTY-75 runtime acceptance items are now recorded as passed.
