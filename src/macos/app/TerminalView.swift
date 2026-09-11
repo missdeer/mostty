@@ -347,9 +347,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
             ? window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) } : nil
         updateURLHover(at: mouse)
         dirty = false
-        // Focused cursor blinks; unfocused shows a steady block.
+        // Only the focused pane draws a blinking cursor.
         let focused = window?.firstResponder === self
-        let cursorOn = focused ? blinkOn : true
+        let cursorOn = focused && blinkOn
         var c: UInt32 = 0, r: UInt32 = 0
         guard let texPtr = mostty_tab_render(t, cursorOn, &c, &r) else { return }
         cols = c; rows = r

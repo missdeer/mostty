@@ -79,7 +79,7 @@ final class PaneContainer: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let tab = tab else { return }
+        guard let tab = tab, tab.panes.count > 1 else { return }
         for pane in tab.panes where pane.view.superview === self {
             (tab.activePane === pane ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
             let border = NSBezierPath(rect: pane.view.frame.insetBy(dx: -1, dy: -1))
