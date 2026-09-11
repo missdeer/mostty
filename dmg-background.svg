@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="300" viewBox="0 0 500 300">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f9ff"/>
+      <stop offset="1" stop-color="#c9ddf2"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="500" height="300" fill="url(#bg)"/>
+
+  <g fill="#5b8fc9" stroke="#5b8fc9" stroke-width="14" stroke-linejoin="round" opacity="0.8">
+    <path d="M 190 132 L 256 132 L 256 108 L 310 150 L 256 192 L 256 168 L 190 168 Z"/>
+  </g>
+
+  <text x="250" y="270" text-anchor="middle"
+        font-family="PingFang SC, Helvetica Neue, Helvetica, sans-serif"
+        font-size="15" fill="#45688c">拖动左侧图标到 Applications 完成安装</text>
+</svg>
