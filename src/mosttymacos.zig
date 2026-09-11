@@ -15,4 +15,5 @@ comptime {
     _ = @sizeOf(CoreTextRenderer);
     // Force the C-ABI exports to be analyzed and kept in the static library.
     _ = capi;
+    _ = @import("layout_capi.zig");
 }

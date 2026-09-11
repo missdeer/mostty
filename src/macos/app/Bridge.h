@@ -7,6 +7,30 @@
 
 typedef struct MosttyTab MosttyTab;
 
+/* UI-thread-only layout handle. Pane IDs are nonzero and never reused.
+   Geometry is in host units; macOS uses points with a top-left origin.
+   Axis: columns=0, rows=1. Direction: left/right/up/down=0/1/2/3. */
+typedef struct MosttyLayout MosttyLayout;
+typedef struct { double x, y, width, height; } MosttyLayoutRect;
+typedef struct { double width, height; } MosttyLayoutSize;
+typedef struct { uint32_t id; MosttyLayoutRect rect; } MosttyLayoutPane;
+typedef struct { uint32_t id, axis; MosttyLayoutRect rect; } MosttyLayoutDivider;
+MosttyLayout *mostty_layout_create(uint32_t first);
+void mostty_layout_destroy(MosttyLayout *layout);
+bool mostty_layout_bounds(MosttyLayout *layout, MosttyLayoutRect bounds, MosttyLayoutSize minimum, double gap);
+MosttyLayoutSize mostty_layout_minimum(MosttyLayout *layout);
+uint32_t mostty_layout_active(MosttyLayout *layout);
+bool mostty_layout_can_split(MosttyLayout *layout, uint32_t target, uint32_t axis);
+bool mostty_layout_split(MosttyLayout *layout, uint32_t target, uint32_t new_id, uint32_t axis);
+bool mostty_layout_close(MosttyLayout *layout, uint32_t id);
+bool mostty_layout_focus(MosttyLayout *layout, uint32_t id);
+bool mostty_layout_direction(MosttyLayout *layout, uint32_t direction);
+void mostty_layout_maximize(MosttyLayout *layout);
+/* Returns the required count even when output is NULL or cap is too small. */
+size_t mostty_layout_panes(MosttyLayout *layout, MosttyLayoutPane *output, size_t cap);
+bool mostty_layout_divider(MosttyLayout *layout, double x, double y, MosttyLayoutDivider *output);
+bool mostty_layout_drag(MosttyLayout *layout, uint32_t id, double position);
+
 MosttyTab *mostty_tab_create(uint32_t pixel_width, uint32_t pixel_height, float scale);
 MosttyTab *mostty_tab_create_with_launcher(uint32_t pixel_width, uint32_t pixel_height,
                                          float scale, const char *command, const char *directory);

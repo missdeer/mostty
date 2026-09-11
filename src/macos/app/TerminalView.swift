@@ -27,6 +27,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     private var cellHeightPx: UInt32 = 1
     private var lastPixelW: UInt32 = 0
     private var lastPixelH: UInt32 = 0
+    private var surfaceScale: CGFloat = 2
+    private var lastScale: CGFloat = 0
+    private var closed = false
 
     // Config-derived state the host owns. Fonts and colors live inside the
     // bridge; these two shape AppKit-side behaviour instead.
@@ -69,15 +72,21 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     var onTitleChange: ((String) -> Void)?
     var onExit: (() -> Void)?
+    var onFocus: (() -> Void)?
+#if MOSTTY_APP_TESTS
+    var testSession: OpaquePointer? { tab }
+#endif
     var launcher: TerminalLauncher?
     var hasActiveSession: Bool {
         guard alive, !terminated, let tab = tab else { return false }
         var code: Int32 = 0
         return !mostty_tab_poll_exit(tab, &code)
     }
-    /// Fired after a window-driven resize so sibling tabs can adopt the same
-    /// grid immediately, keeping every session consistent with the window.
-    var onSurfaceResize: ((UInt32, UInt32, Float) -> Void)?
+    var minimumPaneSize: NSSize {
+        NSSize(width: max(8, CGFloat(cellWidthPx) / surfaceScale) * 12 +
+               NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy),
+               height: max(16, CGFloat(cellHeightPx) / surfaceScale) * 3)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -106,13 +115,24 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     override var isOpaque: Bool { !translucent }
     override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        onFocus?()
+        dirty = true
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        commitMarkedIfNeeded()
+        dirty = true
+        return true
+    }
 
     // MARK: Lifecycle
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let window = window {
+            surfaceScale = window.backingScaleFactor
             window.acceptsMouseMovedEvents = true
             setupIfNeeded()
             updateScroller()
@@ -135,7 +155,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         scroller.frame = NSRect(x: contentWidth, y: 0, width: width, height: bounds.height)
     }
 
-    private func currentScale() -> CGFloat { window?.backingScaleFactor ?? 2.0 }
+    private func currentScale() -> CGFloat { window?.backingScaleFactor ?? surfaceScale }
 
     private func pixelSize() -> (w: UInt32, h: UInt32) {
         let scale = currentScale()
@@ -145,7 +165,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     }
 
     private func setupIfNeeded() {
-        guard tab == nil, window != nil, bounds.width > 1, bounds.height > 1 else { return }
+        guard !closed, tab == nil, window != nil, bounds.width > 1, bounds.height > 1 else { return }
         layoutSurface()
         let scale = currentScale()
         let (pw, ph) = pixelSize()
@@ -177,6 +197,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         mostty_tab_cell_size(t, &cw, &ch)
         cellWidthPx = max(1, cw); cellHeightPx = max(1, ch)
         lastPixelW = pw; lastPixelH = ph
+        lastScale = scale
 
         alive = true
         dirty = true
@@ -184,10 +205,10 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         startTimer()
         startBlink()
         updateTitle()
-        window?.makeFirstResponder(self)
     }
 
     func shutdown() {
+        closed = true
         endMouseCapture()
         updateURLHover(at: nil)
         guard alive else {
@@ -285,23 +306,19 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         }
 
         if let t = tab, mostty_tab_apply_config(t) {
-            // New cell metrics: the grid no longer matches the drawable, so let
-            // the resize path run even though the pixel size is unchanged. The
-            // resize itself is deferred to `resyncSurface` on the on-screen tab,
-            // because a background tab's bounds and backing scale are stale.
+            // Font reload must refresh each session, including hidden panes.
             lastPixelW = 0
             lastPixelH = 0
         }
+        resyncSurface()
         dirty = true
         needsDisplay = true
     }
 
-    /// Re-derive the grid from the current drawable and propagate it to sibling
-    /// tabs. Called on the on-screen tab after every tab has adopted a reloaded
-    /// font, so all sessions land on the same grid instead of background tabs
-    /// keeping the old one until they are next shown.
-    func resyncSurface() {
-        guard window != nil else { return }
+    /// Hidden panes retain their last host scale and independent geometry.
+    func resyncSurface(scale: CGFloat? = nil) {
+        if let scale = scale { surfaceScale = scale }
+        setupIfNeeded()
         syncSurfaceIfNeeded()
         updateScroller()
     }
@@ -357,7 +374,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard alive, let t = tab, let layer = metalLayer else { return }
         let scale = currentScale()
         let (pw, ph) = pixelSize()
-        if pw == lastPixelW && ph == lastPixelH { return }
+        if pw == lastPixelW && ph == lastPixelH && scale == lastScale { return }
         var nc: UInt32 = 0, nr: UInt32 = 0
         guard mostty_tab_set_surface(t, pw, ph, Float(scale), &nc, &nr) else { return }
         cols = nc; rows = nr
@@ -367,33 +384,17 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         layer.contentsScale = scale
         layer.drawableSize = CGSize(width: Int(pw), height: Int(ph))
         lastPixelW = pw; lastPixelH = ph
+        lastScale = scale
         // Composition is anchored to the cursor; a resize commits it to avoid a
         // dangling overlay.
-        commitMarkedIfNeeded()
-        dirty = true
-        onSurfaceResize?(pw, ph, Float(scale))
-    }
-
-    /// Adopt a window-driven size decided by another (active) tab, so this
-    /// background session's PTY, VT, and renderer stay consistent immediately.
-    func applyExternalSurface(_ pw: UInt32, _ ph: UInt32, _ scale: Float) {
-        guard alive, let t = tab, let layer = metalLayer else { return }
-        if pw == lastPixelW && ph == lastPixelH { return }
-        var nc: UInt32 = 0, nr: UInt32 = 0
-        guard mostty_tab_set_surface(t, pw, ph, scale, &nc, &nr) else { return }
-        cols = nc; rows = nr
-        var cw: UInt32 = 1, ch: UInt32 = 1
-        mostty_tab_cell_size(t, &cw, &ch)
-        cellWidthPx = max(1, cw); cellHeightPx = max(1, ch)
-        layer.contentsScale = CGFloat(scale)
-        layer.drawableSize = CGSize(width: Int(pw), height: Int(ph))
-        lastPixelW = pw; lastPixelH = ph
         commitMarkedIfNeeded()
         dirty = true
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        surfaceScale = currentScale()
+        resyncSurface()
         dirty = true
     }
 
@@ -688,6 +689,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     }
     override func rightMouseUp(with event: NSEvent) { _ = finishMouseReport(event, button: 2) }
     override func otherMouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         if event.buttonNumber == 2 { _ = beginMouseReport(event, button: 1) }
     }
     override func otherMouseDragged(with event: NSEvent) {

@@ -1,10 +1,30 @@
 import SwiftUI
 import AppKit
 
+final class PaneItem: Identifiable {
+    let id: UInt32
+    var title = "Terminal"
+    let view = MosttyTerminalView(frame: .zero)
+
+    init(id: UInt32) { self.id = id }
+}
+
 final class TabItem: ObservableObject, Identifiable {
     let id = UUID()
     @Published var title = "Terminal"
-    let view = MosttyTerminalView(frame: .zero)
+    let layout: OpaquePointer
+    var panes: [PaneItem]
+    lazy var host = PaneContainer(tab: self)
+    var activePane: PaneItem? { panes.first { $0.id == mostty_layout_active(layout) } }
+    var view: MosttyTerminalView { activePane!.view }
+
+    init?(first: UInt32) {
+        guard let layout = mostty_layout_create(first) else { return nil }
+        self.layout = layout
+        panes = [PaneItem(id: first)]
+    }
+
+    deinit { mostty_layout_destroy(layout) }
 }
 
 /// Watches the config file and re-applies it without a restart.
@@ -91,6 +111,7 @@ final class AppModel: ObservableObject {
     @Published var themes: [String] = []
     @Published var activeTheme = ""
     private var confirmingClose = false
+    private var lastPaneID: UInt32 = 0
     private let windowDelegate = TerminalWindowDelegate()
 
     var selectedTab: TabItem? { tabs.first { $0.id == selectedID } }
@@ -116,12 +137,10 @@ final class AppModel: ObservableObject {
     }
 
     private func applyConfig() {
-        // Every tab adopts the new font first, then the on-screen tab derives the
-        // grid once and broadcasts it. Doing the resize inside the loop would let
-        // the active tab publish a grid before the others had the metrics for it,
-        // leaving background sessions on the old size until they are next shown.
-        for tab in tabs { tab.view.applyConfig() }
-        selectedTab?.view.resyncSurface()
+        for tab in tabs {
+            for pane in tab.panes { pane.view.applyConfig() }
+            tab.host.arrange()
+        }
         container?.applyBackdrop()
         container?.applyWindowAppearance()
     }
@@ -228,23 +247,117 @@ final class AppModel: ObservableObject {
     }
 
     func newTab(launcher: TerminalLauncher? = nil) {
-        let item = TabItem()
-        item.view.launcher = launcher
-        item.view.onTitleChange = { [weak item] title in
-            item?.title = title.isEmpty ? "Terminal" : title
+        guard let id = nextPaneID(), let item = TabItem(first: id) else {
+            showError("Unable to Open Tab", detail: "The terminal layout could not be created.")
+            return
         }
-        item.view.onExit = { [weak self, weak item] in
-            guard let self = self, let item = item else { return }
-            self.close(item.id, confirm: false)
-        }
-        item.view.onSurfaceResize = { [weak self, weak item] pw, ph, scale in
-            guard let self = self, let item = item else { return }
-            for other in self.tabs where other.id != item.id {
-                other.view.applyExternalSurface(pw, ph, scale)
-            }
-        }
+        configure(item.panes[0], in: item, launcher: launcher)
         tabs.append(item)
         selectedID = item.id
+    }
+
+    private func nextPaneID() -> UInt32? {
+        guard lastPaneID < UInt32.max else { return nil }
+        lastPaneID += 1
+        return lastPaneID
+    }
+
+    private func configure(_ pane: PaneItem, in tab: TabItem, launcher: TerminalLauncher?) {
+        pane.view.launcher = launcher
+        pane.view.setAccessibilityLabel("Terminal pane \(pane.id)")
+        pane.view.onTitleChange = { [weak tab, weak pane] title in
+            guard let tab = tab, let pane = pane else { return }
+            pane.title = title.isEmpty ? "Terminal" : title
+            if tab.activePane === pane { tab.title = pane.title }
+        }
+        pane.view.onExit = { [weak self, weak tab, weak pane] in
+            guard let tab = tab, let pane = pane else { return }
+            self?.closePane(pane.id, in: tab, confirm: false)
+        }
+        pane.view.onFocus = { [weak self, weak tab, weak pane] in
+            guard let self = self, let tab = tab, let pane = pane,
+                  self.selectedID == tab.id, mostty_layout_focus(tab.layout, pane.id) else { return }
+            tab.title = pane.title
+            tab.host.needsDisplay = true
+        }
+    }
+
+    func splitSelected(_ axis: UInt32, launcher: TerminalLauncher? = nil) {
+        guard let tab = selectedTab, let active = tab.activePane else { return }
+        tab.host.arrange()
+        guard mostty_layout_can_split(tab.layout, active.id, axis), let id = nextPaneID() else {
+            NSSound.beep()
+            return
+        }
+        let pane = PaneItem(id: id)
+        configure(pane, in: tab, launcher: launcher)
+        // Start the owned session before publishing its ID to the model;
+        // creation failure must preserve the current focus and maximization.
+        tab.panes.append(pane)
+        pane.view.frame = active.view.frame
+        tab.host.addSubview(pane.view)
+        guard pane.view.hasActiveSession else {
+            tab.panes.removeLast()
+            pane.view.removeFromSuperview()
+            pane.view.shutdown()
+            showError("Unable to Split Terminal", detail: "The new terminal session could not be started.")
+            return
+        }
+        guard mostty_layout_split(tab.layout, active.id, id, axis) else {
+            tab.panes.removeLast()
+            pane.view.removeFromSuperview()
+            pane.view.shutdown()
+            NSSound.beep()
+            return
+        }
+        objectWillChange.send()
+        tab.host.arrange()
+        focusActivePane()
+    }
+
+    func focusDirection(_ direction: UInt32) {
+        guard let tab = selectedTab, mostty_layout_direction(tab.layout, direction) else { return }
+        tab.host.arrange()
+        focusActivePane()
+    }
+
+    func togglePaneMaximize() {
+        guard let tab = selectedTab else { return }
+        mostty_layout_maximize(tab.layout)
+        tab.host.arrange()
+        focusActivePane()
+    }
+
+    func focusActivePane() {
+        guard let tab = selectedTab, let pane = tab.activePane else { return }
+        tab.title = pane.title
+        tab.host.window?.makeFirstResponder(pane.view)
+        tab.host.needsDisplay = true
+    }
+
+    func closeSelectedPane() {
+        if let tab = selectedTab, let pane = tab.activePane { closePane(pane.id, in: tab) }
+    }
+
+    func closePane(_ id: UInt32, in tab: TabItem, confirm: Bool = true) {
+        guard tabs.contains(where: { $0 === tab }), let pane = tab.panes.first(where: { $0.id == id }) else { return }
+        if confirm, !confirmCloseViews([pane.view]) { return }
+        guard tabs.contains(where: { $0 === tab }),
+              let index = tab.panes.firstIndex(where: { $0.id == id }) else { return }
+        if tab.panes.count == 1 {
+            close(tab.id, confirm: false)
+        } else if mostty_layout_close(tab.layout, id) {
+            objectWillChange.send()
+            tab.panes.remove(at: index)
+            pane.view.removeFromSuperview()
+            pane.view.shutdown()
+            tab.host.arrange()
+            if selectedID == tab.id {
+                focusActivePane()
+            } else if let active = tab.activePane {
+                tab.title = active.title
+            }
+        }
     }
 
     func closeSelected() {
@@ -252,8 +365,12 @@ final class AppModel: ObservableObject {
     }
 
     func confirmClose(_ candidates: [TabItem]) -> Bool {
+        confirmCloseViews(candidates.flatMap { $0.panes.map(\.view) })
+    }
+
+    private func confirmCloseViews(_ candidates: [MosttyTerminalView]) -> Bool {
         guard !confirmingClose else { return false }
-        guard mostty_config_confirm_close(), candidates.contains(where: { $0.view.hasActiveSession }) else { return true }
+        guard mostty_config_confirm_close(), candidates.contains(where: { $0.hasActiveSession }) else { return true }
         confirmingClose = true
         defer {
             confirmingClose = false
@@ -274,7 +391,8 @@ final class AppModel: ObservableObject {
         // The alert runs a nested event loop; a child can exit while it is open.
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
         let item = tabs.remove(at: idx)
-        item.view.shutdown()
+        item.host.removeFromSuperview()
+        for pane in item.panes { pane.view.shutdown() }
         if selectedID == id {
             selectedID = tabs.indices.contains(idx) ? tabs[idx].id : tabs.last?.id
         }
@@ -282,7 +400,10 @@ final class AppModel: ObservableObject {
     }
 
     func shutdownAll() {
-        for t in tabs { t.view.shutdown() }
+        for tab in tabs {
+            tab.host.removeFromSuperview()
+            for pane in tab.panes { pane.view.shutdown() }
+        }
         tabs.removeAll()
     }
 }
@@ -313,16 +434,18 @@ struct TerminalHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ContainerView {
         let view = ContainerView(frame: .zero)
+        view.model = model
         model.container = view
         return view
     }
 
     func updateNSView(_ nsView: ContainerView, context: Context) {
-        nsView.show(model.selectedTab?.view)
+        nsView.show(model.selectedTab?.host)
     }
 }
 
 final class ContainerView: NSView {
+    weak var model: AppModel?
     private weak var current: NSView?
     private var backdrop: NSVisualEffectView?
 
@@ -385,7 +508,8 @@ final class ContainerView: NSView {
             v.autoresizingMask = [.width, .height]
             addSubview(v)
             DispatchQueue.main.async { [weak self] in
-                self?.window?.makeFirstResponder(v)
+                guard let self = self, self.current === v else { return }
+                self.model?.focusActivePane()
             }
         }
     }
@@ -394,6 +518,13 @@ final class ContainerView: NSView {
         super.layout()
         backdrop?.frame = bounds
         current?.frame = bounds
+        if let model = model {
+            for tab in model.tabs {
+                tab.host.frame = bounds
+                tab.host.backingScale = window?.backingScaleFactor ?? tab.host.backingScale
+                tab.host.arrange()
+            }
+        }
     }
 }
 
@@ -752,6 +883,8 @@ struct MosttyApp: App {
                 Button("New Tab") { model.newTab() }
                     .keyboardShortcut("t", modifiers: .command)
                 Button("Close Tab") { model.closeSelected() }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
+                Button("Close Pane") { model.closeSelectedPane() }
                     .keyboardShortcut("w", modifiers: .command)
             }
             CommandGroup(replacing: .appSettings) {
@@ -781,6 +914,24 @@ struct MosttyApp: App {
                         .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
                         .disabled(model.tabs.count < number)
                 }
+            }
+            CommandMenu("Panes") {
+                Button("Split Right") { model.splitSelected(0) }
+                    .keyboardShortcut("d", modifiers: .command)
+                Button("Split Down") { model.splitSelected(1) }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                Divider()
+                Button("Focus Left") { model.focusDirection(0) }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                Button("Focus Right") { model.focusDirection(1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                Button("Focus Up") { model.focusDirection(2) }
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                Button("Focus Down") { model.focusDirection(3) }
+                    .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+                Divider()
+                Button("Maximize / Restore Pane") { model.togglePaneMaximize() }
+                    .keyboardShortcut(.return, modifiers: [.command, .shift])
             }
             CommandGroup(after: .windowSize) {
                 Button("Toggle Full Screen") { model.toggleFullscreen() }

@@ -26,6 +26,7 @@ src/
   terminal/key_encode.zig shared xterm special-key encoding
   terminal/paste.zig       shared streaming paste framing and normalization
   SplitLayout.zig          platform-neutral split tree, pane IDs, focus and geometry
+  layout_capi.zig          UI-thread-only C ABI for the shared split model
   ssh_config.zig          shared top-level SSH Host alias iterator
   input_capi.zig          allocation-free host bridge for keys, paste, SSH aliases
   macos/PtySession.zig     macOS shell process, PTY, and VT session owner
@@ -423,6 +424,20 @@ owning tab's PTY; Shift keeps host selection available. A local AppKit event
 monitor pins a pressed gesture to its originating view until release, including
 across tab switches. `PtySession` supplies size replies using the current VT grid
 and pixel dimensions, synchronized when the bridge creates or resizes a surface.
+Each macOS tab owns one shared `SplitLayout` through `layout_capi.zig` and a
+registry of stable pane IDs. `PaneContainer.swift` applies top-left, point-unit
+snapshots to persistent `MosttyTerminalView` children, rounding backing-pixel
+edges. It writes divider drags back through split IDs, without duplicating the
+layout algorithm. Each pane owns its PTY, renderer, input and selection state.
+Maximization and tab switching detach views while their readers continue
+feeding VT on the main thread. Focus notifications synchronize AppKit's first
+responder with the shared active ID; shell exit closes only its owning pane.
+The final pane closes the tab. Explicit tab/window closure stops all owned
+readers, and closed views cannot restart sessions in late layout callbacks.
+Config reload visits every pane; each resizes from its own bounds and retained
+backing scale, with no cross-tab size broadcast. The native container enforces
+the shared subtree minimum size and reserves a focus border around each view.
+
 Each macOS terminal view reserves a right-side strip for a native `NSScroller`;
 the Metal child surface and IME overlay share the remaining content bounds.
 The scrollbar queries the active VT screen's total rows, viewport offset and

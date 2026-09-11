@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #include <assert.h>
 #include <string.h>
+#include <unistd.h>
 #include "ClipboardBridge.h"
 
 // Replace only the C bridge: the tests run the production AppKit handlers.
@@ -96,7 +97,11 @@ void *mostty_tab_metal_device(MosttyTab *tab) {
     if (!device) device = MTLCreateSystemDefaultDevice();
     return (__bridge void *)device;
 }
-intptr_t mostty_tab_read(MosttyTab *tab, uint8_t *buf, size_t cap) { return 0; }
+intptr_t mostty_tab_read(MosttyTab *tab, uint8_t *buf, size_t cap) {
+    // A live idle session times out; EOF would asynchronously close its pane.
+    usleep(10000);
+    return -2;
+}
 void mostty_tab_feed(MosttyTab *tab, const uint8_t *ptr, size_t len) {}
 void mostty_tab_write(MosttyTab *tab, const uint8_t *ptr, size_t len) {
     write_tab = tab;

@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
 
 fn addLayoutTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
     const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/SplitLayout.zig"),
+        .root_source_file = b.path("src/layout_capi.zig"),
         .target = target,
         .optimize = optimize,
     }) });
@@ -227,6 +227,20 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     link.addDirectoryArg(b.path("src/macos/app"));
     link.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
 
+    const pane_link = b.addSystemCommand(&.{"bash"});
+    pane_link.addFileArg(b.path("src/macos/app/link-app.sh"));
+    const pane_exe = pane_link.addOutputFileArg("pane-tests");
+    pane_link.addDirectoryArg(b.path("src/macos/app"));
+    pane_link.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
+    pane_link.addArg("--test");
+    pane_link.addFileArg(b.path("tests/macos/PaneTests.swift"));
+    for ([_][]const u8{ "Bridge.h", "KeyInput.swift", "TerminalView.swift", "PaneContainer.swift", "AppShell.swift" }) |name| {
+        pane_link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
+    }
+    const pane_run = b.addSystemCommand(&.{"/usr/bin/env"});
+    pane_run.addFileArg(pane_exe);
+    b.step("test-macos-panes", "Exercise native panes with real PTYs and Metal in a macOS GUI session").dependOn(&pane_run.step);
+
     // The directory arg above supplies link-app.sh's source path but does not
     // register the individual sources as cache inputs, so editing a .swift file
     // would not invalidate the cached link. Track the compiled sources and the
@@ -234,14 +248,19 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     link.addFileInput(b.path("src/macos/app/Bridge.h"));
     link.addFileInput(b.path("src/macos/app/KeyInput.swift"));
     link.addFileInput(b.path("src/macos/app/TerminalView.swift"));
+    link.addFileInput(b.path("src/macos/app/PaneContainer.swift"));
     link.addFileInput(b.path("src/macos/app/AppShell.swift"));
 
     // The Zig core, then the terminal core's transitive C++ archives
     // (simdutf/highway), which a static library does not bundle itself.
     link.addFileArg(core.getEmittedBin());
+    pane_link.addFileArg(core.getEmittedBin());
     for (vt.link_objects.items) |link_object| {
         switch (link_object) {
-            .other_step => |compile| link.addFileArg(compile.getEmittedBin()),
+            .other_step => |compile| {
+                link.addFileArg(compile.getEmittedBin());
+                pane_link.addFileArg(compile.getEmittedBin());
+            },
             else => {},
         }
     }

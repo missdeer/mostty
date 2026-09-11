@@ -116,17 +116,17 @@ The default terminal font is **Menlo at 13pt**. Font size and regular/bold/itali
 | Action | Windows | macOS |
 | --- | --- | --- |
 | New tab | `Ctrl+T` | `Cmd+T` |
-| Close active tab | `Ctrl+W` | `Cmd+W` |
+| Close active tab | `Ctrl+W` | `Cmd+Shift+W` |
 | Next tab | `Ctrl+Tab` or `Ctrl+PgDn` | `Cmd+Shift+]` |
 | Previous tab | `Ctrl+Shift+Tab` or `Ctrl+PgUp` | `Cmd+Shift+[` |
 | Select tab 1-9 | `Ctrl+1` through `Ctrl+9` | `Cmd+1` through `Cmd+9` |
 | Copy selection | Automatic on selection release | Automatic on selection release, or `Cmd+C` |
 | Paste | `Ctrl+V`, `Ctrl+Shift+V`, or `Shift+Insert` | `Cmd+V` |
-| Split left/right | `Ctrl+Shift+D` | — |
-| Split up/down | `Ctrl+Shift+E` | — |
-| Close active pane | `Ctrl+Shift+W` | — |
-| Focus pane by direction | `Ctrl+Alt+Arrow` | — |
-| Maximize/restore pane | `Ctrl+Shift+Enter` | — |
+| Split left/right | `Ctrl+Shift+D` | `Cmd+D` |
+| Split up/down | `Ctrl+Shift+E` | `Cmd+Shift+D` |
+| Close active pane | `Ctrl+Shift+W` | `Cmd+W` |
+| Focus pane by direction | `Ctrl+Alt+Arrow` | `Cmd+Option+Arrow` |
+| Maximize/restore pane | `Ctrl+Shift+Enter` | `Cmd+Shift+Enter` |
 | Toggle fullscreen | `Alt+Enter` | `Ctrl+Cmd+F` |
 | Open configuration | Window system menu > Open Settings File... | `Cmd+,` |
 

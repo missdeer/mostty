@@ -14,6 +14,11 @@ set -euo pipefail
 OUT="$1"; shift
 SRCDIR="$1"; shift
 TARGET="$1"; shift
+TEST_ARGS=()
+if [[ "${1:-}" == "--test" ]]; then
+    TEST_ARGS=(-D MOSTTY_APP_TESTS "$2")
+    shift 2
+fi
 
 # Keep the object-extraction scratch dir inside the build tree (next to the
 # output), not the system temp: the build sandbox restricts access to /var tmp.
@@ -38,10 +43,12 @@ done
 chmod -R u+rw "$WORK"
 
 swiftc -O -o "$OUT" \
+    ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
     -target "$TARGET" \
     -import-objc-header "$SRCDIR/Bridge.h" \
     "$SRCDIR/KeyInput.swift" \
     "$SRCDIR/TerminalView.swift" \
+    "$SRCDIR/PaneContainer.swift" \
     "$SRCDIR/AppShell.swift" \
     "$WORK"/a*/*.o \
     -lc++ \

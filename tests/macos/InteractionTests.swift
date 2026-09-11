@@ -251,8 +251,8 @@ struct InteractionTests {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         let active = model.selectedTab!
-        active.view.frame = window.contentView!.bounds
-        window.contentView = active.view
+        active.host.frame = window.contentLayoutRect
+        window.contentView = active.host
         expect(active.view.hasActiveSession, "attached terminal has a running session")
         interaction_test_confirmation(true, false)
         model.closeSelected()
@@ -300,8 +300,9 @@ struct InteractionTests {
 
         let remaining = Array(model.tabs.prefix(2))
         for tab in remaining {
-            tab.view.frame = window.contentView!.bounds
-            window.contentView = tab.view
+            tab.host.frame = NSRect(x: 0, y: 0, width: 400, height: 200)
+            window.contentView = tab.host
+            tab.host.arrange()
         }
         expect(remaining.count == 2 && remaining.allSatisfy { $0.view.hasActiveSession },
                "window-close regression starts with two running sessions")
