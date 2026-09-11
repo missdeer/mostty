@@ -550,6 +550,7 @@ fn prepareTabbar(self: *VulkanRenderer, prepared: PreparedFrame, tabbar: types.T
         band.brush,
         &self.font_service.dwrite_factory.IDWriteFactory,
         self.font_service.tabbar_text_format,
+        self.font_service.dpi,
         self.font_service.tabbar_trimming_sign,
         tabbar,
         prepared.cs.x,

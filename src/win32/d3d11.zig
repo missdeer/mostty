@@ -1033,6 +1033,7 @@ fn paintChromeAndPresent(self: *D3d11Renderer, prepared: PreparedFrame, tabbar: 
                 band.brush,
                 &self.font_service.dwrite_factory.IDWriteFactory,
                 self.font_service.tabbar_text_format,
+                self.font_service.dpi,
                 self.font_service.tabbar_trimming_sign,
                 tabbar,
                 prepared.cs.x,
