@@ -27,7 +27,7 @@ const emoji = @import("emoji.zig");
 const glyph_mod = @import("glyph.zig");
 const com = @import("com.zig");
 const sprite = @import("../../renderer/sprite.zig");
-const GlyphIndexCache = @import("../GlyphIndexCache.zig");
+const GlyphIndexCache = @import("../glyph_index_cache.zig");
 
 const shader = gpu.shader;
 const Rgba8 = gpu.Rgba8;
@@ -494,7 +494,7 @@ fn markDirty(result: *BuildResult, row: u32) void {
 fn drawResizeOverlay(
     self: anytype,
     term: *vt.Terminal,
-    glyph_cache: *@import("../GlyphIndexCache.zig"),
+    glyph_cache: *@import("../glyph_index_cache.zig"),
     tex_cell_count: gpu.CellXY,
     shader_col: u32,
     term_shader_row: u32,

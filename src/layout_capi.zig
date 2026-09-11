@@ -1,7 +1,7 @@
 //! Thin host bridge; all layout decisions remain in SplitLayout.
 //! Handles are owned by one tab and accessed only on the UI thread.
 const std = @import("std");
-const Layout = @import("SplitLayout.zig");
+const Layout = @import("split_layout.zig");
 const allocator = std.heap.page_allocator;
 const Divider = extern struct { id: u32, axis: u32, rect: Layout.Rect };
 

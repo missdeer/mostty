@@ -4,16 +4,16 @@ const std = @import("std");
 const vt = @import("vt");
 const win32 = @import("win32").everything;
 
-const Config = @import("../Config.zig");
+const Config = @import("../config.zig");
 const d3d11 = @import("d3d11.zig");
 const gl46 = @import("gl46.zig");
 const vulkan = @import("vulkan.zig");
-const FontService = @import("FontService.zig");
+const FontService = @import("font_service.zig");
 const types = @import("types.zig");
 
 pub const d3d12 = @import("d3d12.zig");
 
-pub const RendererCommon = @import("RendererCommon.zig");
+pub const RendererCommon = @import("renderer_common.zig");
 const shared = @import("shared.zig");
 const gpu = @import("d3d11/gpu.zig");
 

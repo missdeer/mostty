@@ -3,8 +3,8 @@ const PtySession = @This();
 const builtin = @import("builtin");
 const std = @import("std");
 const vt = @import("vt");
-const Config = @import("../Config.zig");
-const TerminalSession = @import("../terminal/Session.zig");
+const Config = @import("../config.zig");
+const TerminalSession = @import("../terminal/session.zig");
 
 const c = std.c;
 const posix = std.posix;
@@ -63,7 +63,7 @@ write_failed: bool,
 
 pub fn init(self: *PtySession, options: Options) !void {
     if (options.cols == 0 or options.rows == 0) return error.InvalidSize;
-    @import("PngDecoder.zig").install();
+    @import("png_decoder.zig").install();
 
     self.* = .{
         .terminal = undefined,

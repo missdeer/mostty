@@ -1,11 +1,11 @@
-pub const TerminalSession = @import("terminal/Session.zig");
-pub const PtySession = @import("macos/PtySession.zig");
-pub const GridModel = @import("macos/GridModel.zig");
-pub const CoreTextRenderer = @import("macos/CoreTextRenderer.zig");
+pub const TerminalSession = @import("terminal/session.zig");
+pub const PtySession = @import("macos/pty_session.zig");
+pub const GridModel = @import("macos/grid_model.zig");
+pub const CoreTextRenderer = @import("macos/core_text_renderer.zig");
 pub const capi = @import("macos/capi.zig");
 
 test {
-    _ = @import("macos/KittyTests.zig");
+    _ = @import("macos/kitty_tests.zig");
 }
 
 comptime {

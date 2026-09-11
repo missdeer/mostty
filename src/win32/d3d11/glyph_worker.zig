@@ -14,7 +14,7 @@ const com = @import("com.zig");
 const gpu = @import("gpu.zig");
 const emoji = @import("emoji.zig");
 const sprite = @import("../../renderer/sprite.zig");
-const GlyphIndexCache = @import("../GlyphIndexCache.zig");
+const GlyphIndexCache = @import("../glyph_index_cache.zig");
 const font = @import("font.zig");
 const types = @import("../types.zig");
 

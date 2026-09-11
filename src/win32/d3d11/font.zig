@@ -7,10 +7,10 @@
 //! computes the effective style mapping.
 
 const std = @import("std");
-const Config = @import("../../Config.zig");
+const Config = @import("../../config.zig");
 const win32 = @import("win32").everything;
 const com = @import("com.zig");
-const GlyphIndexCache = @import("../GlyphIndexCache.zig");
+const GlyphIndexCache = @import("../glyph_index_cache.zig");
 
 pub const FontConfig = struct {
     pub const StyleSpec = union(enum) {

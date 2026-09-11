@@ -2,8 +2,8 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const vt = @import("vt");
 
-const Config = @import("../Config.zig");
-const TerminalSession = @import("../terminal/Session.zig");
+const Config = @import("../config.zig");
+const TerminalSession = @import("../terminal/session.zig");
 const cp_mod = @import("child_process.zig");
 const err_mod = @import("error.zig");
 const global_mod = @import("global.zig");

@@ -9,7 +9,7 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 const D3d11Renderer = @import("../d3d11.zig");
-const Config = @import("../../Config.zig");
+const Config = @import("../../config.zig");
 const gpu = @import("gpu.zig");
 const types = @import("../types.zig");
 

@@ -102,7 +102,7 @@ pub fn cellPosFromIndex(index: u32, column_count: u16) CellXY {
 }
 
 pub const AtlasFrame = struct {
-    cache: *@import("../GlyphIndexCache.zig"),
+    cache: *@import("../glyph_index_cache.zig"),
     tex_cell_count: CellXY,
 };
 

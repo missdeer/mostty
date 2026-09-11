@@ -103,7 +103,7 @@ fn addCoreTests(
 ) void {
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/terminal/Session.zig"),
+            .root_source_file = b.path("src/terminal/session.zig"),
             .target = target,
             .optimize = optimize,
         }),

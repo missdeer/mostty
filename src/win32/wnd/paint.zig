@@ -1,7 +1,7 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-const Renderer = @import("../Renderer.zig");
+const Renderer = @import("../renderer.zig");
 const err_mod = @import("../error.zig");
 const global_mod = @import("../global.zig");
 const render = @import("../render.zig");

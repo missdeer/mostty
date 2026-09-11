@@ -11,10 +11,10 @@ const builtin = @import("builtin");
 const std = @import("std");
 const vt = @import("vt");
 
-const PtySession = @import("PtySession.zig");
-const CoreTextRenderer = @import("CoreTextRenderer.zig");
-const GridModel = @import("GridModel.zig");
-const Config = @import("../Config.zig");
+const PtySession = @import("pty_session.zig");
+const CoreTextRenderer = @import("core_text_renderer.zig");
+const GridModel = @import("grid_model.zig");
+const Config = @import("../config.zig");
 const title_mod = @import("../terminal/title.zig");
 const word_selection = @import("../terminal/word_selection.zig");
 const url_hover = @import("../terminal/url_hover.zig");

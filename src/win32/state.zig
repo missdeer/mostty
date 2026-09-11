@@ -6,7 +6,7 @@ const types = @import("types.zig");
 const cp_mod = @import("child_process.zig");
 const pty_ring_mod = @import("pty_ring.zig");
 const url_hover = @import("../terminal/url_hover.zig");
-const TerminalSession = @import("../terminal/Session.zig");
+const TerminalSession = @import("../terminal/session.zig");
 
 const TabId = types.TabId;
 const TabHit = types.TabHit;
@@ -14,7 +14,7 @@ const MouseCapture = types.MouseCapture;
 const WindowBounds = types.WindowBounds;
 const ChildProcess = cp_mod.ChildProcess;
 
-pub const SplitLayout = @import("../SplitLayout.zig");
+pub const SplitLayout = @import("../split_layout.zig");
 
 pub const Tab = struct {
     id: TabId,
@@ -30,7 +30,7 @@ pub const Tab = struct {
 pub const Pane = struct {
     tab: *Tab,
     hwnd: ?win32.HWND = null,
-    common: @import("RendererCommon.zig") = undefined,
+    common: @import("renderer_common.zig") = undefined,
     renderer: ?@import("d3d11.zig") = null,
     font_generation: u32 = 0,
     selection_fade: f32 = 0,

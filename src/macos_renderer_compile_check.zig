@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const CoreTextRenderer = @import("macos/CoreTextRenderer.zig");
-const TerminalSession = @import("terminal/Session.zig");
+const CoreTextRenderer = @import("macos/core_text_renderer.zig");
+const TerminalSession = @import("terminal/session.zig");
 
 export fn mostty_macos_renderer_compile_check(raw_session: *anyopaque) void {
     const session: *TerminalSession = @ptrCast(@alignCast(raw_session));

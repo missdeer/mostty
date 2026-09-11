@@ -7,8 +7,8 @@
 
 const std = @import("std");
 const vt = @import("vt");
-const TerminalSession = @import("../terminal/Session.zig");
-const Config = @import("../Config.zig");
+const TerminalSession = @import("../terminal/session.zig");
+const Config = @import("../config.zig");
 const cell_style = @import("../renderer/cell_style.zig");
 const url_hover = @import("../terminal/url_hover.zig");
 

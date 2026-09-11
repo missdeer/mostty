@@ -149,6 +149,6 @@ test "window effect command-line values override config and omission preserves i
     try std.testing.expect(!configured.background_blur);
 }
 
-const Config = @import("Config.zig");
+const Config = @import("config.zig");
 const builtin = @import("builtin");
 const std = @import("std");

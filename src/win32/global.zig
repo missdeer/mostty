@@ -1,8 +1,8 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-const Config = @import("../Config.zig");
-const Renderer = @import("Renderer.zig");
+const Config = @import("../config.zig");
+const Renderer = @import("renderer.zig");
 const diag = @import("diag.zig");
 const icons_mod = @import("icons.zig");
 const state = @import("state.zig");

@@ -5,7 +5,7 @@
 //! reference `font.Metrics` and `font.sprite.Canvas`, so this adapter
 //! exposes just those two.
 
-pub const Metrics = @import("Metrics.zig");
+pub const Metrics = @import("metrics.zig");
 
 pub const sprite = struct {
     pub const Canvas = @import("sprite/canvas.zig").Canvas;

@@ -4,11 +4,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vt = @import("vt");
 const win32 = @import("win32").everything;
-const GlyphIndexCache = @import("GlyphIndexCache.zig");
-const FontService = @import("FontService.zig");
-const RendererCommon = @import("RendererCommon.zig");
+const GlyphIndexCache = @import("glyph_index_cache.zig");
+const FontService = @import("font_service.zig");
+const RendererCommon = @import("renderer_common.zig");
 const types = @import("types.zig");
-const Config = @import("../Config.zig");
+const Config = @import("../config.zig");
 
 const com = @import("d3d11/com.zig");
 const gpu = @import("d3d11/gpu.zig");

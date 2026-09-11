@@ -10,10 +10,10 @@ const std = @import("std");
 const vt = @import("vt");
 const win32 = @import("win32").everything;
 
-const Config = @import("../Config.zig");
-const FontService = @import("FontService.zig");
-const GlyphIndexCache = @import("GlyphIndexCache.zig");
-const RendererCommon = @import("RendererCommon.zig");
+const Config = @import("../config.zig");
+const FontService = @import("font_service.zig");
+const GlyphIndexCache = @import("glyph_index_cache.zig");
+const RendererCommon = @import("renderer_common.zig");
 const shared = @import("shared.zig");
 const types = @import("types.zig");
 

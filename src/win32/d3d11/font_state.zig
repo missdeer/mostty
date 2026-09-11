@@ -16,7 +16,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const font_mod = @import("font.zig");
 const gpu = @import("gpu.zig");
-const GlyphIndexCache = @import("../GlyphIndexCache.zig");
+const GlyphIndexCache = @import("../glyph_index_cache.zig");
 
 const FontConfig = font_mod.FontConfig;
 

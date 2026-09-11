@@ -4,7 +4,7 @@ const types = @import("types.zig");
 const util = @import("util.zig");
 const err_mod = @import("error.zig");
 const pty_ring_mod = @import("pty_ring.zig");
-const Config = @import("../Config.zig");
+const Config = @import("../config.zig");
 
 const Error = err_mod.Error;
 const GridPos = types.GridPos;

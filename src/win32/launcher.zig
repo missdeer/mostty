@@ -1,7 +1,7 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-const Config = @import("../Config.zig");
+const Config = @import("../config.zig");
 const global_mod = @import("global.zig");
 const state = @import("state.zig");
 const tab_mgmt = @import("tab_mgmt.zig");

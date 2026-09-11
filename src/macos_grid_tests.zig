@@ -1,5 +1,5 @@
 test {
-    _ = @import("macos/GridModel.zig");
+    _ = @import("macos/grid_model.zig");
     _ = @import("renderer/image_pixels.zig");
     _ = @import("input_capi.zig");
     _ = @import("renderer/cell_style.zig");

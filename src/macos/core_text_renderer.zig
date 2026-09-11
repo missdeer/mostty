@@ -2,13 +2,13 @@ const CoreTextRenderer = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
-const macos = @import("Apple.zig");
+const macos = @import("apple.zig");
 
-const GridModel = @import("GridModel.zig");
-const MetalBackend = @import("MetalBackend.zig");
-const KittyImages = @import("KittyImages.zig");
-const TerminalSession = @import("../terminal/Session.zig");
-const Config = @import("../Config.zig");
+const GridModel = @import("grid_model.zig");
+const MetalBackend = @import("metal_backend.zig");
+const KittyImages = @import("kitty_images.zig");
+const TerminalSession = @import("../terminal/session.zig");
+const Config = @import("../config.zig");
 const url_hover = @import("../terminal/url_hover.zig");
 const sprite = @import("../renderer/sprite.zig");
 

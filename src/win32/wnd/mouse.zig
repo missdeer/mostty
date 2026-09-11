@@ -2,7 +2,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const vt = @import("vt");
 
-const Renderer = @import("../Renderer.zig");
+const Renderer = @import("../renderer.zig");
 const global_mod = @import("../global.zig");
 const launcher = @import("../launcher.zig");
 const mouse_report = @import("../../terminal/mouse_report.zig");

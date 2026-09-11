@@ -2,7 +2,7 @@ const Session = @This();
 
 const std = @import("std");
 const vt = @import("vt");
-const InlineImages = @import("InlineImages.zig");
+const InlineImages = @import("inline_images.zig");
 
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
 

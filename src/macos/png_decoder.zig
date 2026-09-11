@@ -1,10 +1,10 @@
 const std = @import("std");
 const vt = @import("vt");
-const graphics = @import("Apple.zig").graphics;
+const graphics = @import("apple.zig").graphics;
 
 pub fn install() void {
     vt.sys.decode_png = decode;
-    @import("../terminal/InlineImages.zig").decode_image = decodeFile;
+    @import("../terminal/inline_images.zig").decode_image = decodeFile;
 }
 
 fn decode(allocator: std.mem.Allocator, data: []const u8) vt.sys.DecodeError!vt.sys.Image {

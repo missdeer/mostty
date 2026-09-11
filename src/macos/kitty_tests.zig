@@ -1,7 +1,7 @@
 const std = @import("std");
 const vt = @import("vt");
-const Session = @import("../terminal/Session.zig");
-const Renderer = @import("CoreTextRenderer.zig");
+const Session = @import("../terminal/session.zig");
+const Renderer = @import("core_text_renderer.zig");
 const alloc = std.testing.allocator;
 
 const Fixture = struct {
@@ -11,7 +11,7 @@ const Fixture = struct {
     response_len: usize = 0,
 
     fn init(self: *Fixture) !void {
-        @import("PngDecoder.zig").install();
+        @import("png_decoder.zig").install();
         self.response_len = 0;
         self.renderer = try Renderer.init(.{ .allocator = alloc, .pixel_width = 240, .pixel_height = 160, .paint = .{ .background_alpha = 255 } });
         errdefer self.renderer.deinit();

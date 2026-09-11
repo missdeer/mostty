@@ -1,4 +1,4 @@
-//! Subset of ghostty's font/Metrics.zig — fields only, no calc/apply/clamp.
+//! Subset of ghostty's font/metrics.zig — fields only, no calc/apply/clamp.
 //! The sprite drawing code in `draw/*` only reads these fields; the
 //! computation routines pull in font face / config dependencies we don't
 //! ship.

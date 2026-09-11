@@ -3,8 +3,8 @@ const FontService = @This();
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-const GlyphIndexCache = @import("GlyphIndexCache.zig");
-const RendererCommon = @import("RendererCommon.zig");
+const GlyphIndexCache = @import("glyph_index_cache.zig");
+const RendererCommon = @import("renderer_common.zig");
 const com = @import("d3d11/com.zig");
 const font_mod = @import("d3d11/font.zig");
 const font_state = @import("d3d11/font_state.zig");

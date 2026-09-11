@@ -1,7 +1,7 @@
 const InlineImages = @This();
 const std = @import("std");
 const vt = @import("vt");
-const Sixel = @import("Sixel.zig");
+const Sixel = @import("sixel.zig");
 
 // Platforms install a file decoder separately from Kitty's PNG-only hook.
 pub var decode_image: ?vt.sys.DecodePngFn = null;

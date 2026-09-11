@@ -1,8 +1,8 @@
 const MetalBackend = @This();
 
 const builtin = @import("builtin");
-const macos = @import("Apple.zig");
-const objc = @import("Objc.zig");
+const macos = @import("apple.zig");
+const objc = @import("objc.zig");
 
 comptime {
     if (builtin.os.tag != .macos) @compileError("MetalBackend is macOS-only");

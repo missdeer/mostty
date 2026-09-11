@@ -2,7 +2,7 @@ const win32 = @import("win32").everything;
 const std = @import("std");
 
 const global_mod = @import("global.zig");
-const Renderer = @import("Renderer.zig");
+const Renderer = @import("renderer.zig");
 const mouse = @import("wnd/mouse.zig");
 const state = @import("state.zig");
 const tab_bar = @import("tab_bar.zig");

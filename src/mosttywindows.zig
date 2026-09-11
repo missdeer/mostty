@@ -409,9 +409,9 @@ fn confirmInvalidRendererFallback(value: []const u8) bool {
     ) == win32.IDYES;
 }
 
-const Config = @import("Config.zig");
-const Cmdline = @import("Cmdline.zig");
-const Renderer = @import("win32/Renderer.zig");
+const Config = @import("config.zig");
+const Cmdline = @import("cmdline.zig");
+const Renderer = @import("win32/renderer.zig");
 const config_watch = @import("win32/config_watch.zig");
 const diag = @import("win32/diag.zig");
 const dispatch = @import("win32/wnd/dispatch.zig");

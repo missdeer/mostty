@@ -21,7 +21,7 @@ pub fn initUiComApartment() bool {
 
 pub fn install() void {
     vt.sys.decode_png = decodePng;
-    @import("../terminal/InlineImages.zig").decode_image = decodePng;
+    @import("../terminal/inline_images.zig").decode_image = decodePng;
 }
 
 fn decodePng(

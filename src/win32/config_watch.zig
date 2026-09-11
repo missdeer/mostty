@@ -5,7 +5,7 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-const Config = @import("../Config.zig");
+const Config = @import("../config.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 

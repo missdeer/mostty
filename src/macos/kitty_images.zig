@@ -2,7 +2,7 @@ const KittyImages = @This();
 
 const std = @import("std");
 const vt = @import("vt");
-const graphics = @import("Apple.zig").graphics;
+const graphics = @import("apple.zig").graphics;
 const geometry = @import("../renderer/image_geometry.zig");
 
 const Entry = struct {
