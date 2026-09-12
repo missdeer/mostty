@@ -585,9 +585,11 @@ Both Vulkan choices require Vulkan 1.3 dynamic rendering, synchronization2,
 and timeline semaphores. `vulkan` additionally requires D3D11 texture external
 memory, D3D12-fence external semaphore import, and a matching DXGI adapter;
 `native-vulkan` requires a Win32 surface whose composite-alpha modes preserve
-Mostty's window effects. Startup or recovery failure offers only an explicit
-D3D11 fallback or exit and never switches between the two Vulkan presentation
-paths.
+Mostty's window effects. Both modes support native panes with shared GPU
+infrastructure and independent presentation/caches. Startup failure offers an
+explicit D3D11 fallback or exit. Runtime recovery rebuilds all pane graphics
+without replacing sessions; unsuccessful recovery closes with an error instead
+of changing renderer or switching between Vulkan presentation paths.
 
 **Hot-reload:** no; changing the renderer requires restarting Mostty.
 

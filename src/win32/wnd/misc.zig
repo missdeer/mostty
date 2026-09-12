@@ -816,3 +816,15 @@ pub fn onAppTestOpenGlFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?
     if (global.window) |*window| window.requestRender();
     return 0;
 }
+
+pub fn onAppTestVulkanFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    const active = if (global.renderer.backend) |*backend| backend else return 0;
+    switch (active.*) {
+        inline .vulkan, .@"native-vulkan" => |*backend| backend.test_fail_present = true,
+        else => return 0,
+    }
+    std.log.warn("Vulkan diagnostic presentation failure requested", .{});
+    if (global.window) |*window| window.requestRender();
+    return 0;
+}

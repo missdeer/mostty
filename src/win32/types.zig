@@ -53,6 +53,7 @@ pub const WM_APP_CLOSE_PANE = win32.WM_APP + 5;
 // Diagnostic-only device removal for the pane recovery acceptance runner.
 pub const WM_APP_TEST_D3D12_REMOVAL = win32.WM_APP + 6;
 pub const WM_APP_TEST_OPENGL_FAILURE = win32.WM_APP + 7;
+pub const WM_APP_TEST_VULKAN_FAILURE = win32.WM_APP + 8;
 pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;

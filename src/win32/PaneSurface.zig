@@ -6,7 +6,8 @@ const Renderer = @import("Renderer.zig");
 const d3d11 = @import("d3d11.zig");
 const d3d12 = @import("d3d12/renderer.zig");
 const gl46 = @import("gl46.zig");
-pub const InitError = d3d12.StartupError || gl46.StartupError;
+const vulkan = @import("vulkan.zig");
+pub const InitError = d3d12.StartupError || gl46.StartupError || vulkan.StartupError;
 const types = @import("types.zig");
 
 // Only implementations with a complete pane lifecycle enter this union.
@@ -14,6 +15,8 @@ backend: union(enum) {
     d3d11: d3d11,
     d3d12: d3d12,
     opengl: gl46,
+    vulkan: vulkan,
+    @"native-vulkan": vulkan,
 },
 font_generation: u32,
 
@@ -29,7 +32,7 @@ pub fn init(parent: *Renderer, common: *Renderer.RendererCommon) InitError!?Pane
             .font_generation = backend.cache_gen,
         },
         .opengl => |*backend| if (backend.initialized) .{ .backend = .{ .opengl = gl46.initSurface(backend, common) }, .font_generation = backend.cache_gen } else null,
-        else => null,
+        inline .vulkan, .@"native-vulkan" => |*backend, tag| if (backend.core != null) .{ .backend = @unionInit(@FieldType(PaneSurface, "backend"), @tagName(tag), vulkan.initSurface(backend, common)), .font_generation = backend.cache_gen } else null,
     };
 }
 
@@ -66,6 +69,9 @@ pub fn runtimeFailure(self: *PaneSurface) ?Renderer.RuntimeFailure {
         .opengl => |*backend| if (backend.failure) |failure| {
             return .{ .opengl = failure };
         },
+        inline .vulkan, .@"native-vulkan" => |*backend, tag| if (backend.pending_failure) |failure| {
+            return @unionInit(Renderer.RuntimeFailure, @tagName(tag), failure);
+        },
         else => {},
     }
     return null;
@@ -73,7 +79,7 @@ pub fn runtimeFailure(self: *PaneSurface) ?Renderer.RuntimeFailure {
 
 pub fn needsFrame(self: *const PaneSurface) bool {
     return switch (self.backend) {
-        inline .d3d12, .opengl => |backend| backend.frame_pending,
+        inline .d3d12, .opengl, .vulkan, .@"native-vulkan" => |backend| backend.frame_pending,
         else => false,
     };
 }
@@ -106,20 +112,25 @@ pub fn render(
     url_highlight: ?types.UrlHighlight,
 ) void {
     switch (self.backend) {
-        inline else => |*backend| backend.render(
-            hwnd,
-            pane_id,
-            term,
-            .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false },
-            resizing,
-            mouse_in_scrollbar,
-            selection_fade,
-            cursor_text,
-            selection_bg,
-            selection_fg,
-            background_opacity,
-            remote_session,
-            url_highlight,
-        ),
+        inline else => |*backend, tag| {
+            const result = backend.render(
+                hwnd,
+                pane_id,
+                term,
+                .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false },
+                resizing,
+                mouse_in_scrollbar,
+                selection_fade,
+                cursor_text,
+                selection_bg,
+                selection_fg,
+                background_opacity,
+                remote_session,
+                url_highlight,
+            );
+            if (comptime tag == .vulkan or tag == .@"native-vulkan") {
+                if (result) |failure| backend.pending_failure = failure;
+            }
+        },
     }
 }

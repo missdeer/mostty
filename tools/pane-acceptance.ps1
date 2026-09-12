@@ -1,9 +1,9 @@
-param([switch]$KeepRunning, [switch]$ImeOnly, [switch]$CloseOnly, [ValidateSet('d3d11','d3d12','opengl','pure-opengl')][string]$Renderer='d3d11', [switch]$TestRecovery)
+param([switch]$KeepRunning, [switch]$ImeOnly, [switch]$CloseOnly, [ValidateSet('d3d11','d3d12','opengl','pure-opengl','vulkan','native-vulkan')][string]$Renderer='d3d11', [switch]$TestRecovery, [switch]$VulkanValidation)
 $ErrorActionPreference = 'Stop'
 $runId = [Guid]::NewGuid().ToString('N')
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $outputRoot = Join-Path $projectRoot $(if($Renderer -eq 'd3d11'){'tmp\pane-acceptance'}else{"tmp\pane-acceptance-$Renderer"})
-if($TestRecovery -and $Renderer -eq 'd3d11'){throw 'Diagnostic recovery requires D3D12 or OpenGL'}
+if($TestRecovery -and $Renderer -eq 'd3d11'){throw 'Diagnostic recovery requires a research renderer'}
 $profile = Join-Path $outputRoot 'profile\Mostty'
 New-Item -ItemType Directory -Force -Path $profile | Out-Null
 @("renderer = $Renderer", 'font-size = 14', 'background-opacity = 1', 'background-blur = false') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
@@ -143,7 +143,17 @@ $start.UseShellExecute = $false
 $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
 $start.Environment['LOCALAPPDATA'] = Split-Path $profile -Parent
 $start.Environment['MOSTTY_DIAG'] = '1'
+if($VulkanValidation){
+    if($Renderer -notin @('vulkan','native-vulkan')){throw 'Vulkan validation requires a Vulkan renderer'}
+    $validationLog=Join-Path $outputRoot "validation-$runId.log"
+    @('khronos_validation.validate_sync = true','khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG','khronos_validation.log_filename = stdout','khronos_validation.report_flags = error,warn,info') | Set-Content -LiteralPath (Join-Path $outputRoot 'vk_layer_settings.txt') -Encoding utf8
+    $start.Environment['VK_INSTANCE_LAYERS']='VK_LAYER_KHRONOS_validation'
+    $start.Environment['VK_LAYER_SETTINGS_PATH']=$outputRoot
+    $start.RedirectStandardOutput=$true
+    $start.RedirectStandardError=$true
+}
 $script:app = [Diagnostics.Process]::Start($start)
+if($VulkanValidation){$validationStdout=$app.StandardOutput.ReadToEndAsync();$validationStderr=$app.StandardError.ReadToEndAsync()}
 $script:window = [IntPtr]::Zero
 $result = [ordered]@{ renderer = $Renderer; process_id = $app.Id; run_id = $runId; status = 'running' }
 try {
@@ -198,6 +208,24 @@ try {
             $result.presentation='interop unavailable; baseline WGL exercised'
         }
         $result.backend_identity="four $Renderer panes sharing one context with distinct DCs"
+    }
+    if($Renderer -in @('vulkan','native-vulkan')){
+        $logPath=Join-Path $outputRoot 'tmp/mostty-diag.log'
+        $surfaces=@(Select-String -LiteralPath $logPath -Pattern 'vulkan: pane created: id=(\d+) device=(0x[0-9a-f]+) queue=(0x[0-9a-f]+) mode=(\w+)')
+        if($surfaces.Count -lt 4){throw 'Missing actual Vulkan pane creation evidence'}
+        if(@($surfaces | ForEach-Object {$_.Matches[0].Groups[2].Value} | Select-Object -Unique).Count -ne 1){throw 'Vulkan panes did not share one device'}
+        if(@($surfaces | ForEach-Object {$_.Matches[0].Groups[3].Value} | Select-Object -Unique).Count -ne 1){throw 'Vulkan panes did not share one queue'}
+        $mode=if($Renderer -eq 'native-vulkan'){'native_wsi'}else{'dcomp_bridge'}
+        if(@($surfaces | Where-Object {$_.Matches[0].Groups[4].Value -ne $mode}).Count -ne 0){throw 'Vulkan presentation changed mode'}
+        $bridges=@(Select-String -LiteralPath $logPath -Pattern 'vulkan: pane bridge: id=(\d+) d3d_device=(0x[0-9a-f]+)')
+        if($Renderer -eq 'native-vulkan'){
+            if($bridges.Count -ne 0){throw 'Native Vulkan created a D3D bridge'}
+            $result.presentation='native Win32 WSI'
+        }else{
+            if($bridges.Count -lt 4 -or @($bridges | ForEach-Object {$_.Matches[0].Groups[2].Value} | Select-Object -Unique).Count -ne 1){throw 'Vulkan bridge panes did not share one D3D11 device'}
+            $result.presentation='Vulkan/D3D11 bridge with a shared presentation device'
+        }
+        $result.backend_identity="four $Renderer panes sharing one Vulkan device and queue"
     }
     if($CloseOnly){
         Test-CloseActions
@@ -389,13 +417,13 @@ try {
         Start-Sleep -Milliseconds 1200
         Capture 'device-before'
         $diagPath=Join-Path $outputRoot 'tmp\mostty-diag.log'
-        [void][PaneAcceptance]::PostMessageW($window,$(if($Renderer -eq 'd3d12'){0x8006}else{0x8007}),[UIntPtr]::Zero,[IntPtr]::Zero)
+        [void][PaneAcceptance]::PostMessageW($window,$(if($Renderer -eq 'd3d12'){0x8006}elseif($Renderer -in @('opengl','pure-opengl')){0x8007}else{0x8008}),[UIntPtr]::Zero,[IntPtr]::Zero)
         $deadline=[DateTime]::UtcNow.AddSeconds(20)
         do {
             Start-Sleep -Milliseconds 100
             if($app.HasExited){throw 'D3D12 process exited during recovery'}
             if([PaneAcceptance]::Dialog($app.Id) -ne [IntPtr]::Zero){throw 'Renderer recovery displayed a failure dialog'}
-            $recovered=Select-String -LiteralPath $diagPath -Pattern '(D3D12|OpenGL) pane recovery complete'
+            $recovered=Select-String -LiteralPath $diagPath -Pattern '(D3D12|OpenGL|Vulkan) pane recovery complete'
         } while(-not $recovered -and [DateTime]::UtcNow -lt $deadline)
         if(-not $recovered){throw 'Renderer recovery did not complete'}
         $after=Wait-Panes 4
@@ -454,6 +482,9 @@ try {
         $fontSizes += [ordered]@{ hwnd=$panes[$i].ToInt64(); columns=[int]$parts[1]; rows=[int]$parts[2]; cell_width=[int]$groups[3].Value; cell_height=[int]$groups[4].Value }
     }
     $result.font_reload_sizes = $fontSizes
+    if($Renderer -eq 'native-vulkan' -and (Select-String -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') -SimpleMatch 'cannot enable alpha composition')){
+        $result.transparency_blur='unsupported: opaque native surface; request explicitly rejected'
+    }else{$result.transparency_blur='pass'}
     Capture 'font-theme-transparency'
     if($Renderer -ne 'd3d11'){
         $imageProbe=Join-Path $projectRoot 'tools/pane-image-probe.py'
@@ -483,6 +514,9 @@ try {
         for($i=1;$i -lt 4;$i++){Assert-PaneImage $i}
         $result.kitty_isolation='pass: same ID shows four independent colors; deleting in one preserves the others'
         Capture 'kitty-deleted-pane'
+        if($Renderer -eq 'native-vulkan' -and $result.transparency_blur -like 'unsupported*'){
+            $result.wallpaper_reload='unverified: opaque native surface cannot reveal the wallpaper through cell backgrounds'
+        }else{
         # A solid wallpaper with a transparent default cell background gives an exact pixel result.
         $wallpaper=Join-Path $outputRoot "wallpaper-$runId.bmp"
         $bitmap=[Drawing.Bitmap]::new(8,8)
@@ -517,6 +551,7 @@ try {
         }
         $result.wallpaper_reload='pass: all four panes displayed the new wallpaper and removed it'
         Capture 'wallpaper-removed'
+        }
     }
     $monitors=[PaneAcceptance]::Monitors()
     $result.monitor_dpi=@($monitors | ForEach-Object {$_.Dpi})
@@ -533,15 +568,37 @@ try {
 
 
     Test-CloseActions
-    $result.status = if($result.ime -eq 'pass'){'pass'}else{'partial'}
+    $result.status = if($result.ime -eq 'pass' -and $result.transparency_blur -notlike 'unsupported*'){'pass'}else{'partial'}
 } catch {
     $result.status = 'fail'
     $result.error = $_.Exception.Message
     if ($window -ne [IntPtr]::Zero -and -not $app.HasExited) { Capture 'failure' }
     throw
 } finally {
+    if (-not $KeepRunning -and -not $app.HasExited) { $app.Kill(); $app.WaitForExit() }
+    $validationFailed=$false
+    if($VulkanValidation -and -not $app.HasExited){
+        $result.vulkan_validation='unverified: process still running';$validationFailed=$true
+    }elseif($VulkanValidation){
+        $validationText=$validationStdout.GetAwaiter().GetResult()+[Environment]::NewLine+$validationStderr.GetAwaiter().GetResult()
+        [IO.File]::WriteAllText($validationLog,$validationText)
+        $result.vulkan_validation_instances=([regex]::Matches($validationText,'Khronos Validation Layer Active')).Count
+        if($TestRecovery -and $result.vulkan_validation_instances -lt 2){$validationFailed=$true}
+        if($validationText -notmatch 'Khronos Validation Layer Active' -or $validationText -notmatch 'SYNCHRONIZATION_VALIDATION'){
+            $result.vulkan_validation='unverified: synchronization validation activation not captured';$validationFailed=$true
+        }elseif(-not (Test-Path -LiteralPath $validationLog)){
+            $result.vulkan_validation='unverified: validation layer log missing';$validationFailed=$true
+        }else{
+            $validationErrors=@(Select-String -LiteralPath $validationLog -Pattern 'Validation Error|SYNC-HAZARD')
+            $result.vulkan_validation_errors=$validationErrors.Count
+            $result.vulkan_validation_log=$validationLog
+            $result.vulkan_validation=if($validationErrors.Count -eq 0){'no validation errors observed'}else{'failed'}
+            $validationFailed=$validationFailed -or $validationErrors.Count -gt 0
+        }
+        if($validationFailed){$result.status='fail'}
+    }
     $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot 'result.json') -Encoding utf8
     $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot "result-$runId.json") -Encoding utf8
-    if (-not $KeepRunning -and -not $app.HasExited) { $app.Kill(); $app.WaitForExit() }
     $result | ConvertTo-Json -Depth 6
+    if($validationFailed){throw "Vulkan validation did not pass; inspect $validationLog"}
 }

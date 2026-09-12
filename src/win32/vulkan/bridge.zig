@@ -38,12 +38,14 @@ pub const Bridge = struct {
     width: u32,
     height: u32,
     released_value: u64 = 0,
+    pane: bool = false,
 
     pub fn init(
         core: *core_mod.Core,
         hwnd: win32.HWND,
         width: u32,
         height: u32,
+        parent: ?*Bridge,
     ) core_mod.StartupError!Bridge {
         var factory: *win32.IDXGIFactory4 = undefined;
         if (win32.CreateDXGIFactory1(win32.IID_IDXGIFactory4, @ptrCast(&factory)) < 0)
@@ -58,7 +60,7 @@ pub const Bridge = struct {
         ) < 0) return error.AdapterIdentityUnavailable;
         defer _ = adapter.IUnknown.Release();
 
-        var presenter = dcomp_blit.Presenter.init(hwnd, width, height, adapter) catch |err| {
+        var presenter = (if (parent) |p| dcomp_blit.Presenter.initSurface(&p.presenter, hwnd, width, height) else dcomp_blit.Presenter.initLayer(hwnd, width, height, adapter, false)) catch |err| {
             log.err("D3D11 DComp presenter creation failed: {s}", .{@errorName(err)});
             return switch (err) {
                 error.DeviceUnavailable => error.D3dDeviceUnavailable,
@@ -101,6 +103,7 @@ pub const Bridge = struct {
 
         var bridge: Bridge = .{
             .presenter = presenter,
+            .pane = parent != null,
             .device5 = device5,
             .context4 = context4,
             .semaphore = semaphore,
@@ -114,7 +117,9 @@ pub const Bridge = struct {
     }
 
     pub fn deinit(self: *Bridge, core: *core_mod.Core) void {
-        _ = core.waitTimeline(self.semaphore, self.released_value) catch {};
+        self.drain() catch {
+            if (self.presenter.device.GetDeviceRemovedReason() >= 0) @panic("Vulkan bridge teardown could not drain the D3D device");
+        };
         self.releaseFrames(core);
         _ = self.fence.IUnknown.Release();
         core.dp.destroy_semaphore(core.device, self.semaphore, null);
@@ -133,7 +138,7 @@ pub const Bridge = struct {
         if (self.width == width and self.height == height) return false;
         if (core.dp.device_wait_idle(core.device) != vk.VK_SUCCESS)
             return error.SynchronizationUnavailable;
-        try core.waitTimeline(self.semaphore, self.released_value);
+        try self.drain();
         self.releaseFrames(core);
         self.presenter.resize(width, height) catch return error.BridgeSurfaceUnavailable;
         self.width = width;
@@ -153,13 +158,25 @@ pub const Bridge = struct {
     pub fn present(self: *Bridge, source: *win32.ID3D11ShaderResourceView, exchange: Exchange) !void {
         if (self.context4.Wait(self.fence, exchange.ready_value) < 0)
             return error.ExternalWaitFailed;
-        self.presenter.waitForFrame();
+        if (!self.pane) self.presenter.waitForFrame();
         try self.presenter.present(source, self.width, self.height);
         const released_value = exchange.ready_value + 1;
         if (self.context4.Signal(self.fence, released_value) < 0)
             return error.ExternalSignalFailed;
         self.presenter.context.Flush();
         self.released_value = released_value;
+    }
+
+    fn drain(self: *Bridge) core_mod.StartupError!void {
+        const value = self.released_value + 2;
+        if (self.context4.Signal(self.fence, value) < 0) return error.SynchronizationUnavailable;
+        self.presenter.context.Flush();
+        if (self.fence.GetCompletedValue() < value) {
+            const event = win32.CreateEventW(null, 0, 0, null) orelse return error.SynchronizationUnavailable;
+            defer _ = win32.CloseHandle(event);
+            if (self.fence.SetEventOnCompletion(value, event) < 0 or win32.WaitForSingleObject(event, 10_000) != .NO_ERROR) return error.SynchronizationUnavailable;
+        }
+        self.released_value = value;
     }
 
     pub fn detach(self: *Bridge) void {

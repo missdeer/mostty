@@ -553,8 +553,8 @@ The renderer facade gates pane support and dispatches main-window chrome.
 `PaneSurface` owns the pane backend and its last synchronized font generation;
 creation, synchronization, drawing, glyph delivery and teardown go through that
 wrapper. HWND layout and input routing do not inspect backend-specific fields.
-Only complete pane implementations enter its backend union; D3D11, D3D12 and
-both OpenGL modes are members, while Vulkan variants retain their split restriction.
+All six configured Windows renderer choices have pane implementations. OpenGL
+and Vulkan pane creation waits for the process renderer startup gate to pass.
 The process renderer must outlive its pane surfaces.
 
 D3D11 creates the main chrome surface and one child-HWND surface per pane.
@@ -659,14 +659,15 @@ surface whose composite-alpha modes preserve the configured window effects.
 When the configuration is fully opaque (`background-opacity = 1` and
 `background-blur = false`), an opaque-only surface is accepted; otherwise a
 non-opaque composite-alpha mode remains mandatory.
-It uses three frame slots, separate acquire/render-finished semaphores, a
-timeline for frame-resource reuse, and native Win32 WSI presentation. Present
+It uses three frame slots with per-frame acquisition semaphores, per-swapchain-image
+presentation semaphores, and a timeline for frame-resource reuse. Acquisition
+waits and the initial image layout transition share the color-attachment stage;
+presentation signals cover the final layout transition. Present
 selection prefers present-wait mailbox, then timeline-gated mailbox, then
 FIFO; the active tier is logged. Resize, out-of-date, and suboptimal results
-rebuild the swapchain without changing renderer identity. A runtime device or
-presentation failure gets one full Vulkan-core rebuild attempt for session
-reconnect recovery; a failed rebuild or immediate repeated failure offers only
-explicit D3D11 fallback or exit.
+rebuild the swapchain without changing renderer identity. A runtime failure gets one coordinated rebuild of the shared core and all pane
+resources, retaining the HWNDs and sessions. Failed or immediately repeated
+recovery reports an error and closes without switching renderer.
 
 The `vulkan` choice uses that same device, frame-resource, descriptor, shader,
 grid, image, and tab-bar core but does not create a Win32 Vulkan surface or
@@ -677,6 +678,24 @@ release, renders and signals ready; D3D11 waits ready, blits the completed
 texture, then signals release. Queue-family ownership barriers bracket each
 Vulkan render. Resize drains both APIs before replacing the shared images.
 There is no CPU frame copy and bridge failure never selects native WSI.
+
+Vulkan panes borrow the process instance, device, queue, sampler and pipelines.
+Each owns its surface/swapchain or imported D3D bridge frames, command/descriptor
+pools, cell/uniform buffers, timeline, upload retirements and drawing caches.
+Background images are borrowed from the process renderer and synchronized by
+resource generation; font/glyph results retain pane and cache-generation guards.
+Transient upload buffers and command pools are retained until timeline completion
+instead of waiting for the whole queue after every glyph. Pane frame and image
+acquisition checks are nonblocking and deferred work requests a later paint.
+The D3D bridge shares its presentation device/shaders and drains D3D work before
+releasing imported images, including after an interrupted presentation.
+
+Native WSI retires per-image presentation semaphores with the swapchain, and
+uses negotiated present-wait IDs even when another presentation tier is selected.
+Aborted acquisitions are consumed before their semaphore is destroyed. The tested
+native driver provided present-wait; legacy retirement without that extension
+retains the existing device-idle fallback and was not exercised in this matrix.
+Debug diagnostic failures exercise reconstruction, not physical GPU resets.
 
 DirectComposition lifecycle is split by responsibility. `dcomp.Surface` owns
 the three-buffer composition swapchain, frame-latency handle, DComp device,
@@ -721,9 +740,7 @@ retain the M5a CPU handoff. Observed vendor results live in
 `render.zig:renderWindow` dispatches main chrome through `Renderer` and paints
 every visible pane through `PaneSurface`, with
 its own terminal, selection, hover and focused-cursor state. Hidden sessions
-continue consuming PTY output. Vulkan backends retain the single-surface
-facade path; requesting a split reports the unsupported capability without
-switching backend. A pane frame runs:
+continue consuming PTY output. All selected Windows backends use the pane facade after startup. A pane frame runs:
 
 1. **prepareFrame** (`d3d11.zig`): client-size query; swap-chain
    create-or-resize; cheap occlusion test (`Present(0, TEST)`);
@@ -1030,7 +1047,7 @@ WM_CHAR
 
 ### 9.3 Tab, pane and session commands
 
-Windows split commands update `SplitLayout`; `Ctrl+Shift+D` splits left/right and `Ctrl+Shift+E` splits up/down. `Ctrl+Alt+Arrow` follows physical pane geometry without wrapping. `Ctrl+Shift+Enter` maximizes/restores the focused pane while retaining every session. `Ctrl+Shift+W` closes one pane; only the last pane closes its tab. Divider capture stores a split ID, and child HWND input, IME and capture are resolved through the pane registry. Vulkan backends remain single-surface until independently validated and are never silently replaced.
+Windows split commands update `SplitLayout`; `Ctrl+Shift+D` splits left/right and `Ctrl+Shift+E` splits up/down. `Ctrl+Alt+Arrow` follows physical pane geometry without wrapping. `Ctrl+Shift+Enter` maximizes/restores the focused pane while retaining every session. `Ctrl+Shift+W` closes one pane; only the last pane closes its tab. Divider capture stores a split ID, and child HWND input, IME and capture are resolved through the pane registry. All six renderer choices support this layout, subject to their driver capabilities, and are never silently replaced.
 
 ### 9.4 Tab open / close
 

@@ -79,6 +79,7 @@ pub fn renderWindow(window: *Window) void {
         if (frame_pending) window.requestRender() else {
             global.renderer.d3d12_recovery_attempted = false;
             global.renderer.opengl_recovery_attempted = false;
+            global.renderer.vulkan_recovery_attempted = false;
         }
         if (global.renderer.backend.? == .opengl and global.renderer.backend.?.opengl.interop_state == .unavailable and !window.dwm_redirected) {
             window.dwm_redirected = true;
@@ -142,7 +143,7 @@ fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
     if (failure == .d3d12) std.log.err("D3D12 failure hresult=0x{x}", .{@as(u32, @bitCast(failure.d3d12.hresult))});
     window.confirming_renderer_fallback = true;
     var generation = switch (global.renderer.backend.?) {
-        inline .d3d12, .opengl => |backend| backend.cache_gen,
+        inline .d3d12, .opengl, .vulkan, .@"native-vulkan" => |backend| backend.cache_gen,
         else => unreachable,
     };
     for (window.panes.items) |pane| {
@@ -155,7 +156,7 @@ fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
     var recovered = switch (failure) {
         .d3d12 => global.renderer.recoverD3d12(window.hwnd, global.config.gpu, generation +% 1),
         .opengl => global.renderer.recoverOpenGL(window.hwnd, global.config.gpu, generation +% 1),
-        else => unreachable,
+        .vulkan, .@"native-vulkan" => global.renderer.recoverVulkanPanes(window.hwnd, global.config.gpu, generation +% 1),
     };
     if (recovered) {
         for (window.panes.items) |pane| {
@@ -177,7 +178,7 @@ fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
     }
     global.renderer.reloadBackgroundImage(global.gpa.allocator(), &global.config, window.hwnd);
     window.confirming_renderer_fallback = false;
-    std.log.warn("{s} pane recovery complete: {} sessions and HWNDs retained", .{ if (failure == .d3d12) "D3D12" else "OpenGL", window.panes.items.len });
+    std.log.warn("{s} pane recovery complete: {} sessions and HWNDs retained", .{ if (failure == .d3d12) "D3D12" else if (failure == .opengl) "OpenGL" else "Vulkan", window.panes.items.len });
     window.requestRender();
 }
 

@@ -401,6 +401,9 @@ pub fn paneRuntimeFailure(self: *Renderer) ?RuntimeFailure {
         .opengl => |*backend| if (backend.failure) |failure| {
             return .{ .opengl = failure };
         },
+        inline .vulkan, .@"native-vulkan" => |*backend, tag| if (backend.pending_failure) |failure| {
+            return @unionInit(RuntimeFailure, @tagName(tag), failure);
+        },
         else => {},
     }
     return null;
@@ -442,12 +445,38 @@ pub fn recoverOpenGL(self: *Renderer, hwnd: win32.HWND, configured_gpu: ?[]const
     return true;
 }
 
+pub fn recoverVulkanPanes(self: *Renderer, hwnd: win32.HWND, configured_gpu: ?[]const u8, generation: u32) bool {
+    if (self.vulkan_recovery_attempted) return false;
+    self.vulkan_recovery_attempted = true;
+    const background_generation = switch (self.backend.?) {
+        inline .vulkan, .@"native-vulkan" => |*backend| blk: {
+            const next = backend.bg_image_req_id +% 1;
+            backend.deinit();
+            break :blk next;
+        },
+        else => return false,
+    };
+    self.backend = null;
+    if (self.initializeWindow(hwnd, configured_gpu)) |failure| {
+        std.log.err("Vulkan pane recovery failed: {s}", .{failure.description()});
+        return false;
+    }
+    switch (self.backend.?) {
+        inline .vulkan, .@"native-vulkan" => |*backend| {
+            backend.cache_gen = generation;
+            backend.bg_image_req_id = background_generation;
+        },
+        else => unreachable,
+    }
+    return true;
+}
+
 pub fn supportsPanes(self: *const Renderer) bool {
     const active = self.backend orelse return false;
     return switch (active) {
         .d3d11, .d3d12 => true,
         .opengl => |backend| backend.initialized,
-        else => false,
+        .vulkan, .@"native-vulkan" => |backend| backend.core != null,
     };
 }
 
@@ -457,8 +486,7 @@ pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) PaneSurface.Ini
 
 pub fn renderChrome(self: *Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
     switch (self.activeBackend().*) {
-        inline .d3d11, .d3d12, .opengl => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
-        else => unreachable, // Only reached after the pane capability gate.
+        inline else => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
     }
 }
 
@@ -733,8 +761,8 @@ test "pane capability rejects unsupported or unavailable backends without changi
         renderer.backend = switch (selected) {
             .d3d12 => .{ .d3d12 = undefined },
             .opengl, .@"pure-opengl" => .{ .opengl = undefined },
-            .vulkan => .{ .vulkan = undefined },
-            .@"native-vulkan" => .{ .@"native-vulkan" = undefined },
+            .vulkan => .{ .vulkan = vulkan.init(undefined, undefined, null, .dcomp_bridge, false) },
+            .@"native-vulkan" => .{ .@"native-vulkan" = vulkan.init(undefined, undefined, null, .native_wsi, false) },
             else => unreachable,
         };
         try std.testing.expect(!renderer.supportsPanes());

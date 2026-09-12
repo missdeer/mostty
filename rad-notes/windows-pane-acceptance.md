@@ -163,3 +163,43 @@ Vulkan variants remain pending under MOSTTY-80.
   dc87ac2b0ad7449d949091a3ee499ece and e58b77239cc349c3b47d73e0f90246c1.
 - Final evidence is preserved under tmp/MOSTTY-79-evidence, with separate
   opengl and pure-opengl results, diagnostic logs and captures.
+
+## Vulkan native panes — MOSTTY-80
+
+Verified on September 12, 2026. Both Vulkan rows in the original MOSTTY-74
+matrix are historical; all six configured Windows renderer choices now have
+native pane implementations. Combined final acceptance remains MOSTTY-81.
+
+- Zig 0.16.0 with D:/zig-cache: build passed; 45/45 test steps succeeded,
+  253/255 tests passed. Both skips are macOS config-path tests on Windows.
+  GPU tests exercised shared device/queue/pipeline/font infrastructure,
+  independent pane frames and presentation, per-image WSI semaphores,
+  upload retention/collection and nonblocking frame readiness.
+- Vulkan bridge run daa7789abd9549bf838bf4f0963b016a passed four-pane acceptance
+  and synchronization validation, sharing one Vulkan device/queue and one
+  D3D11 presentation device. Native WSI run a25015192681421197c6c23205a36b48
+  passed using present_wait_mailbox and alpha composition on this NVIDIA driver.
+- Both used tools/pane-acceptance.ps1 -Renderer <mode> -TestRecovery
+  -VulkanValidation. Mixed nested layout, input/IME/capture, maximize/restore,
+  tab retention, output/resize, ConPTY/VT sizes, font/theme/transparency,
+  Kitty isolation, wallpaper replacement/removal and closure checks passed.
+- Diagnostic recovery retained shell PIDs and pane HWNDs; each mode compared
+  564,590 settled text-region pixels with zero differences. This tests reported
+  presentation failure and reconstruction, not physical device loss or RDP.
+- Validation output is captured through process pipes across instance rebuilds,
+  avoiding the layer file logger's truncation during recovery. Both recorded
+  synchronization validation active for the original and rebuilt instances,
+  with zero errors in the successful runs.
+- The first native validation run found an acquire-to-layout transition
+  WRITE_AFTER_READ hazard. Its source stage was corrected to match the acquire
+  semaphore wait, and a recorded-barrier regression covers first use and reuse.
+  That failed run is retained and is not counted as passing evidence.
+- Four-backend split/focus/closure regressions passed: D3D11
+  f027bb53e3d54602b66f36f354a8dd4d; D3D12 e5e3bba4853840f8adab5f7e918eca08;
+  OpenGL fdedce22d1954643b6aab604592b6e7c; pure OpenGL
+  41cc086caa0d457fb5a6e91d2c7dd391.
+- Both monitors were 96 DPI. Mixed-DPI hardware, RDP, physical device loss,
+  opaque-only native WSI and native WSI without present-wait were not tested
+  or counted as passes. The runner marks native alpha limitations explicitly.
+- Evidence is preserved under tmp/MOSTTY-80-evidence with separate mode logs,
+  validation output, result files and inspected captures.

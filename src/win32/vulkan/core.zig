@@ -10,6 +10,7 @@ pub const frame_count = 3;
 pub const max_swapchain_images = 8;
 pub const uniform_bytes = 1024 * 1024;
 pub const max_descriptor_sets = 2048;
+pub const acquire_stage: vk.VkPipelineStageFlags2 = vk.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 
 pub const Presentation = enum {
     dcomp_bridge,
@@ -129,7 +130,6 @@ pub const Frame = struct {
     command_pool: vk.VkCommandPool = null,
     command_buffer: vk.VkCommandBuffer = null,
     image_acquired: vk.VkSemaphore = null,
-    render_finished: vk.VkSemaphore = null,
     descriptor_pool: vk.VkDescriptorPool = null,
     cells: Buffer = .{},
     uniform: Buffer = .{},
@@ -163,8 +163,7 @@ pub const Frame = struct {
             .pNext = null,
             .flags = 0,
         };
-        if (core.dp.create_semaphore(core.device, &semaphore_info, null, &frame.image_acquired) != vk.VK_SUCCESS or
-            core.dp.create_semaphore(core.device, &semaphore_info, null, &frame.render_finished) != vk.VK_SUCCESS)
+        if (core.dp.create_semaphore(core.device, &semaphore_info, null, &frame.image_acquired) != vk.VK_SUCCESS)
             return error.SynchronizationUnavailable;
 
         const pool_sizes = [_]vk.VkDescriptorPoolSize{
@@ -191,14 +190,19 @@ pub const Frame = struct {
         self.uniform.release(core);
         self.cells.release(core);
         if (self.descriptor_pool != null) core.dp.destroy_descriptor_pool(core.device, self.descriptor_pool, null);
-        if (self.render_finished != null) core.dp.destroy_semaphore(core.device, self.render_finished, null);
         if (self.image_acquired != null) core.dp.destroy_semaphore(core.device, self.image_acquired, null);
         if (self.command_pool != null) core.dp.destroy_command_pool(core.device, self.command_pool, null);
         self.* = .{};
     }
 };
 
+const Upload = struct { pool: vk.VkCommandPool, staging: Buffer, completion: u64 };
+
 pub const Core = struct {
+    parent: ?*Core = null,
+    uploads: std.ArrayListUnmanaged(Upload) = .empty,
+    acquired_frame: ?usize = null,
+    swapchain_render_finished: [max_swapchain_images]vk.VkSemaphore = @splat(null),
     presentation: Presentation,
     requires_alpha_composition: bool,
     alpha_composition_enabled: bool,
@@ -317,8 +321,7 @@ pub const Core = struct {
         );
         const physical_device = selection.device;
         const queue_family = selection.queue_family;
-        var present_wait_enabled = selection.present_wait and
-            (present_tier_override == null or present_tier_override.? == .present_wait_mailbox);
+        var present_wait_enabled = selection.present_wait;
 
         var features13 = vk.VkPhysicalDeviceVulkan13Features{
             .sType = vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -428,6 +431,10 @@ pub const Core = struct {
         ip.get_physical_device_memory_properties(physical_device, &memory_properties);
 
         var core: Core = undefined;
+        core.parent = null;
+        core.uploads = .empty;
+        core.acquired_frame = null;
+        core.swapchain_render_finished = @splat(null);
         core.presentation = presentation;
         core.requires_alpha_composition = requires_alpha_composition;
         core.alpha_composition_enabled = false;
@@ -499,26 +506,102 @@ pub const Core = struct {
         return core;
     }
 
+    pub fn initSurface(parent: *Core, hwnd: win32.HWND, requires_alpha_composition: bool) StartupError!Core {
+        var core = parent.*;
+        core.parent = parent;
+        core.requires_alpha_composition = requires_alpha_composition;
+        core.surface = null;
+        core.timeline = null;
+        core.timeline_value = 0;
+        core.swapchain = null;
+        core.swapchain_extent = .{ .width = 0, .height = 0 };
+        core.swapchain_images = @splat(null);
+        core.swapchain_views = @splat(null);
+        core.swapchain_render_finished = @splat(null);
+        core.swapchain_initialized = @splat(false);
+        core.swapchain_image_count = 0;
+        core.frames = @splat(.{});
+        core.frame_cursor = frame_count - 1;
+        core.last_frame_cursor = null;
+        core.present_id = 0;
+        core.last_waitable_present_id = 0;
+        core.acquired_frame = null;
+        core.uploads = .empty;
+        errdefer core.deinit();
+        if (core.presentation == .native_wsi) {
+            const info = vk.VkWin32SurfaceCreateInfoKHR{ .sType = vk.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, .pNext = null, .flags = 0, .hinstance = cHandleFromInt(vk.HINSTANCE, @intFromPtr(win32.GetModuleHandleW(null))), .hwnd = cHandleFromInt(vk.HWND, @intFromPtr(hwnd)) };
+            if (core.ip.create_win32_surface.?(core.instance, &info, null, &core.surface) != vk.VK_SUCCESS) return error.SurfaceUnavailable;
+            var supported: vk.VkBool32 = vk.VK_FALSE;
+            if (core.ip.get_surface_support.?(core.physical_device, core.queue_family, core.surface, &supported) != vk.VK_SUCCESS or supported == vk.VK_FALSE) return error.GraphicsPresentQueueUnavailable;
+            try core.createSwapchain(hwnd, null);
+        }
+        try core.createSynchronization();
+        for (&core.frames) |*frame| frame.* = try Frame.init(&core);
+        return core;
+    }
+
     fn releaseCreated(self: *Core) void {
-        self.transparent_image.release(self);
+        self.releaseUploads();
         self.destroySwapchain();
-        if (self.image_pipeline != null) self.dp.destroy_pipeline(self.device, self.image_pipeline, null);
-        if (self.grid_pipeline != null) self.dp.destroy_pipeline(self.device, self.grid_pipeline, null);
-        if (self.pipeline_layout != null) self.dp.destroy_pipeline_layout(self.device, self.pipeline_layout, null);
-        if (self.descriptor_layout != null) self.dp.destroy_descriptor_set_layout(self.device, self.descriptor_layout, null);
-        if (self.sampler != null) self.dp.destroy_sampler(self.device, self.sampler, null);
         if (self.timeline != null) self.dp.destroy_semaphore(self.device, self.timeline, null);
-        if (self.device != null) self.dp.destroy_device(self.device, null);
         if (self.surface != null) self.ip.destroy_surface.?(self.instance, self.surface, null);
-        if (self.instance != null) self.ip.destroy_instance(self.instance, null);
-        self.global.deinit();
+        if (self.parent == null) {
+            self.transparent_image.release(self);
+            if (self.image_pipeline != null) self.dp.destroy_pipeline(self.device, self.image_pipeline, null);
+            if (self.grid_pipeline != null) self.dp.destroy_pipeline(self.device, self.grid_pipeline, null);
+            if (self.pipeline_layout != null) self.dp.destroy_pipeline_layout(self.device, self.pipeline_layout, null);
+            if (self.descriptor_layout != null) self.dp.destroy_descriptor_set_layout(self.device, self.descriptor_layout, null);
+            if (self.sampler != null) self.dp.destroy_sampler(self.device, self.sampler, null);
+            if (self.device != null) self.dp.destroy_device(self.device, null);
+            if (self.instance != null) self.ip.destroy_instance(self.instance, null);
+            self.global.deinit();
+        }
     }
 
     pub fn deinit(self: *Core) void {
-        _ = self.dp.device_wait_idle(self.device);
+        self.consumeAcquiredImage();
+        const idle = self.dp.device_wait_idle(self.device);
+        if (idle != vk.VK_SUCCESS and idle != vk.VK_ERROR_DEVICE_LOST) @panic("Vulkan teardown could not establish device completion");
         for (&self.frames) |*frame| frame.release(self);
         self.releaseCreated();
         self.* = undefined;
+    }
+
+    fn consumeAcquiredImage(self: *Core) void {
+        const index = self.acquired_frame orelse return;
+        const wait = vk.VkSemaphoreSubmitInfo{ .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .pNext = null, .semaphore = self.frames[index].image_acquired, .value = 0, .stageMask = vk.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .deviceIndex = 0 };
+        const submit = vk.VkSubmitInfo2{ .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .pNext = null, .flags = 0, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait, .commandBufferInfoCount = 0, .pCommandBufferInfos = null, .signalSemaphoreInfoCount = 0, .pSignalSemaphoreInfos = null };
+        const result = self.dp.queue_submit2(self.queue, 1, &submit, null);
+        if (result != vk.VK_SUCCESS and result != vk.VK_ERROR_DEVICE_LOST) @panic("Vulkan acquired-image cleanup could not submit its wait");
+        self.acquired_frame = null;
+    }
+
+    fn releaseUploads(self: *Core) void {
+        for (self.uploads.items) |*pending| {
+            pending.staging.release(self);
+            self.dp.destroy_command_pool(self.device, pending.pool, null);
+        }
+        self.uploads.deinit(std.heap.page_allocator);
+    }
+
+    fn collectUploads(self: *Core) StartupError!void {
+        if (self.uploads.items.len == 0) return;
+        var completed: u64 = 0;
+        if (self.dp.get_semaphore_counter_value(self.device, self.timeline, &completed) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
+        var i: usize = 0;
+        while (i < self.uploads.items.len) {
+            if (self.uploads.items[i].completion <= completed) {
+                var pending = self.uploads.swapRemove(i);
+                pending.staging.release(self);
+                self.dp.destroy_command_pool(self.device, pending.pool, null);
+            } else i += 1;
+        }
+    }
+
+    pub fn frameReady(self: *Core) StartupError!bool {
+        var completed: u64 = 0;
+        if (self.dp.get_semaphore_counter_value(self.device, self.timeline, &completed) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
+        return completed >= self.frames[(self.frame_cursor + 1) % frame_count].completion_value;
     }
 
     fn createSynchronization(self: *Core) StartupError!void {
@@ -882,7 +965,7 @@ pub const Core = struct {
     }
 
     pub fn recreateSwapchain(self: *Core, hwnd: win32.HWND) StartupError!void {
-        _ = self.dp.device_wait_idle(self.device);
+        if (self.dp.device_wait_idle(self.device) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
         const old = self.swapchain;
         defer if (old != null) self.dp.destroy_swapchain.?(self.device, old, null);
         self.destroySwapchainViews();
@@ -922,6 +1005,7 @@ pub const Core = struct {
             }
         }
         const surface_format = chosen orelse return error.SwapchainFormatUnavailable;
+        if (self.grid_pipeline != null and surface_format.format != self.swapchain_format) return error.SwapchainFormatUnavailable;
 
         var mode_count: u32 = 0;
         if (self.ip.get_surface_present_modes.?(self.physical_device, self.surface, &mode_count, null) != vk.VK_SUCCESS)
@@ -1007,6 +1091,15 @@ pub const Core = struct {
             if (self.dp.create_image_view(self.device, &view_info, null, view) != vk.VK_SUCCESS)
                 return error.SwapchainUnavailable;
         }
+        var finished: [max_swapchain_images]vk.VkSemaphore = @splat(null);
+        errdefer for (finished) |semaphore| {
+            if (semaphore != null) self.dp.destroy_semaphore(self.device, semaphore, null);
+        };
+        const semaphore_info = vk.VkSemaphoreCreateInfo{ .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = null, .flags = 0 };
+        for (finished[0..actual_count]) |*semaphore| {
+            if (self.dp.create_semaphore(self.device, &semaphore_info, null, semaphore) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
+        }
+        self.swapchain_render_finished = finished;
         self.swapchain = swapchain;
         self.swapchain_images = images;
         self.swapchain_views = views;
@@ -1019,6 +1112,15 @@ pub const Core = struct {
     }
 
     fn destroySwapchainViews(self: *Core) void {
+        if (self.last_waitable_present_id != 0 and self.dp.wait_for_present != null) {
+            const result = self.dp.wait_for_present.?(self.device, self.swapchain, self.last_waitable_present_id, 10_000_000_000);
+            if (result != vk.VK_SUCCESS and result != vk.VK_ERROR_OUT_OF_DATE_KHR and result != vk.VK_ERROR_DEVICE_LOST) @panic("Vulkan presentation retirement did not complete");
+            self.last_waitable_present_id = 0;
+        }
+        for (self.swapchain_render_finished) |semaphore| {
+            if (semaphore != null) self.dp.destroy_semaphore(self.device, semaphore, null);
+        }
+        self.swapchain_render_finished = @splat(null);
         for (self.swapchain_views[0..self.swapchain_image_count]) |view| {
             if (view != null) self.dp.destroy_image_view(self.device, view, null);
         }
@@ -1034,6 +1136,7 @@ pub const Core = struct {
     }
 
     pub fn beginFrame(self: *Core) StartupError!*Frame {
+        try self.collectUploads();
         const next = (self.frame_cursor + 1) % frame_count;
         var frame = &self.frames[next];
         if (frame.completion_value != 0) {
@@ -1070,7 +1173,7 @@ pub const Core = struct {
 
     pub fn ensureCellBuffers(self: *Core, bytes: usize) StartupError!bool {
         if (self.frames[0].cells.size == bytes and bytes != 0) return false;
-        _ = self.dp.device_wait_idle(self.device);
+        if (self.dp.device_wait_idle(self.device) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
         for (&self.frames) |*frame| {
             frame.cells.release(self);
             if (bytes != 0) frame.cells = try self.createHostBuffer(bytes, vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1206,10 +1309,11 @@ pub const Core = struct {
         source: [*]const u8,
         source_pitch: u32,
     ) StartupError!void {
+        try self.collectUploads();
         const row_bytes = @as(usize, width) * 4;
         const byte_count = row_bytes * height;
         var staging = try self.createHostBuffer(byte_count, vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-        defer staging.release(self);
+        errdefer staging.release(self);
         for (0..height) |row| {
             @memcpy(
                 staging.mapped.?[row * row_bytes ..][0..row_bytes],
@@ -1226,7 +1330,7 @@ pub const Core = struct {
         };
         if (self.dp.create_command_pool(self.device, &pool_info, null, &pool) != vk.VK_SUCCESS)
             return error.CommandResourcesUnavailable;
-        defer self.dp.destroy_command_pool(self.device, pool, null);
+        errdefer self.dp.destroy_command_pool(self.device, pool, null);
         var command: vk.VkCommandBuffer = null;
         const alloc_info = vk.VkCommandBufferAllocateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1282,6 +1386,9 @@ pub const Core = struct {
             .commandBuffer = command,
             .deviceMask = 0,
         };
+        self.uploads.ensureUnusedCapacity(std.heap.page_allocator, 1) catch return error.ResourceUnavailable;
+        const completion = self.timeline_value + 1;
+        const signal = vk.VkSemaphoreSubmitInfo{ .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .pNext = null, .semaphore = self.timeline, .value = completion, .stageMask = vk.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .deviceIndex = 0 };
         const submit = vk.VkSubmitInfo2{
             .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
             .pNext = null,
@@ -1290,12 +1397,12 @@ pub const Core = struct {
             .pWaitSemaphoreInfos = null,
             .commandBufferInfoCount = 1,
             .pCommandBufferInfos = &command_info,
-            .signalSemaphoreInfoCount = 0,
-            .pSignalSemaphoreInfos = null,
+            .signalSemaphoreInfoCount = 1,
+            .pSignalSemaphoreInfos = &signal,
         };
-        if (self.dp.queue_submit2(self.queue, 1, &submit, null) != vk.VK_SUCCESS or
-            self.dp.queue_wait_idle(self.queue) != vk.VK_SUCCESS)
-            return error.SynchronizationUnavailable;
+        if (self.dp.queue_submit2(self.queue, 1, &submit, null) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
+        self.timeline_value = completion;
+        self.uploads.appendAssumeCapacity(.{ .pool = pool, .staging = staging, .completion = completion });
         image.layout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
@@ -1322,6 +1429,12 @@ pub const Core = struct {
             vk.VK_QUEUE_FAMILY_IGNORED,
             vk.VK_QUEUE_FAMILY_IGNORED,
         );
+    }
+
+    pub fn acquirePresentImage(self: *Core, command: vk.VkCommandBuffer, image: vk.VkImage, initialized: bool) void {
+        // The layout transition must participate in the acquisition semaphore's
+        // execution dependency, including the first UNDEFINED-layout use.
+        self.imageBarrier(command, image, if (initialized) vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR else vk.VK_IMAGE_LAYOUT_UNDEFINED, vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, acquire_stage, acquire_stage, 0, vk.VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
     }
 
     pub fn acquireExternalImage(self: *Core, command: vk.VkCommandBuffer, image: vk.VkImage, initialized: bool) void {
@@ -1755,4 +1868,22 @@ test "configured Vulkan GPU restricts candidates to matching device names" {
     try std.testing.expect(matchesConfiguredGpu("Iris(R) Xe", "Intel(R) Iris(R) Xe Graphics"));
     try std.testing.expect(!matchesConfiguredGpu("NVIDIA", "Intel(R) Iris(R) Xe Graphics"));
     try std.testing.expect(!matchesConfiguredGpu("iris", "Intel(R) Iris(R) Xe Graphics"));
+}
+
+test "native image layout transitions depend on the acquisition wait stage" {
+    const Capture = struct {
+        var barrier: vk.VkImageMemoryBarrier2 = undefined;
+        fn record(_: vk.VkCommandBuffer, info: [*c]const vk.VkDependencyInfo) callconv(.winapi) void {
+            barrier = info[0].pImageMemoryBarriers[0];
+        }
+    };
+    var core: Core = undefined;
+    core.dp.cmd_pipeline_barrier2 = Capture.record;
+    inline for (.{ false, true }) |initialized| {
+        core.acquirePresentImage(null, null, initialized);
+        try std.testing.expect(Capture.barrier.srcStageMask & acquire_stage != 0);
+        try std.testing.expect(Capture.barrier.dstStageMask & vk.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT != 0);
+        try std.testing.expectEqual(vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, Capture.barrier.newLayout);
+        try std.testing.expectEqual(if (initialized) vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR else vk.VK_IMAGE_LAYOUT_UNDEFINED, Capture.barrier.oldLayout);
+    }
 }
