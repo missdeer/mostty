@@ -786,6 +786,7 @@ pub fn onAppGlyphReady(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?wi
         break :blk false;
     };
     if (uploaded) {
+        if (!result.failed and @import("../diag.zig").isEnabled()) std.log.info("glyph upload: surface={} cache={}", .{ result.surface_id, result.cache_gen });
         if (global.window) |*window| window.requestRender();
     }
     return 0;
@@ -826,5 +827,19 @@ pub fn onAppTestVulkanFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?
     }
     std.log.warn("Vulkan diagnostic presentation failure requested", .{});
     if (global.window) |*window| window.requestRender();
+    return 0;
+}
+
+pub fn onAppTestRendererDpi(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    const dpi = std.math.cast(u32, wparam) orelse return 0;
+    if (dpi != 96 and dpi != 144 and dpi != 192) return 0;
+    const window = if (global.window) |*value| value else return 0;
+    if (window.tabs.items.len == 0 or !global.renderer.supportsPanes()) return 0;
+    global.renderer.updateDpi(dpi);
+    window.bounds = null;
+    @import("../pane_native.zig").reflow(window);
+    window.requestRender();
+    std.log.info("diagnostic renderer DPI: {}", .{dpi});
     return 0;
 }
