@@ -22,7 +22,7 @@ pub const RasterResult = FontService.RasterResult;
 pub const FontConfig = FontService.FontConfig;
 pub const D3d11InitError = d3d11.InitError;
 /// Pane surfaces borrow process resources and own their mutable drawing state.
-pub const PaneSurface = @import("PaneSurface.zig");
+pub const PaneSurface = @import("pane_surface.zig");
 pub const scrollbarWidth = d3d11.scrollbarWidth;
 pub const default_primary_font_family = FontService.default_primary_font_family;
 pub const default_font_size_pt = FontService.default_font_size_pt;
@@ -804,7 +804,7 @@ test "pane facade retains shared infrastructure but isolates caches and update g
     try std.testing.expect(a.glyph_texture.obj != null and b.glyph_texture.obj != null);
     try std.testing.expect(a.glyph_texture.obj != b.glyph_texture.obj);
 
-    const Cache = @import("GlyphIndexCache.zig");
+    const Cache = @import("glyph_index_cache.zig");
     a.glyph_cache = try Cache.init(a.glyph_cache_arena.allocator(), 2);
     b.glyph_cache = try Cache.init(b.glyph_cache_arena.allocator(), 2);
     const key: Cache.Key = .init('x', &.{}, .single, .regular);

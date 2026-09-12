@@ -1734,7 +1734,7 @@ test "OpenGL panes share context and programs but own DCs buffers and glyph cach
     }
     const recovery_hwnd = try Windows.create(null);
     defer _ = win32.DestroyWindow(recovery_hwnd);
-    var facade: @import("Renderer.zig") = undefined;
+    var facade: @import("renderer.zig") = undefined;
     try facade.init(96, .{}, true, null, .opengl, false);
     defer facade.deinit();
     try std.testing.expect(facade.initializeWindow(recovery_hwnd, null) == null);

@@ -2,7 +2,7 @@ const PaneSurface = @This();
 
 const win32 = @import("win32").everything;
 const vt = @import("vt");
-const Renderer = @import("Renderer.zig");
+const Renderer = @import("renderer.zig");
 const d3d11 = @import("d3d11.zig");
 const d3d12 = @import("d3d12/renderer.zig");
 const gl46 = @import("gl46.zig");
