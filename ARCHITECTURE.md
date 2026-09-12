@@ -59,7 +59,7 @@ src/
     # Per-tab / per-pane plumbing
     child_process.zig      ConPTY spawn, env block, reader thread per pane
     tab_mgmt.zig           Windows tab, pane and session lifecycle
-    pane_native.zig        child HWNDs, per-pane D3D11 surfaces and layout reflow
+    pane_native.zig        child HWNDs, per-pane surfaces and layout reflow
     tab_bar.zig            tab-bar layout + hit testing (paint is in d3d11/)
 
     # Window procedure (UI thread) — split by message family
@@ -73,6 +73,7 @@ src/
 
     # Renderer
     Renderer.zig          stable facade + tagged backend union
+    PaneSurface.zig       pane backend dispatch, synchronization and cache lifetime
     RendererCommon.zig    backend-independent metrics/adapter state
     FontService.zig       process-lifetime DirectWrite/D2D + font D3D11 owner
     d3d11.zig              top-level renderer struct; init / render / resize / deinit
@@ -548,11 +549,22 @@ hands off key 1; D3D11 imports the texture on its own device, copies the result,
 then returns key 0. Atlas slots, result validation, and presentation remain
 backend responsibilities.
 
+The renderer facade gates pane support and dispatches main-window chrome.
+`PaneSurface` owns the pane backend and its last synchronized font generation;
+creation, synchronization, drawing, glyph delivery and teardown go through that
+wrapper. HWND layout and input routing do not inspect backend-specific fields.
+Only complete pane implementations enter its backend union; D3D11 is currently
+the sole member, and other renderers retain their explicit split restriction.
+The process renderer must outlive its pane surfaces.
+
 D3D11 creates the main chrome surface and one child-HWND surface per pane.
 `initSurface` retains the main device, context, shaders and dynamic constant
 buffers and borrows `FontService`; it does not repeat device/font initialization.
 Each surface owns its cell/shadow buffers, atlas, grid texture, image cache and
-swapchain. Font changes invalidate each surface before it draws again. Glyph
+swapchain. Font changes invalidate each surface before it draws again. D3D11 synchronizes
+background texture references and image settings through its surface hook;
+individual panes retain COM references until their next synchronization or
+teardown, without sharing glyph, cell or Kitty caches. Glyph
 jobs/results carry a stable surface ID as well as cache and slot generations.
 The main composition target is below child windows and clears pane regions to
 transparent, so a pane applies its own background opacity once.
@@ -672,7 +684,8 @@ retain the M5a CPU handoff. Observed vendor results live in
 
 ### 6.2 Per-frame orchestration
 
-`render.zig:renderWindow` paints main chrome then every visible D3D11 pane with
+`render.zig:renderWindow` dispatches main chrome through `Renderer` and paints
+every visible pane through `PaneSurface`, with
 its own terminal, selection, hover and focused-cursor state. Hidden sessions
 continue consuming PTY output. Research backends retain the single-surface
 facade path; requesting a split reports its D3D11 requirement without switching

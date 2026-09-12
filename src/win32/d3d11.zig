@@ -395,6 +395,25 @@ pub fn initSurface(parent: *D3d11Renderer, common: *RendererCommon) D3d11Rendere
     };
 }
 
+/// Synchronize retained background resources without sharing mutable pane caches.
+pub fn syncSurface(self: *D3d11Renderer, parent: *D3d11Renderer) void {
+    if (self.background_image.texture != parent.background_image.texture) {
+        self.background_image.release();
+        self.background_image = parent.background_image;
+        if (self.background_image.texture) |t| _ = t.IUnknown.AddRef();
+        if (self.background_image.view) |v| _ = v.IUnknown.AddRef();
+        self.grid_force_full = true;
+    }
+    if (self.bg_image_opacity != parent.bg_image_opacity or
+        self.bg_image_position != parent.bg_image_position or
+        self.bg_image_fit != parent.bg_image_fit or
+        self.bg_image_repeat != parent.bg_image_repeat) self.grid_force_full = true;
+    self.bg_image_opacity = parent.bg_image_opacity;
+    self.bg_image_position = parent.bg_image_position;
+    self.bg_image_fit = parent.bg_image_fit;
+    self.bg_image_repeat = parent.bg_image_repeat;
+}
+
 // --- Narrow GPU contract consumed by the backend-agnostic shared layer ---
 //
 // Everything above this line is D3D11's own business. These are the only

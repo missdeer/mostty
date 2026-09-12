@@ -67,3 +67,26 @@ with code 0. Results live under `tmp/pane-backend-<name>/result.json`.
 Research-backend multi-pane rendering is not claimed or silently emulated with
 D3D11. No physical mixed-DPI desktop, RDP multi-pane matrix, or macOS native
 pane interaction was tested in this Windows run.
+
+## Pane facade migration — MOSTTY-77
+
+Revalidated on September 12, 2026 after completing pane creation, synchronization,
+drawing, glyph delivery and teardown dispatch through PaneSurface, and capability
+and chrome dispatch through Renderer. This remains a D3D11 acceptance result;
+MOSTTY-78 through MOSTTY-81 track the remaining backends and combined acceptance.
+
+- Prescribed Zig 0.16.0 application build passed with D:/zig-cache.
+- Full tests: 45/45 steps succeeded; 248/250 tests passed. The two skips are
+  the macOS config-path test in two Windows roots. New facade tests ran against
+  real D3D11 resources, verifying shared device/context/shaders/FontService,
+  distinct cell buffers and atlases, per-pane glyph rejection, lazy font
+  invalidation, retained wallpaper references, image removal and scalar updates.
+- Full native runner: tools/pane-acceptance.ps1, run ID
+  e2a2808dc6264fd4825979ca9c9a6332, status pass. Four distinct shell PIDs,
+  matching ConPTY/VT sizes before and after font reload, all input/capture/IME
+  assertions, layout/session retention, output during resize and close actions passed.
+- Captures four-panes.png and font-theme-transparency.png were visually inspected.
+  Both connected monitors were 96 DPI; a physical mixed-DPI transition was unavailable.
+- Local evidence: tmp/MOSTTY-77-tests.log, tmp/MOSTTY-77-build.log,
+  tmp/MOSTTY-77-runtime.log and
+  tmp/pane-acceptance/result-e2a2808dc6264fd4825979ca9c9a6332.json.

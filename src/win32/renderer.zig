@@ -21,8 +21,8 @@ pub const BgImageDecoded = d3d11.BgImageDecoded;
 pub const RasterResult = FontService.RasterResult;
 pub const FontConfig = FontService.FontConfig;
 pub const D3d11InitError = d3d11.InitError;
-/// Per-pane surface handle owned by the selected process renderer.
-pub const PaneSurface = d3d11;
+/// Pane surfaces borrow process resources and own their mutable drawing state.
+pub const PaneSurface = @import("PaneSurface.zig");
 pub const scrollbarWidth = d3d11.scrollbarWidth;
 pub const default_primary_font_family = FontService.default_primary_font_family;
 pub const default_font_size_pt = FontService.default_font_size_pt;
@@ -379,16 +379,19 @@ fn deinitBackend(self: *Renderer) void {
     };
 }
 
-pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) ?PaneSurface {
-    const active = if (self.backend) |*backend| backend else return null;
-    return switch (active.*) {
-        .d3d11 => |*backend| d3d11.initSurface(backend, common),
-        else => null,
-    };
+pub fn supportsPanes(self: *const Renderer) bool {
+    return if (self.backend) |backend| backend == .d3d11 else false;
 }
 
-pub fn deinitPaneSurface(_: *Renderer, surface: *PaneSurface) void {
-    surface.deinit();
+pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) ?PaneSurface {
+    return PaneSurface.init(self, common);
+}
+
+pub fn renderChrome(self: *Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
+    switch (self.activeBackend().*) {
+        .d3d11 => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
+        else => unreachable, // Only reached after the pane capability gate.
+    }
 }
 
 pub fn cellSizeForDpi(self: *Renderer, dpi: u32) win32.SIZE {
@@ -648,8 +651,115 @@ test "font service owns font and raster lifecycle outside the backend" {
     }
 }
 
-test "pane surface lifecycle is exposed by the renderer facade" {
-    try std.testing.expect(@hasDecl(Renderer, "initPaneSurface"));
-    try std.testing.expect(@hasDecl(Renderer, "deinitPaneSurface"));
-    try std.testing.expectEqual(PaneSurface, d3d11);
+test "pane capability rejects unsupported or unavailable backends without changing selection" {
+    var renderer: Renderer = undefined;
+    renderer.backend = null;
+    try std.testing.expect(!renderer.supportsPanes());
+    try std.testing.expect(renderer.initPaneSurface(undefined) == null);
+    inline for (.{ Config.RendererBackend.d3d12, .opengl, .@"pure-opengl", .vulkan, .@"native-vulkan" }) |selected| {
+        renderer.configured_backend = selected;
+        renderer.backend = switch (selected) {
+            .d3d12 => .{ .d3d12 = undefined },
+            .opengl, .@"pure-opengl" => .{ .opengl = undefined },
+            .vulkan => .{ .vulkan = undefined },
+            .@"native-vulkan" => .{ .@"native-vulkan" = undefined },
+            else => unreachable,
+        };
+        try std.testing.expect(!renderer.supportsPanes());
+        try std.testing.expect(renderer.initPaneSurface(undefined) == null);
+        try std.testing.expectEqual(selected, renderer.configured_backend);
+    }
+}
+
+test "pane facade retains shared infrastructure but isolates caches and update generations" {
+    var renderer: Renderer = undefined;
+    try renderer.init(96, .{}, true, null, .d3d11, false);
+    defer renderer.deinit();
+    try std.testing.expect(renderer.supportsPanes());
+    var first_common = renderer.common;
+    first_common.surface_id = 1;
+    first_common.tab_bar_height = 0;
+    var second_common = first_common;
+    second_common.surface_id = 2;
+    var first = renderer.initPaneSurface(&first_common).?;
+    defer first.deinit();
+    var second = renderer.initPaneSurface(&second_common).?;
+    defer second.deinit();
+    const parent = &renderer.backend.?.d3d11;
+    const a = &first.backend.d3d11;
+    const b = &second.backend.d3d11;
+    try std.testing.expect(a.device == parent.device and b.device == parent.device);
+    try std.testing.expect(a.context == parent.context and b.context == parent.context);
+    try std.testing.expect(a.font_service == &renderer.font_service and b.font_service == &renderer.font_service);
+    try std.testing.expect(a.vertex_shader == parent.vertex_shader and b.vertex_shader == parent.vertex_shader);
+    try std.testing.expect(a.common == &first_common and b.common == &second_common);
+    try std.testing.expect(a.cellsResize(4) and b.cellsResize(4));
+    try std.testing.expect(a.shader_cells.cell_buf != b.shader_cells.cell_buf);
+    _ = a.atlasEnsure(.{ .x = 32, .y = 32 });
+    _ = b.atlasEnsure(.{ .x = 32, .y = 32 });
+    try std.testing.expect(a.glyph_texture.obj != null and b.glyph_texture.obj != null);
+    try std.testing.expect(a.glyph_texture.obj != b.glyph_texture.obj);
+
+    const Cache = @import("GlyphIndexCache.zig");
+    a.glyph_cache = try Cache.init(a.glyph_cache_arena.allocator(), 2);
+    b.glyph_cache = try Cache.init(b.glyph_cache_arena.allocator(), 2);
+    const key: Cache.Key = .init('x', &.{}, .single, .regular);
+    const reserved = (try a.glyph_cache.?.reserve(a.glyph_cache_arena.allocator(), key)).newly_reserved_pending;
+    _ = try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key);
+    var result: RasterResult = .{
+        .surface_id = first_common.surface_id,
+        .slot = reserved.index,
+        .slot_gen = reserved.slot_gen,
+        .cache_gen = a.cache_gen,
+        .key = key,
+        .bytes = &.{},
+        .w = 0,
+        .h = 0,
+        .is_color = false,
+        .failed = true,
+    };
+    try std.testing.expect(!second.applyGlyphResult(&result));
+    try std.testing.expect((try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key)) == .already_pending);
+    try std.testing.expect(first.applyGlyphResult(&result));
+
+    renderer.updateDpi(144);
+    first.sync(&renderer, true);
+    try std.testing.expect(a.glyph_cache == null);
+    try std.testing.expect(b.glyph_cache != null); // A hidden pane invalidates when synchronized.
+    try std.testing.expect(!first.applyGlyphResult(&result));
+    second.sync(&renderer, false);
+    try std.testing.expect(b.glyph_cache == null);
+    try std.testing.expect(first_common.focused and !second_common.focused);
+    try std.testing.expectEqual(renderer.common.cell_size.cx, first_common.cell_size.cx);
+    try std.testing.expectEqual(renderer.common.cell_size.cy, second_common.cell_size.cy);
+    try std.testing.expectEqual(@as(i32, 0), first_common.tab_bar_height);
+    try std.testing.expectEqual(@as(u32, 2), second_common.surface_id);
+    const generation = a.cache_gen;
+    first.sync(&renderer, true);
+    try std.testing.expectEqual(generation, a.cache_gen); // Unchanged fonts must not cancel pending work.
+
+    var pixels = [_]u8{ 0, 64, 128, 255 };
+    var decoded: BgImageDecoded = .{ .req_id = parent.bg_image_req_id, .path = @constCast("pane-test"), .pixels = &pixels, .w = 1, .h = 1 };
+    renderer.applyDecodedBackgroundImage(&decoded);
+    try std.testing.expect(parent.background_image.loaded());
+    first.sync(&renderer, true);
+    second.sync(&renderer, false);
+    const retained = a.background_image.texture.?;
+    try std.testing.expect(b.background_image.texture == retained);
+    a.grid_force_full = false;
+    first.sync(&renderer, true);
+    try std.testing.expect(!a.grid_force_full);
+    parent.bg_image_opacity = 0.5;
+    first.sync(&renderer, true);
+    try std.testing.expect(a.grid_force_full);
+    try std.testing.expectEqual(@as(f32, 0.5), a.bg_image_opacity);
+    decoded.pixels = null;
+    renderer.applyDecodedBackgroundImage(&decoded);
+    try std.testing.expect(!parent.background_image.loaded());
+    try std.testing.expect(a.background_image.texture == retained); // Pane retains its own COM reference.
+    first.sync(&renderer, true);
+    try std.testing.expect(!a.background_image.loaded());
+    try std.testing.expect(b.background_image.texture == retained);
+    second.sync(&renderer, false);
+    try std.testing.expect(!b.background_image.loaded());
 }

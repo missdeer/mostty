@@ -50,7 +50,7 @@ pub fn renderWindow(window: *Window) void {
             pane_rects[pane_rect_count] = .{ .left = @intFromFloat(@round(r.x)), .top = @intFromFloat(@round(r.y)), .right = @intFromFloat(@round(r.x + r.width)), .bottom = @intFromFloat(@round(r.y + r.height)) };
             pane_rect_count += 1;
         }
-        global.renderer.backend.?.d3d11.renderChrome(window.hwnd, window.active().term, tabbar, theme.background, global.config.background_opacity, window.remote_session, pane_rects[0..pane_rect_count]);
+        global.renderer.renderChrome(window.hwnd, window.active().term, tabbar, theme.background, global.config.background_opacity, window.remote_session, pane_rects[0..pane_rect_count]);
         for (window.panes.items) |pane| {
             if (pane.closing or pane.tab != window.activeTab() or pane.tab.layout.paneRect(pane.id) == null) continue;
             @import("pane_native.zig").syncSurface(pane);
@@ -59,7 +59,7 @@ pub fn renderWindow(window: *Window) void {
                 break :blk .{ .start_row = h.hit.start_row, .start_col = h.hit.start_col, .end_row = h.hit.end_row, .end_col = h.hit.end_col };
             } else null;
             const captured = win32.GetCapture() == pane.hwnd;
-            pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false }, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, if (captured and window.mouse_capture == .selecting) 1.0 else pane.selection_fade, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
+            pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, if (captured and window.mouse_capture == .selecting) 1.0 else pane.selection_fade, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
             _ = win32.ValidateRect(pane.hwnd.?, null);
         }
         return;

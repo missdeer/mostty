@@ -4,7 +4,7 @@ const state = @import("state.zig");
 const types = @import("types.zig");
 const global_mod = @import("global.zig");
 const global = global_mod.global;
-const d3d11 = @import("d3d11.zig");
+const Renderer = @import("Renderer.zig");
 const tab_mgmt = @import("tab_mgmt.zig");
 const geom = @import("window_geom.zig");
 const dispatch = @import("wnd/dispatch.zig");
@@ -14,7 +14,7 @@ var class_registered = false;
 const class_name = win32.L("MosttyPane");
 
 pub fn supported() bool {
-    return if (global.renderer.backend) |backend| backend == .d3d11 else false;
+    return global.renderer.supportsPanes();
 }
 
 fn create(window: *state.Window, pane: *state.Pane) void {
@@ -42,10 +42,6 @@ fn create(window: *state.Window, pane: *state.Pane) void {
     pane.common.blink_timer_armed = false;
     pane.renderer = global.renderer.initPaneSurface(&pane.common);
     if (pane.renderer == null) std.debug.panic("selected renderer cannot create a pane surface", .{});
-    pane.font_generation = switch (global.renderer.backend.?) {
-        .d3d11 => |backend| backend.cache_gen,
-        else => 0,
-    };
     pane.hwnd = win32.CreateWindowExW(
         .{ .NOREDIRECTIONBITMAP = 1 },
         class_name,
@@ -74,7 +70,7 @@ pub fn destroy(window: *state.Window, pane: *state.Pane) void {
             window.capture_pane_id = null;
             _ = win32.ReleaseCapture();
         }
-        if (pane.renderer) |*renderer| global.renderer.deinitPaneSurface(renderer);
+        if (pane.renderer) |*renderer| renderer.deinit();
         pane.renderer = null;
         _ = win32.DestroyWindow(hwnd);
         pane.hwnd = null;
@@ -112,7 +108,7 @@ pub fn reflow(window: *state.Window) void {
     const dpi = win32.dpiFromHwnd(window.hwnd);
     const gap: f64 = @max(4, @as(f64, @floatFromInt(dpi)) * 4 / 96);
     const minimum: state.SplitLayout.Size = .{
-        .width = @floatFromInt(cs.cx * 12 + @as(i32, d3d11.scrollbarWidth(dpi))),
+        .width = @floatFromInt(cs.cx * 12 + @as(i32, Renderer.scrollbarWidth(dpi))),
         .height = @floatFromInt(cs.cy * 2),
     };
     for (window.tabs.items) |tab| {
@@ -138,34 +134,7 @@ pub fn reflow(window: *state.Window) void {
 }
 
 pub fn syncSurface(pane: *state.Pane) void {
-    const parent = switch (global.renderer.backend.?) {
-        .d3d11 => |*backend| backend,
-        else => return,
-    };
-    const surface = &pane.renderer.?;
-    if (pane.font_generation != parent.cache_gen) {
-        surface.onFontStateChanged();
-        pane.font_generation = parent.cache_gen;
-    }
-    pane.common.focused = pane.tab.layout.active == pane.id;
-    pane.common.cell_size = global.renderer.common.cell_size;
-    pane.common.font_ligatures = global.renderer.common.font_ligatures;
-    pane.common.remote_or_software_adapter = global.renderer.common.remote_or_software_adapter;
-    if (surface.background_image.texture != parent.background_image.texture) {
-        surface.background_image.release();
-        surface.background_image = parent.background_image;
-        if (surface.background_image.texture) |t| _ = t.IUnknown.AddRef();
-        if (surface.background_image.view) |v| _ = v.IUnknown.AddRef();
-        surface.grid_force_full = true;
-    }
-    if (surface.bg_image_opacity != parent.bg_image_opacity or
-        surface.bg_image_position != parent.bg_image_position or
-        surface.bg_image_fit != parent.bg_image_fit or
-        surface.bg_image_repeat != parent.bg_image_repeat) surface.grid_force_full = true;
-    surface.bg_image_opacity = parent.bg_image_opacity;
-    surface.bg_image_position = parent.bg_image_position;
-    surface.bg_image_fit = parent.bg_image_fit;
-    surface.bg_image_repeat = parent.bg_image_repeat;
+    pane.renderer.?.sync(&global.renderer, pane.tab.layout.active == pane.id);
 }
 
 pub fn focusActive(window: *state.Window) void {
