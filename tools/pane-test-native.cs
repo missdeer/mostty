@@ -141,4 +141,21 @@ public static class PaneAcceptance {
         }
         if(SendInput((uint)inputs.Length,inputs,Marshal.SizeOf<INPUT>())!=inputs.Length) throw new Exception("SendInput failed");
     }
+
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [StructLayout(LayoutKind.Sequential)] private struct CURSORINFO {public uint size,flags;public IntPtr cursor;public POINT point;}
+    [DllImport("user32.dll")] private static extern bool GetCursorInfo(ref CURSORINFO info);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr LoadCursorW(IntPtr instance,IntPtr name);
+    public static bool HoverIsLink(IntPtr root,int pid,IntPtr pane,int localX,int localY){
+        var r=Box(pane);var point=new POINT{x=r.Left+localX,y=r.Top+localY};uint actual;
+        GetWindowThreadProcessId(WindowFromPoint(point),out actual);
+        if(actual!=pid)throw new Exception("Refusing hover outside test process");
+        SetCursorPos(point.x,point.y);System.Threading.Thread.Sleep(150);Responsive(root);
+        UIntPtr result;
+        if(SendMessageTimeoutW(pane,0x20,new UIntPtr(unchecked((ulong)pane.ToInt64())),new IntPtr((0x200<<16)|1),2,1000,out result)==IntPtr.Zero)throw new Exception("Cursor query timed out");
+        var info=new CURSORINFO{size=(uint)Marshal.SizeOf<CURSORINFO>()};
+        if(!GetCursorInfo(ref info))throw new Exception("Cursor state unavailable");
+        return info.cursor==LoadCursorW(IntPtr.Zero,new IntPtr(32649));
+    }
 }

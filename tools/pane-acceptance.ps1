@@ -12,10 +12,154 @@ Add-Type -AssemblyName System.Windows.Forms
 if (-not ('PaneAcceptance' -as [type])) {
     Add-Type -Path (Join-Path $PSScriptRoot 'pane-test-native.cs')
 }
+$previousDpiContext=[PaneAcceptance]::SetThreadDpiAwarenessContext([IntPtr](-4))
+function Get-PaneMetrics([IntPtr]$Pane){
+    $pattern='pane size: id=(\d+) hwnd={0} vt=(\d+)x(\d+) cell=(\d+)x(\d+)' -f $Pane.ToInt64()
+    $entries=@(Select-String -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') -Pattern $pattern)
+    if($entries.Count -eq 0){throw 'Missing current pane metrics'}
+    $g=$entries[-1].Matches[0].Groups
+    return [pscustomobject]@{Id=[int]$g[1].Value;Columns=[int]$g[2].Value;Rows=[int]$g[3].Value;CellWidth=[int]$g[4].Value;CellHeight=[int]$g[5].Value}
+}
+function Assert-PaneGeometry([IntPtr]$Pane){
+    $m=Get-PaneMetrics $Pane
+    $rect=[PaneAcceptance]::Box($Pane)
+    $scrollbar=[Math]::Round(14*[PaneAcceptance]::GetDpiForWindow($Pane)/96,[MidpointRounding]::AwayFromZero)
+    $columns=[Math]::Max(1,[Math]::Floor(($rect.Right-$rect.Left-$scrollbar)/$m.CellWidth))
+    $rows=[Math]::Max(1,[Math]::Floor(($rect.Bottom-$rect.Top)/$m.CellHeight))
+    if($m.Columns -ne $columns -or $m.Rows -ne $rows){throw 'Pane grid does not match its physical region'}
+}
+function Assert-PaneColor([IntPtr]$Pane,[Drawing.Color]$Expected){
+    $rect=[PaneAcceptance]::Box($Pane)
+    $sample=[Drawing.Bitmap]::new(1,1);$graphics=[Drawing.Graphics]::FromImage($sample)
+    try{
+        $graphics.CopyFromScreen($rect.Left+5,$rect.Top+5,0,0,$sample.Size)
+        $actual=$sample.GetPixel(0,0)
+        if([Math]::Abs([int]$actual.R-$Expected.R) -gt 12 -or [Math]::Abs([int]$actual.G-$Expected.G) -gt 12 -or [Math]::Abs([int]$actual.B-$Expected.B) -gt 12){throw 'Hidden output was not rendered in the correct pane'}
+    }finally{$graphics.Dispose();$sample.Dispose()}
+}
+function Test-HiddenOutput([int]$Phase){
+    $python=(Get-Command python).Source
+    $probe=Join-Path $projectRoot 'tools/pane-output-probe.py'
+    $outputs=@()
+    for($i=0;$i -lt 4;$i++){
+        $out=Join-Path $outputRoot "hidden-$runId-$Phase-$i.txt";$outputs+=$out
+        Send-Command $panes[$i] ('"{0}" "{1}" hidden {2} "{3}" --phase {4}' -f $python,$probe,$i,$out,$Phase)
+    }
+    foreach($out in $outputs){Wait-File ([IO.Path]::ChangeExtension($out,'.ready'))}
+    if($Phase -eq 0){Chord @(0x11,0x32)}else{Chord @(0x11,0x10,0x0D)}
+    $null=Wait-Panes 1
+    foreach($out in $outputs){[IO.File]::WriteAllText([IO.Path]::ChangeExtension($out,'.go'),'go')}
+    foreach($out in $outputs){Wait-File $out}
+    if($Phase -eq 0){Chord @(0x11,0x31)}else{Chord @(0x11,0x10,0x0D)}
+    $restored=Wait-Panes 4
+    if(@(Compare-Object @($panes | ForEach-Object ToInt64) @($restored | ForEach-Object ToInt64)).Count -ne 0){throw 'Visibility restoration rebuilt pane HWNDs'}
+    Start-Sleep -Milliseconds 400
+    $colors=@([Drawing.Color]::Red,[Drawing.Color]::Lime,[Drawing.Color]::Blue,[Drawing.Color]::Yellow)
+    $pids=@()
+    for($i=0;$i -lt 4;$i++){
+        Assert-PaneColor $panes[$i] $colors[($i+$Phase)%4]
+        $parts=[IO.File]::ReadAllText($outputs[$i]).Trim().Split(',')
+        if($parts[1] -ne [IO.Path]::GetFileNameWithoutExtension($outputs[$i])){throw 'Stale hidden output probe'}
+        $pids+=[int]$parts[0]
+    }
+    if(@($pids | Select-Object -Unique).Count -ne 4){throw 'Hidden panes did not retain independent shells'}
+    if($Phase -eq 0){$result.hidden_shell_pids=$pids;$result.background_tab_output='pass'}else{
+        if(@(Compare-Object $result.hidden_shell_pids $pids).Count -ne 0){throw 'Maximize restoration restarted a shell'}
+        $result.maximized_hidden_output='pass'
+    }
+    Capture "hidden-output-$Phase"
+}
+function Test-UrlHover {
+    $python=(Get-Command python).Source
+    $probe=Join-Path $projectRoot 'tools/pane-output-probe.py'
+    for($i=0;$i -lt 4;$i++){
+        $out=Join-Path $outputRoot "url-$runId-$i.txt"
+        Send-Command $panes[$i] ('"{0}" "{1}" url {2} "{3}"' -f $python,$probe,$i,$out)
+        Wait-File $out
+    }
+    Start-Sleep -Milliseconds 400
+    $focused=[PaneAcceptance]::Focus($window)
+    for($i=0;$i -lt 4;$i++){
+        $m=Get-PaneMetrics $panes[$i]
+        if(-not [PaneAcceptance]::HoverIsLink($window,$app.Id,$panes[$i],(3*$m.CellWidth+2),(2*$i*$m.CellHeight+5))){throw "URL hover missed pane $i"}
+        if([PaneAcceptance]::HoverIsLink($window,$app.Id,$panes[$i],(3*$m.CellWidth+2),((2*$i+1)*$m.CellHeight+5))){throw "URL hover leaked to non-link text in pane $i"}
+        if([PaneAcceptance]::Focus($window) -ne $focused){throw 'URL hover changed keyboard focus'}
+    }
+    $result.url_hover='pass: pane-specific URL rows and non-link rows; focus retained'
+    Capture 'url-hover'
+}
+function Test-RendererDpi {
+    $original=[PaneAcceptance]::GetDpiForWindow($window)
+    $target=if($original -eq 144){192}else{144}
+    $before=@($panes | ForEach-Object {Get-PaneMetrics $_})
+    $python=(Get-Command python).Source
+    foreach($dpi in @($target,$original)){
+        [void][PaneAcceptance]::PostMessageW($window,0x8009,[UIntPtr]$dpi,[IntPtr]::Zero)
+        $deadline=[DateTime]::UtcNow.AddSeconds(8)
+        do{Start-Sleep -Milliseconds 100;$changed=Select-String -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') -SimpleMatch "diagnostic renderer DPI: $dpi"}while(-not $changed -and [DateTime]::UtcNow -lt $deadline)
+        if(-not $changed){throw 'Renderer DPI diagnostic did not complete'}
+        for($i=0;$i -lt 4;$i++){
+            Send-Command $panes[$i] ('"{0}" -c "import os; s=os.get_terminal_size(2); print(s.columns,s.lines,os.getppid(),sep='','')" > dpi-{1}-{2}-{3}.txt & echo ready > dpi-{1}-{2}-{3}.txt.ready' -f $python,$runId,$dpi,$i)
+        }
+        for($i=0;$i -lt 4;$i++){
+            $out=Join-Path $outputRoot "dpi-$runId-$dpi-$i.txt"
+            Wait-File "$out.ready"
+            $values=[IO.File]::ReadAllText($out).Trim().Split(',')
+            $m=Get-PaneMetrics $panes[$i]
+            Assert-PaneGeometry $panes[$i]
+            if([int]$values[0] -ne $m.Columns -or [int]$values[1] -ne $m.Rows -or [int]$values[2] -ne $shellPids[$i]){throw 'Renderer DPI reflow changed a session or left mismatched PTY/VT sizes'}
+            if($dpi -eq $original){if($m.CellWidth -ne $before[$i].CellWidth -or $m.CellHeight -ne $before[$i].CellHeight){throw 'Renderer DPI restore did not restore font metrics'}}
+            elseif($m.CellWidth -eq $before[$i].CellWidth){throw 'Renderer DPI change did not update cell metrics'}
+        }
+        $phase=if($dpi -eq $original){1}else{0}
+        for($i=0;$i -lt 4;$i++){
+            $out=Join-Path $outputRoot "dpi-glyphs-$runId-$dpi-$i.txt"
+            Send-Command $panes[$i] ('"{0}" "{1}" glyphs {2} "{3}" --phase {4}' -f $python,(Join-Path $projectRoot 'tools/pane-output-probe.py'),$i,$out,$phase)
+        }
+        for($i=0;$i -lt 4;$i++){Wait-File (Join-Path $outputRoot "dpi-glyphs-$runId-$dpi-$i.txt")}
+        $deadline=[DateTime]::UtcNow.AddSeconds(8)
+        do{
+            $settled=$true
+            for($i=0;$i -lt 4;$i++){
+                $m=Get-PaneMetrics $panes[$i];$rect=[PaneAcceptance]::Box($panes[$i])
+                $length=('DPI{0}_ABC123xyz' -f $i).Length
+                $bitmap=[Drawing.Bitmap]::new($length*$m.CellWidth,$m.CellHeight)
+                $graphics=[Drawing.Graphics]::FromImage($bitmap)
+                try{
+                    $graphics.CopyFromScreen($rect.Left,$rect.Top,0,0,$bitmap.Size)
+                    $marker=$bitmap.GetPixel(0,0)
+                    $marked=if($phase -eq 0){$marker.B -ge 100 -and $marker.B -le 170 -and $marker.R -lt 15 -and $marker.G -lt 15}else{$marker.R -ge 100 -and $marker.R -le 170 -and $marker.B -lt 15 -and $marker.G -lt 15}
+                    if(-not $marked){$settled=$false;continue}
+                    for($column=0;$column -lt $length;$column++){
+                        $ink=$false
+                        for($y=0;$y -lt $m.CellHeight -and -not $ink;$y++){
+                            for($x=1;$x -lt $m.CellWidth-1;$x++){
+                                $pixel=$bitmap.GetPixel($column*$m.CellWidth+$x,$y)
+                                if([int]$pixel.R+[int]$pixel.G+[int]$pixel.B -gt 300){$ink=$true;break}
+                            }
+                        }
+                        if(-not $ink){$settled=$false;break}
+                    }
+                }finally{$graphics.Dispose();$bitmap.Dispose()}
+            }
+            if(-not $settled){[PaneAcceptance]::Responsive($window);Start-Sleep -Milliseconds 100}
+        }while(-not $settled -and [DateTime]::UtcNow -lt $deadline)
+        if(-not $settled){throw 'DPI glyph rows did not settle in every pane'}
+        Capture "renderer-dpi-$dpi"
+    }
+    $result.renderer_dpi_change="pass: renderer $original->$target->$original; cells, settled glyphs, PTY/VT geometry and PIDs verified"
+}
 function Wait-Panes([int]$Count) {
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
     do {
         if ($script:app.HasExited) { throw "Test app exited: $($script:app.ExitCode)" }
+        $dialog=[PaneAcceptance]::Dialog($script:app.Id)
+        if($dialog -ne [IntPtr]::Zero -and [PaneAcceptance]::DialogText($dialog) -match 'Mostty Renderer Fallback'){
+            $reason=[PaneAcceptance]::DialogText($dialog)
+            [PaneAcceptance]::ClickDialogButton($dialog,7)
+            if(-not $app.WaitForExit(8000)){throw 'Declining unsupported renderer fallback did not exit'}
+            throw [NotSupportedException]::new($reason)
+        }
         $panes = [PaneAcceptance]::Panes($script:window)
         if ($panes.Count -eq $Count) { return ,$panes }
         Start-Sleep -Milliseconds 100
@@ -155,7 +299,7 @@ if($VulkanValidation){
 $script:app = [Diagnostics.Process]::Start($start)
 if($VulkanValidation){$validationStdout=$app.StandardOutput.ReadToEndAsync();$validationStderr=$app.StandardError.ReadToEndAsync()}
 $script:window = [IntPtr]::Zero
-$result = [ordered]@{ renderer = $Renderer; process_id = $app.Id; run_id = $runId; status = 'running' }
+$result = [ordered]@{ executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $projectRoot 'zig-out/bin/Mostty.exe')).Hash; renderer = $Renderer; process_id = $app.Id; run_id = $runId; status = 'running' }
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
@@ -181,6 +325,10 @@ try {
     $result.directional_focus = 'pass'
     Chord @(0x11,0x10,0x45)
     $panes = Wait-Panes 4
+    if($Renderer -eq 'd3d11'){
+        if(@(Select-String -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') -SimpleMatch 'd3d: D3D11 device created:').Count -ne 1){throw 'Missing unique D3D11 renderer device evidence'}
+        $result.backend_identity='D3D11 renderer with four native panes'
+    }
     if($Renderer -eq 'd3d12'){
         $devices=@(Select-String -LiteralPath (Join-Path $outputRoot 'tmp\mostty-diag.log') -Pattern 'd3d12: pane created: id=(\d+) device=(0x[0-9a-f]+) queue=(0x[0-9a-f]+)')
         if($devices.Count -lt 4){throw 'Missing actual renderer pane creation evidence'}
@@ -270,12 +418,30 @@ try {
     if ([PaneAcceptance]::Focus($window) -ne $focusBefore) { throw 'Divider drag stole pane focus' }
     $result.divider_drag = 'pass'
     Capture 'dragged-divider'
+    $left=[PaneAcceptance]::Box($panes[0]);$right=[PaneAcceptance]::Box($panes[2])
+    $startX=[int](($left.Right+$right.Left)/2)
+    [PaneAcceptance]::Drag($window,$app.Id,$startX,($left.Top+50),($left.Left+10),($left.Top+50))
+    foreach($paneHandle in $panes){Assert-PaneGeometry $paneHandle;$m=Get-PaneMetrics $paneHandle;if($m.Columns -lt 12 -or $m.Rows -lt 2){throw 'Divider violated pane minimum dimensions'}}
+    $minimum=Get-PaneMetrics $panes[0]
+    if($minimum.Columns -ne 12){throw 'Divider did not clamp to the expected minimum'}
+    [PaneAcceptance]::ClickPane($window,$app.Id,$panes[0],25,30)
+    $beforeRefusal=@(Get-Content -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log')).Count
+    Chord @(0x11,0x10,0x44)
+    $null=Wait-Panes 4
+    $refusal=@(Get-Content -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') | Select-Object -Skip $beforeRefusal | Select-String -SimpleMatch ("pane {0} is too small to split" -f $minimum.Id))
+    if($refusal.Count -eq 0){throw 'Minimum-size split rejection was not observed'}
+    $left=[PaneAcceptance]::Box($panes[0]);$right=[PaneAcceptance]::Box($panes[2])
+    [PaneAcceptance]::Drag($window,$app.Id,([int](($left.Right+$right.Left)/2)),($left.Top+50),$startX,($left.Top+50))
+    $result.minimum_size='pass: clamped to 12 columns and refused a further split'
     Chord @(0x11,0x54)
     $otherTab = Wait-Panes 1
     Chord @(0x11,0x31)
     $tabRestored = Wait-Panes 4
     if (@(Compare-Object @($panes | ForEach-Object ToInt64) @($tabRestored | ForEach-Object ToInt64)).Count -ne 0) { throw 'Tab switch rebuilt pane HWNDs' }
     $result.tab_retention = 'pass'
+    Test-HiddenOutput 0
+    Test-HiddenOutput 1
+    Test-UrlHover
     # Probe actual ConPTY input bytes; posted shell setup targets each known HWND.
     $python = (Get-Command python).Source
     $probe = Join-Path $projectRoot 'tools\pane-input-probe.py'
@@ -371,13 +537,23 @@ try {
     $null = Wait-Panes 1
     Send-Command $otherTab[0] 'exit'
     $null = Wait-Panes 4
-    foreach ($pane in $panes) { Send-Command $pane 'powershell.exe -NoProfile -Command "1..200 | ForEach-Object { Write-Output (''sustained-output-'' + $_); Start-Sleep -Milliseconds 10 }"' }
+    $streamOutputs=@()
+    for($i=0;$i -lt 4;$i++){
+        $out=Join-Path $outputRoot "stream-$runId-$i.txt";$streamOutputs+=$out
+        Send-Command $panes[$i] ('"{0}" "{1}" stream {2} "{3}"' -f (Get-Command python).Source,(Join-Path $projectRoot 'tools/pane-output-probe.py'),$i,$out)
+    }
+    foreach($out in $streamOutputs){Wait-File ([IO.Path]::ChangeExtension($out,'.ready'))}
+    foreach($out in $streamOutputs){[IO.File]::WriteAllText([IO.Path]::ChangeExtension($out,'.go'),'go')}
+    foreach($out in $streamOutputs){Wait-File ([IO.Path]::ChangeExtension($out,'.started'));if(Test-Path -LiteralPath $out){throw 'Output completed before the resize exercise'}}
+    $left=[PaneAcceptance]::Box($panes[0]);$right=[PaneAcceptance]::Box($panes[2]);$dragX=[int](($left.Right+$right.Left)/2)
+    [PaneAcceptance]::Drag($window,$app.Id,$dragX,($left.Top+50),($dragX+40),($left.Top+50))
+    $result.output_divider_responsiveness='pass'
     for ($step=0; $step -lt 12; $step++) {
         [void][PaneAcceptance]::SetWindowPos($window,[IntPtr]::Zero,60,40,(950+($step%3)*60),(650+($step%2)*80),0x14)
         [PaneAcceptance]::Responsive($window)
         Start-Sleep -Milliseconds 90
     }
-    Start-Sleep -Seconds 3
+    foreach($out in $streamOutputs){Wait-File $out}
     $result.output_resize_responsiveness = 'pass'
     $focusBeforeWheel=[PaneAcceptance]::Focus($window)
     [PaneAcceptance]::Wheel($window,$app.Id,$panes[2],600)
@@ -406,10 +582,13 @@ try {
         if ($null -eq $entry) { throw 'Missing VT size evidence' }
         $groups = $entry.Matches[0].Groups
         if ([int]$parts[1] -ne [int]$groups[1].Value -or [int]$parts[2] -ne [int]$groups[2].Value) { throw "ConPTY/VT size mismatch in pane $i" }
+        Assert-PaneGeometry $panes[$i]
         $shellPids += [int]$parts[3]
         $sizes += [ordered]@{ hwnd=$panes[$i].ToInt64(); columns=[int]$parts[1]; rows=[int]$parts[2] }
     }
     if (@($shellPids | Select-Object -Unique).Count -ne 4) { throw 'Panes did not report independent shell processes' }
+    if(@(Compare-Object $result.hidden_shell_pids $shellPids).Count -ne 0){throw 'Layout/visibility operations restarted a shell'}
+    $result.pty_region_match='pass'
     $result.pty_vt_sizes = $sizes
     $result.shell_process_ids = $shellPids
     Capture 'output-resize'
@@ -486,7 +665,7 @@ try {
         $result.transparency_blur='unsupported: opaque native surface; request explicitly rejected'
     }else{$result.transparency_blur='pass'}
     Capture 'font-theme-transparency'
-    if($Renderer -ne 'd3d11'){
+    & {
         $imageProbe=Join-Path $projectRoot 'tools/pane-image-probe.py'
         for($i=0;$i -lt 4;$i++){
             $ready=Join-Path $outputRoot "image-$runId-$i.ready"
@@ -553,6 +732,7 @@ try {
         Capture 'wallpaper-removed'
         }
     }
+    Test-RendererDpi
     $monitors=[PaneAcceptance]::Monitors()
     $result.monitor_dpi=@($monitors | ForEach-Object {$_.Dpi})
     foreach($monitor in $monitors){
@@ -564,20 +744,27 @@ try {
     }
     [void][PaneAcceptance]::SetWindowPos($window,[IntPtr]::Zero,60,40,1050,730,0x14)
     $result.monitor_move='pass'
+    $result.dpi_transition=if(@($monitors | ForEach-Object {$_.Dpi} | Select-Object -Unique).Count -gt 1){'observed mixed-DPI monitors; inspect per-transition evidence'}else{'unverified: both monitors have the same DPI'}
 
 
 
+    $glyphDeliveries=@(Select-String -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') -Pattern 'glyph upload: surface=(\d+) cache=')
+    $glyphIds=@($glyphDeliveries | ForEach-Object {[int]$_.Matches[0].Groups[1].Value} | Select-Object -Unique)
+    foreach($paneHandle in $panes){if($glyphIds -notcontains (Get-PaneMetrics $paneHandle).Id){throw 'No asynchronous glyph upload observed for a pane'}}
+    $result.async_glyph_delivery='pass: uploads observed for every original pane'
     Test-CloseActions
     $result.status = if($result.ime -eq 'pass' -and $result.transparency_blur -notlike 'unsupported*'){'pass'}else{'partial'}
 } catch {
-    $result.status = 'fail'
+    $result.status = if($_.Exception -is [NotSupportedException]){'unsupported'}else{'fail'}
     $result.error = $_.Exception.Message
     if ($window -ne [IntPtr]::Zero -and -not $app.HasExited) { Capture 'failure' }
-    throw
+    if($result.status -ne 'unsupported'){throw}
 } finally {
     if (-not $KeepRunning -and -not $app.HasExited) { $app.Kill(); $app.WaitForExit() }
     $validationFailed=$false
-    if($VulkanValidation -and -not $app.HasExited){
+    if($VulkanValidation -and $result.status -eq 'unsupported'){
+        $result.vulkan_validation='unverified: backend startup unavailable'
+    }elseif($VulkanValidation -and -not $app.HasExited){
         $result.vulkan_validation='unverified: process still running';$validationFailed=$true
     }elseif($VulkanValidation){
         $validationText=$validationStdout.GetAwaiter().GetResult()+[Environment]::NewLine+$validationStderr.GetAwaiter().GetResult()
@@ -600,5 +787,6 @@ try {
     $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot 'result.json') -Encoding utf8
     $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot "result-$runId.json") -Encoding utf8
     $result | ConvertTo-Json -Depth 6
+    if($previousDpiContext -ne [IntPtr]::Zero){$null=[PaneAcceptance]::SetThreadDpiAwarenessContext($previousDpiContext)}
     if($validationFailed){throw "Vulkan validation did not pass; inspect $validationLog"}
 }

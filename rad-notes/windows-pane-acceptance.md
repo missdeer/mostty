@@ -203,3 +203,14 @@ native pane implementations. Combined final acceptance remains MOSTTY-81.
   or counted as passes. The runner marks native alpha limitations explicitly.
 - Evidence is preserved under tmp/MOSTTY-80-evidence with separate mode logs,
   validation output, result files and inspected captures.
+
+## Combined six-backend matrix — MOSTTY-81
+
+Verified on September 12, 2026 using one final executable and one unchanged acceptance-source snapshot. Matrix ID: 16c2008a47f54283b7dcbace8d624468.
+
+- Build and tests completed before the cases: 45/45 build steps succeeded, 254/256 tests passed, with the two existing macOS config-path skips.
+- The matrix ran d3d11, d3d12, opengl, pure-opengl, vulkan and native-vulkan. All six cases passed four-pane mixed nested layout, independent shells, minimum-size clamp/rejection, divider/focus/maximize/tab retention, hidden output restoration, URL targeting, keyboard/IME/paste/selection/scroll/mouse capture, sustained output during divider/window resize, PTY/VT/region agreement, renderer 96->144->96 DPI reflow with settled glyphs, font/theme/background/Kitty/alpha checks, async glyph delivery, isolated close and shutdown.
+- Every case reported backend identity and four pane/shell identities; all cases used executable SHA-256 2A0FAF18E6FC4F0397D93FCD336D1A30A3BD8A7624EEB4D2A1F2F9B224D2AD1F.
+- Vulkan and native-vulkan each recorded two validation-layer instances and zero synchronization errors. Matrix source-hash guards and summary contract tests passed; failed or incomplete fixture cases were rejected.
+- Evidence archive: tmp/six-backend-16c2008a47f54283b7dcbace8d624468.zip. It contains metadata with source commit 00e106e2ce73cc727c0973b5013861a53bdaff6e, Zig 0.16.0, executable/source hashes, per-backend results, logs, validation output and copied reproduction scripts. Captures from all six four-pane cases and representative DPI/hidden-output views were inspected.
+- Physical mixed-DPI transitions remain unverified because both monitors are 96 DPI. RDP, physical GPU resets, opaque-only native WSI and legacy Vulkan without present-wait remain outside this local matrix and are not counted.

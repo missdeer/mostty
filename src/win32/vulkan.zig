@@ -858,6 +858,16 @@ fn recordAndPresentBridge(self: *VulkanRenderer, prepared: PreparedFrame) !Prese
     return if (resized) .swapchain_recreated else .presented;
 }
 
+fn paneClearRect(rect: win32.RECT, extent: vk.VkExtent2D) ?vk.VkClearRect {
+    // Window dimensions can change before the next layout reflow reaches paint.
+    const left = std.math.clamp(@as(i64, rect.left), 0, @as(i64, extent.width));
+    const top = std.math.clamp(@as(i64, rect.top), 0, @as(i64, extent.height));
+    const right = std.math.clamp(@as(i64, rect.right), 0, @as(i64, extent.width));
+    const bottom = std.math.clamp(@as(i64, rect.bottom), 0, @as(i64, extent.height));
+    if (right <= left or bottom <= top) return null;
+    return .{ .rect = .{ .offset = .{ .x = @intCast(left), .y = @intCast(top) }, .extent = .{ .width = @intCast(right - left), .height = @intCast(bottom - top) } }, .baseArrayLayer = 0, .layerCount = 1 };
+}
+
 fn recordTarget(
     self: *VulkanRenderer,
     command: vk.VkCommandBuffer,
@@ -924,7 +934,7 @@ fn recordTarget(
         core.dp.cmd_clear_attachments(command, 1, &fill, 1, &whole);
         const transparent = vk.VkClearAttachment{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = clear };
         for (rects) |rect| {
-            const hole = vk.VkClearRect{ .rect = .{ .offset = .{ .x = rect.left, .y = rect.top }, .extent = .{ .width = @intCast(rect.right - rect.left), .height = @intCast(rect.bottom - rect.top) } }, .baseArrayLayer = 0, .layerCount = 1 };
+            const hole = paneClearRect(rect, extent) orelse continue;
             core.dp.cmd_clear_attachments(command, 1, &transparent, 1, &hole);
         }
     } else {
@@ -1304,4 +1314,18 @@ test "Vulkan panes share device pipelines and fonts while owning frames and pres
             try std.testing.expect(a.bridge.?.presenter.surface.swap_chain != b.bridge.?.presenter.surface.swap_chain);
         }
     }
+}
+
+test "pane clears stay within a resized framebuffer while layout catches up" {
+    const extent = vk.VkExtent2D{ .width = 934, .height = 611 };
+    const stale = win32.RECT{ .left = 484, .top = 36, .right = 1084, .bottom = 721 };
+    const clipped = paneClearRect(stale, extent).?.rect;
+    try std.testing.expectEqual(extent.width, @as(u32, @intCast(clipped.offset.x)) + clipped.extent.width);
+    try std.testing.expectEqual(extent.height, @as(u32, @intCast(clipped.offset.y)) + clipped.extent.height);
+    try std.testing.expect(paneClearRect(.{ .left = 1000, .top = 0, .right = 1100, .bottom = 20 }, extent) == null);
+    const negative = paneClearRect(.{ .left = -5, .top = -4, .right = 12, .bottom = 14 }, extent).?.rect;
+    try std.testing.expectEqual(@as(i32, 0), negative.offset.x);
+    try std.testing.expectEqual(@as(i32, 0), negative.offset.y);
+    try std.testing.expectEqual(@as(u32, 12), negative.extent.width);
+    try std.testing.expect(paneClearRect(stale, .{ .width = 0, .height = 0 }) == null);
 }
