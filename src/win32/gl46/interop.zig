@@ -2,8 +2,8 @@
 //!
 //! The OpenGL renderer remains complete without this module. The bridge owns
 //! only a multithread-capable D3D11 presentation device, the cross-API render
-//! target, and the DirectComposition tree. Any capability or runtime failure
-//! detaches that tree and leaves the caller on the baseline WGL path.
+//! target, and the DirectComposition tree. The caller selects baseline WGL
+//! after a capability failure and coordinates rebuilding after a runtime fault.
 
 const std = @import("std");
 const win32 = @import("win32").everything;
@@ -37,7 +37,8 @@ pub const State = enum {
     }
 };
 
-const Error = error{
+pub const Error = error{
+    FrameBusy,
     ProceduresUnavailable,
     DeviceUnavailable,
     ShaderUnavailable,
@@ -108,11 +109,12 @@ pub const Bridge = struct {
     locked: bool = false,
     active: bool = true,
     surface_verified: bool = false,
+    pane: bool = false,
 
-    pub fn init(hwnd: win32.HWND, width: u32, height: u32) Error!Bridge {
+    pub fn init(hwnd: win32.HWND, width: u32, height: u32, parent: ?*Bridge) Error!Bridge {
         const procs = Procs.load() orelse return error.ProceduresUnavailable;
 
-        var presenter = dcomp_blit.Presenter.init(hwnd, width, height, null) catch |err| switch (err) {
+        var presenter = (if (parent) |p| dcomp_blit.Presenter.initSurface(&p.presenter, hwnd, width, height) else dcomp_blit.Presenter.initLayer(hwnd, width, height, null, false)) catch |err| switch (err) {
             error.DeviceUnavailable => return error.DeviceUnavailable,
             error.ShaderUnavailable => return error.ShaderUnavailable,
             else => return error.CompositionUnavailable,
@@ -129,6 +131,7 @@ pub const Bridge = struct {
 
         var bridge: Bridge = .{
             .procs = procs,
+            .pane = parent != null,
             .presenter = presenter,
             .interop_device = interop_device,
             .framebuffer = framebuffer,
@@ -158,7 +161,9 @@ pub const Bridge = struct {
         if (self.width != width or self.height != height) {
             try self.recreateSurface(width, height);
         }
-        self.presenter.waitForFrame();
+        if (self.pane) {
+            if (!self.presenter.frameReady()) return error.FrameBusy;
+        } else self.presenter.waitForFrame();
         try self.lock();
         gl.BindFramebuffer(gl.FRAMEBUFFER, self.framebuffer);
         if (!self.surface_verified) {

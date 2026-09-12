@@ -1,9 +1,9 @@
-param([switch]$KeepRunning, [switch]$ImeOnly, [switch]$CloseOnly, [ValidateSet('d3d11','d3d12')][string]$Renderer='d3d11', [switch]$TestRecovery)
+param([switch]$KeepRunning, [switch]$ImeOnly, [switch]$CloseOnly, [ValidateSet('d3d11','d3d12','opengl','pure-opengl')][string]$Renderer='d3d11', [switch]$TestRecovery)
 $ErrorActionPreference = 'Stop'
 $runId = [Guid]::NewGuid().ToString('N')
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$outputRoot = Join-Path $projectRoot $(if($Renderer -eq 'd3d11'){'tmp\pane-acceptance'}else{'tmp\pane-acceptance-d3d12'})
-if($TestRecovery -and $Renderer -ne 'd3d12'){throw 'Device removal acceptance requires D3D12'}
+$outputRoot = Join-Path $projectRoot $(if($Renderer -eq 'd3d11'){'tmp\pane-acceptance'}else{"tmp\pane-acceptance-$Renderer"})
+if($TestRecovery -and $Renderer -eq 'd3d11'){throw 'Diagnostic recovery requires D3D12 or OpenGL'}
 $profile = Join-Path $outputRoot 'profile\Mostty'
 New-Item -ItemType Directory -Force -Path $profile | Out-Null
 @("renderer = $Renderer", 'font-size = 14', 'background-opacity = 1', 'background-blur = false') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
@@ -173,10 +173,31 @@ try {
     $panes = Wait-Panes 4
     if($Renderer -eq 'd3d12'){
         $devices=@(Select-String -LiteralPath (Join-Path $outputRoot 'tmp\mostty-diag.log') -Pattern 'd3d12: pane created: id=(\d+) device=(0x[0-9a-f]+) queue=(0x[0-9a-f]+)')
-        if($devices.Count -lt 4){throw 'Missing actual D3D12 pane creation evidence'}
+        if($devices.Count -lt 4){throw 'Missing actual renderer pane creation evidence'}
         if(@($devices | ForEach-Object {$_.Matches[0].Groups[2].Value} | Select-Object -Unique).Count -ne 1){throw 'Panes did not share one D3D12 device'}
         if(@($devices | ForEach-Object {$_.Matches[0].Groups[3].Value} | Select-Object -Unique).Count -ne 1){throw 'Panes did not share one D3D12 command queue'}
         $result.backend_identity='four D3D12 surfaces sharing one device and queue'
+    }
+    if($Renderer -in @('opengl','pure-opengl')){
+        $logPath=Join-Path $outputRoot 'tmp/mostty-diag.log'
+        $surfaces=@(Select-String -LiteralPath $logPath -Pattern 'gl46: pane created: id=(\d+) context=(0x[0-9a-f]+) dc=(0x[0-9a-f]+) mode=(\w+)')
+        if($surfaces.Count -lt 4){throw 'Missing actual OpenGL pane creation evidence'}
+        if(@($surfaces | ForEach-Object {$_.Matches[0].Groups[2].Value} | Select-Object -Unique).Count -ne 1){throw 'Panes did not share one WGL context'}
+        if(@($surfaces | ForEach-Object {$_.Matches[0].Groups[3].Value} | Select-Object -Unique).Count -ne 4){throw 'Panes did not have distinct DCs'}
+        $expectedMode=if($Renderer -eq 'pure-opengl'){'pure_wgl'}else{'interop'}
+        if(@($surfaces | Where-Object {$_.Matches[0].Groups[4].Value -ne $expectedMode}).Count -ne 0){throw 'OpenGL pane used the wrong presentation mode'}
+        $bridges=@(Select-String -LiteralPath $logPath -Pattern 'bridge active: surface=(\d+) device=(0x[0-9a-f]+)')
+        if($Renderer -eq 'pure-opengl'){
+            if($bridges.Count -ne 0){throw 'Pure OpenGL created an interop bridge'}
+            $result.presentation='pure WGL'
+        }elseif($bridges.Count -ge 5){
+            if(@($bridges | ForEach-Object {$_.Matches[0].Groups[2].Value} | Select-Object -Unique).Count -ne 1){throw 'OpenGL panes created multiple D3D11 presentation devices'}
+            $result.presentation='WGL_NV_DX_interop2 with one shared D3D11 presentation device'
+        }else{
+            if(-not (Select-String -LiteralPath $logPath -SimpleMatch 'bridge unavailable')){throw 'OpenGL presentation identity is unknown'}
+            $result.presentation='interop unavailable; baseline WGL exercised'
+        }
+        $result.backend_identity="four $Renderer panes sharing one context with distinct DCs"
     }
     if($CloseOnly){
         Test-CloseActions
@@ -368,17 +389,17 @@ try {
         Start-Sleep -Milliseconds 1200
         Capture 'device-before'
         $diagPath=Join-Path $outputRoot 'tmp\mostty-diag.log'
-        [void][PaneAcceptance]::PostMessageW($window,0x8006,[UIntPtr]::Zero,[IntPtr]::Zero)
+        [void][PaneAcceptance]::PostMessageW($window,$(if($Renderer -eq 'd3d12'){0x8006}else{0x8007}),[UIntPtr]::Zero,[IntPtr]::Zero)
         $deadline=[DateTime]::UtcNow.AddSeconds(20)
         do {
             Start-Sleep -Milliseconds 100
             if($app.HasExited){throw 'D3D12 process exited during recovery'}
-            if([PaneAcceptance]::Dialog($app.Id) -ne [IntPtr]::Zero){throw 'D3D12 recovery displayed a failure dialog'}
-            $recovered=Select-String -LiteralPath $diagPath -Pattern 'D3D12 pane recovery complete'
+            if([PaneAcceptance]::Dialog($app.Id) -ne [IntPtr]::Zero){throw 'Renderer recovery displayed a failure dialog'}
+            $recovered=Select-String -LiteralPath $diagPath -Pattern '(D3D12|OpenGL) pane recovery complete'
         } while(-not $recovered -and [DateTime]::UtcNow -lt $deadline)
-        if(-not $recovered){throw 'D3D12 recovery did not complete'}
+        if(-not $recovered){throw 'Renderer recovery did not complete'}
         $after=Wait-Panes 4
-        if(@(Compare-Object @($panes | ForEach-Object ToInt64) @($after | ForEach-Object ToInt64)).Count -ne 0){throw 'D3D12 recovery replaced pane HWNDs'}
+        if(@(Compare-Object @($panes | ForEach-Object ToInt64) @($after | ForEach-Object ToInt64)).Count -ne 0){throw 'Renderer recovery replaced pane HWNDs'}
         Start-Sleep -Milliseconds 1500
         Capture 'device-repaint'
         $beforeImage=[Drawing.Bitmap]::new((Join-Path $outputRoot 'device-before.png'))
@@ -400,16 +421,16 @@ try {
         }finally{$beforeImage.Dispose();$afterImage.Dispose()}
         $result.recovery_pixel_difference=$different
         $result.recovery_pixels_compared=$compared
-        if($different -gt $compared*0.001){throw 'Settled D3D12 text pixels changed after recovery'}
+        if($different -gt $compared*0.001){throw 'Settled renderer text pixels changed after recovery'}
         for($i=0;$i -lt 4;$i++){
             Send-Command $panes[$i] ('"{0}" -c "import os; print(os.getppid())" > recovery-{1}-{2}.txt & echo ready > recovery-{1}-{2}.txt.ready' -f $python,$runId,$i)
         }
         for($i=0;$i -lt 4;$i++){
             $out=Join-Path $outputRoot "recovery-$runId-$i.txt"
             Wait-File "$out.ready"
-            if([int]([IO.File]::ReadAllText($out).Trim()) -ne $shellPids[$i]){throw 'D3D12 recovery restarted a shell'}
+            if([int]([IO.File]::ReadAllText($out).Trim()) -ne $shellPids[$i]){throw 'Renderer recovery restarted a shell'}
         }
-        $result.device_removal_recovery='pass: original shell PIDs and pane HWNDs retained'
+        if($Renderer -eq 'd3d12'){$result.device_removal_recovery='pass: original shell PIDs and pane HWNDs retained'}else{$result.presentation_failure_recovery='pass: original shell PIDs and pane HWNDs retained'}
         Capture 'device-recovered'
     }
     $previousCellWidth = [int]$groups[3].Value
@@ -434,7 +455,7 @@ try {
     }
     $result.font_reload_sizes = $fontSizes
     Capture 'font-theme-transparency'
-    if($Renderer -eq 'd3d12'){
+    if($Renderer -ne 'd3d11'){
         $imageProbe=Join-Path $projectRoot 'tools/pane-image-probe.py'
         for($i=0;$i -lt 4;$i++){
             $ready=Join-Path $outputRoot "image-$runId-$i.ready"
@@ -479,7 +500,7 @@ try {
             try{
                 $graphics.CopyFromScreen($rect.Right-40,$rect.Bottom-45,0,0,$sample.Size)
                 $pixel=$sample.GetPixel(0,0)
-                if($pixel.R -lt 243 -or $pixel.B -lt 243 -or $pixel.G -gt 12){throw 'Wallpaper update failed to reach a D3D12 pane'}
+                if($pixel.R -lt 243 -or $pixel.B -lt 243 -or $pixel.G -gt 12){throw 'Wallpaper update failed to reach a renderer pane'}
             }finally{$graphics.Dispose();$sample.Dispose()}
         }
         Capture 'wallpaper-updated'
@@ -491,7 +512,7 @@ try {
             try{
                 $graphics.CopyFromScreen($rect.Right-40,$rect.Bottom-45,0,0,$sample.Size)
                 $pixel=$sample.GetPixel(0,0)
-                if($pixel.R -ge 243 -and $pixel.B -ge 243 -and $pixel.G -le 12){throw 'Wallpaper removal left a stale D3D12 texture'}
+                if($pixel.R -ge 243 -and $pixel.B -ge 243 -and $pixel.G -le 12){throw 'Wallpaper removal left a stale renderer texture'}
             }finally{$graphics.Dispose();$sample.Dispose()}
         }
         $result.wallpaper_reload='pass: all four panes displayed the new wallpaper and removed it'

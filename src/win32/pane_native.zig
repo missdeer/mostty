@@ -21,7 +21,7 @@ fn create(window: *state.Window, pane: *state.Pane) void {
     if (!class_registered) {
         const wc: win32.WNDCLASSEXW = .{
             .cbSize = @sizeOf(win32.WNDCLASSEXW),
-            .style = .{ .DBLCLKS = 1 },
+            .style = .{ .DBLCLKS = 1, .OWNDC = 1 },
             .lpfnWndProc = wndProc,
             .cbClsExtra = 0,
             .cbWndExtra = 0,
@@ -49,7 +49,7 @@ fn create(window: *state.Window, pane: *state.Pane) void {
     };
     if (pane.renderer == null) std.debug.panic("selected renderer cannot create a pane surface", .{});
     pane.hwnd = win32.CreateWindowExW(
-        .{ .NOREDIRECTIONBITMAP = 1 },
+        .{ .NOREDIRECTIONBITMAP = if (global.config.renderer.usesDwmRedirection()) 0 else 1 },
         class_name,
         win32.L("Mostty terminal pane"),
         .{ .CHILD = 1, .CLIPSIBLINGS = 1 },

@@ -124,3 +124,42 @@ is historical: D3D12 now supports native panes; OpenGL and Vulkan remain pending
 - Logs and captures are preserved in tmp/MOSTTY-78-evidence. Failed exploratory
   runs were not counted as passes; they exposed a PID-file completion race and
   an incorrect opaque-background setting in the wallpaper test, both corrected.
+
+## OpenGL native panes — MOSTTY-79
+
+Verified on September 12, 2026. Both OpenGL rows in the original MOSTTY-74
+matrix are historical: opengl and pure-opengl now support native panes.
+Vulkan variants remain pending under MOSTTY-80.
+
+- Prescribed Zig 0.16.0 build and D:/zig-cache tests passed: 45/45 steps,
+  251/253 tests. The two skips are macOS config-path checks in Windows roots.
+  Real WGL/DC tests exercised both modes, including shared context/programs,
+  distinct DCs/buffers/atlases, glyph isolation, child teardown, context rebuild
+  and preservation of a negotiated baseline choice. Unsupported driver gates
+  explicitly skip the GPU test; neither mode was skipped on this host.
+- Interop run: tools/pane-acceptance.ps1 -Renderer opengl -TestRecovery,
+  75048041f9bc4ffd96ac507ffe8075f7, passed. Logs confirmed four pane DCs sharing
+  one WGL context and all active bridges sharing one D3D11 presentation device.
+- Pure run: tools/pane-acceptance.ps1 -Renderer pure-opengl -TestRecovery,
+  a70e6da003454326b2108192a516f8a3, passed. It shared one context across four
+  distinct DCs and created no interoperability bridge.
+- Both runs passed mixed nested splits, direction/click focus, divider drag,
+  maximize/restore, tab retention, IME, mouse reporting/capture, Unicode paste,
+  selection, scrolling, sustained output during resizing, ConPTY/VT size
+  agreement, font/theme updates and pane/tab/window closure.
+- Diagnostic presentation failures rebuilt graphics without replacing shell
+  PIDs or pane HWNDs. Each run compared 564,590 settled text-region pixels with
+  zero differences. This exercises rejected presentation calls and coordinated
+  reconstruction, not physical driver resets or irrecoverably lost contexts.
+- Same-ID Kitty images remained independent, and wallpaper replacement/removal
+  reached all four panes. Transparency and image captures were inspected.
+- Static review identified inverted Y coordinates in main-surface scissor
+  cutouts. An asymmetric GPU alpha-readback test failed before the fix
+  (expected transparent alpha 0, observed 255) and passed after converting
+  Win32 coordinates to the OpenGL lower-left origin.
+- Both monitors were 96 DPI; physical mixed-DPI movement, RDP recovery and
+  live interop-unavailable hardware were not executed or counted as passes.
+- Focused D3D11 and D3D12 split/focus/closure regressions passed with run IDs
+  dc87ac2b0ad7449d949091a3ee499ece and e58b77239cc349c3b47d73e0f90246c1.
+- Final evidence is preserved under tmp/MOSTTY-79-evidence, with separate
+  opengl and pure-opengl results, diagnostic logs and captures.

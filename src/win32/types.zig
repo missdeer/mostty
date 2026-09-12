@@ -52,6 +52,7 @@ pub const WM_APP_GLYPH_READY = win32.WM_APP + 4;
 pub const WM_APP_CLOSE_PANE = win32.WM_APP + 5;
 // Diagnostic-only device removal for the pane recovery acceptance runner.
 pub const WM_APP_TEST_D3D12_REMOVAL = win32.WM_APP + 6;
+pub const WM_APP_TEST_OPENGL_FAILURE = win32.WM_APP + 7;
 pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;
@@ -78,7 +79,11 @@ pub const IDM_THEME_BASE: usize = 0x1000;
 pub const MAX_THEME_ITEMS: usize = 1024;
 pub const IDM_THEME_END: usize = IDM_THEME_BASE + MAX_THEME_ITEMS * 0x10;
 
-pub const window_style = win32.WS_OVERLAPPEDWINDOW;
+pub const window_style = blk: {
+    var style = win32.WS_OVERLAPPEDWINDOW;
+    style.CLIPCHILDREN = 1;
+    break :blk style;
+};
 pub const window_style_ex = win32.WINDOW_EX_STYLE{
     .APPWINDOW = 1,
     .NOREDIRECTIONBITMAP = 1,

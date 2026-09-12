@@ -92,12 +92,14 @@ pub const StartupFailure = union(enum) {
 
 pub const RuntimeFailure = union(enum) {
     d3d12: d3d12.Renderer.RuntimeFailure,
+    opengl: gl46.RuntimeFailure,
     vulkan: vulkan.RuntimeFailure,
     @"native-vulkan": vulkan.RuntimeFailure,
 
     pub fn operationDescription(self: RuntimeFailure) []const u8 {
         return switch (self) {
             .d3d12 => |failure| failure.operation,
+            .opengl => |failure| failure.operation,
             .vulkan => |failure| failure.operation.description(),
             .@"native-vulkan" => |failure| failure.operation.description(),
         };
@@ -106,6 +108,7 @@ pub const RuntimeFailure = union(enum) {
     pub fn codeName(self: RuntimeFailure) []const u8 {
         return switch (self) {
             .d3d12 => "D3D12RuntimeFailure",
+            .opengl => |failure| @errorName(failure.cause),
             .vulkan => |failure| @errorName(failure.cause),
             .@"native-vulkan" => |failure| @errorName(failure.cause),
         };
@@ -122,6 +125,7 @@ configured_backend: Config.RendererBackend,
 backend: ?RendererBackend,
 vulkan_recovery_attempted: bool,
 d3d12_recovery_attempted: bool = false,
+opengl_recovery_attempted: bool = false,
 requires_alpha_composition: bool,
 
 // Initialize in place: the backend borrows `common`, and the async glyph
@@ -150,6 +154,7 @@ pub fn init(
     self.configured_backend = backend;
     self.vulkan_recovery_attempted = false;
     self.d3d12_recovery_attempted = false;
+    self.opengl_recovery_attempted = false;
     self.requires_alpha_composition = requires_alpha_composition;
     self.backend = switch (backend) {
         .d3d11 => .{ .d3d11 = try d3d11.init(&self.common, &self.font_service, configured_gpu) },
@@ -334,6 +339,7 @@ fn fallbackToD3d11With(
     self.configured_backend = .d3d11;
     self.vulkan_recovery_attempted = false;
     self.d3d12_recovery_attempted = false;
+    self.opengl_recovery_attempted = false;
     self.requires_alpha_composition = false;
     const replacement = try init_fn(&self.common, &self.font_service, configured_gpu);
     self.backend = .{ .d3d11 = replacement };
@@ -392,6 +398,9 @@ pub fn paneRuntimeFailure(self: *Renderer) ?RuntimeFailure {
             _ = backend.healthy();
             if (backend.failure) |failure| return .{ .d3d12 = failure };
         },
+        .opengl => |*backend| if (backend.failure) |failure| {
+            return .{ .opengl = failure };
+        },
         else => {},
     }
     return null;
@@ -414,17 +423,41 @@ pub fn recoverD3d12(self: *Renderer, hwnd: win32.HWND, configured_gpu: ?[]const 
     return true;
 }
 
-pub fn supportsPanes(self: *const Renderer) bool {
-    return if (self.backend) |backend| (backend == .d3d11 or backend == .d3d12) else false;
+pub fn recoverOpenGL(self: *Renderer, hwnd: win32.HWND, configured_gpu: ?[]const u8, generation: u32) bool {
+    if (self.opengl_recovery_attempted) return false;
+    self.opengl_recovery_attempted = true;
+    const parent = &self.backend.?.opengl;
+    const background_generation = parent.bg_image_req_id +% 1;
+    const presentation = parent.presentation;
+    const baseline = parent.interop_state == .unavailable;
+    parent.deinit();
+    self.backend = .{ .opengl = gl46.init(&self.common, &self.font_service, configured_gpu, presentation) };
+    if (baseline) self.backend.?.opengl.interop_state = .unavailable;
+    if (self.initializeWindow(hwnd, configured_gpu)) |failure| {
+        std.log.err("OpenGL recovery initialization failed: {s}", .{failure.description()});
+        return false;
+    }
+    self.backend.?.opengl.cache_gen = generation;
+    self.backend.?.opengl.bg_image_req_id = background_generation;
+    return true;
 }
 
-pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) d3d12.Renderer.StartupError!?PaneSurface {
+pub fn supportsPanes(self: *const Renderer) bool {
+    const active = self.backend orelse return false;
+    return switch (active) {
+        .d3d11, .d3d12 => true,
+        .opengl => |backend| backend.initialized,
+        else => false,
+    };
+}
+
+pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) PaneSurface.InitError!?PaneSurface {
     return PaneSurface.init(self, common);
 }
 
 pub fn renderChrome(self: *Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
     switch (self.activeBackend().*) {
-        inline .d3d11, .d3d12 => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
+        inline .d3d11, .d3d12, .opengl => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
         else => unreachable, // Only reached after the pane capability gate.
     }
 }
@@ -691,7 +724,11 @@ test "pane capability rejects unsupported or unavailable backends without changi
     renderer.backend = null;
     try std.testing.expect(!renderer.supportsPanes());
     try std.testing.expect((try renderer.initPaneSurface(undefined)) == null);
-    inline for (.{ Config.RendererBackend.opengl, .@"pure-opengl", .vulkan, .@"native-vulkan" }) |selected| {
+    renderer.backend = .{ .opengl = gl46.init(undefined, undefined, null, .pure_wgl) };
+    // Startup can still reject WGL and offer fallback; no pane may borrow it yet.
+    try std.testing.expect(!renderer.supportsPanes());
+    try std.testing.expect((try renderer.initPaneSurface(undefined)) == null);
+    inline for (.{ Config.RendererBackend.vulkan, .@"native-vulkan" }) |selected| {
         renderer.configured_backend = selected;
         renderer.backend = switch (selected) {
             .d3d12 => .{ .d3d12 = undefined },
@@ -709,9 +746,11 @@ test "pane capability rejects unsupported or unavailable backends without changi
 test "pane facade retains shared infrastructure but isolates caches and update generations" {
     var renderer: Renderer = undefined;
     renderer.d3d12_recovery_attempted = true;
+    renderer.opengl_recovery_attempted = true;
     try renderer.init(96, .{}, true, null, .d3d11, false);
     defer renderer.deinit();
     try std.testing.expect(!renderer.d3d12_recovery_attempted);
+    try std.testing.expect(!renderer.opengl_recovery_attempted);
     try std.testing.expect(renderer.supportsPanes());
     var first_common = renderer.common;
     first_common.surface_id = 1;

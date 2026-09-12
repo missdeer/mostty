@@ -27,6 +27,10 @@ pub const Presenter = struct {
         height: u32,
         adapter: ?*win32.IDXGIAdapter1,
     ) Error!Presenter {
+        return initLayer(hwnd, width, height, adapter, true);
+    }
+
+    pub fn initLayer(hwnd: win32.HWND, width: u32, height: u32, adapter: ?*win32.IDXGIAdapter1, above_children: bool) Error!Presenter {
         const levels = [_]win32.D3D_FEATURE_LEVEL{.@"11_0"};
         var device: *win32.ID3D11Device = undefined;
         var context: *win32.ID3D11DeviceContext = undefined;
@@ -70,13 +74,14 @@ pub const Presenter = struct {
             return error.DeviceUnavailable;
         defer _ = dxgi_device.IUnknown.Release();
 
-        const surface = dcomp.Surface.init(
+        const surface = dcomp.Surface.initLayer(
             &device.IUnknown,
             dxgi_device,
             hwnd,
             width,
             height,
             .B8G8R8A8_UNORM,
+            above_children,
         ) catch return error.PresentationUnavailable;
         return .{
             .device = device,
@@ -85,6 +90,19 @@ pub const Presenter = struct {
             .pixel_shader = pixel_shader,
             .surface = surface,
         };
+    }
+
+    pub fn initSurface(parent: *Presenter, hwnd: win32.HWND, width: u32, height: u32) Error!Presenter {
+        var dxgi_device: *win32.IDXGIDevice = undefined;
+        if (parent.device.IUnknown.QueryInterface(win32.IID_IDXGIDevice, @ptrCast(&dxgi_device)) < 0) return error.DeviceUnavailable;
+        defer _ = dxgi_device.IUnknown.Release();
+        const surface = try dcomp.Surface.initLayer(&parent.device.IUnknown, dxgi_device, hwnd, width, height, .B8G8R8A8_UNORM, true);
+        inline for (.{ parent.device, parent.context, parent.vertex_shader, parent.pixel_shader }) |object| _ = object.IUnknown.AddRef();
+        return .{ .device = parent.device, .context = parent.context, .vertex_shader = parent.vertex_shader, .pixel_shader = parent.pixel_shader, .surface = surface };
+    }
+
+    pub fn frameReady(self: *Presenter) bool {
+        return win32.WaitForSingleObject(self.surface.frame_latency_waitable, 0) == .NO_ERROR;
     }
 
     pub fn deinit(self: *Presenter) void {

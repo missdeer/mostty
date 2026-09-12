@@ -806,3 +806,13 @@ pub fn onAppTestD3d12Removal(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?w
     if (global.window) |*window| window.requestRender();
     return 0;
 }
+
+pub fn onAppTestOpenGlFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    const active = if (global.renderer.backend) |*backend| backend else return 0;
+    if (active.* != .opengl) return 0;
+    std.log.warn("OpenGL diagnostic presentation failure requested", .{});
+    active.opengl.test_fail_present = true;
+    if (global.window) |*window| window.requestRender();
+    return 0;
+}

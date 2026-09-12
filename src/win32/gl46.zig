@@ -66,6 +66,11 @@ const RenderPass = enum {
     }
 };
 
+pub const RuntimeFailure = struct {
+    operation: []const u8,
+    cause: anyerror,
+};
+
 pub const StartupError = error{
     GpuOverrideUnsupported,
     GetDcFailed,
@@ -166,6 +171,8 @@ const WGL_COLOR_BITS_ARB = 0x2014;
 const WGL_ALPHA_BITS_ARB = 0x201B;
 const WGL_TYPE_RGBA_ARB = 0x202B;
 const WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB = 0x20A9;
+
+const GetPixelFormatRaw = @extern(*const fn (win32.HDC) callconv(.winapi) i32, .{ .name = "GetPixelFormat" });
 
 const DescribePixelFormatRaw = @extern(
     *const fn (
@@ -293,6 +300,11 @@ const MappedBuffer = struct {
 
 // Shared-layer state.
 common: *RendererCommon,
+parent: ?*Gl46Renderer = null,
+failure: ?RuntimeFailure = null,
+frame_pending: bool = false,
+test_fail_present: bool = false,
+swap_interval: ?WglSwapInterval = null,
 font_service: *FontService,
 shadow_cells: []shader.Cell = &.{},
 glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
@@ -312,6 +324,8 @@ diag_rows_skipped: u64 = 0,
 
 background_image: BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
+bg_image_allocator: ?std.mem.Allocator = null,
+bg_image_generation: u32 = 0,
 bg_image_opacity: f32 = 1.0,
 bg_image_position: Config.BackgroundImagePosition = .center,
 bg_image_fit: Config.BackgroundImageFit = .contain,
@@ -370,6 +384,13 @@ pub fn init(
     };
 }
 
+pub fn initSurface(parent: *Gl46Renderer, common: *RendererCommon) Gl46Renderer {
+    var surface = init(common, parent.font_service, null, parent.presentation);
+    surface.parent = parent;
+    surface.cache_gen = parent.cache_gen;
+    return surface;
+}
+
 pub fn deinit(self: *Gl46Renderer) void {
     if (self.initialized) {
         if (win32.wglMakeCurrent(self.dc.?, self.context.?) == 0) {
@@ -380,7 +401,7 @@ pub fn deinit(self: *Gl46Renderer) void {
         if (self.interop_bridge) |*bridge| bridge.deinit();
         self.pure_wgl_surface.release();
         self.kitty_images.deinit(std.heap.page_allocator);
-        self.background_image.release();
+        if (self.parent == null) self.background_image.release();
         self.releaseGlyphState();
 
         if (self.tabbar_texture != 0) gl.DeleteTextures(1, @ptrCast(&self.tabbar_texture));
@@ -388,10 +409,10 @@ pub fn deinit(self: *Gl46Renderer) void {
         self.cells.release();
         self.image_ubo.release();
         self.grid_ubo.release();
-        if (self.sampler != 0) gl.DeleteSamplers(1, @ptrCast(&self.sampler));
+        if (self.parent == null and self.sampler != 0) gl.DeleteSamplers(1, @ptrCast(&self.sampler));
         if (self.vao != 0) gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
-        if (self.image_program != 0) gl.DeleteProgram(self.image_program);
-        if (self.grid_program != 0) gl.DeleteProgram(self.grid_program);
+        if (self.parent == null and self.image_program != 0) gl.DeleteProgram(self.image_program);
+        if (self.parent == null and self.grid_program != 0) gl.DeleteProgram(self.grid_program);
         for (&self.fences) |*fence| {
             if (fence.*) |f| gl.DeleteSync(f);
             fence.* = null;
@@ -399,7 +420,9 @@ pub fn deinit(self: *Gl46Renderer) void {
 
         gl.makeProcTableCurrent(null);
         _ = win32.wglMakeCurrent(null, null);
-        if (self.context) |context| _ = win32.wglDeleteContext(context);
+        if (self.parent == null) {
+            if (self.context) |context| _ = win32.wglDeleteContext(context);
+        }
         if (self.dc) |dc| {
             if (self.hwnd) |hwnd| _ = win32.ReleaseDC(hwnd, dc);
         }
@@ -407,6 +430,7 @@ pub fn deinit(self: *Gl46Renderer) void {
         self.kitty_images.deinit(std.heap.page_allocator);
         self.releaseGlyphState();
     }
+    if (self.bg_image_allocator) |allocator| allocator.free(self.bg_image_path);
     self.* = undefined;
 }
 
@@ -640,7 +664,7 @@ fn setPurePixelFormat(dc: win32.HDC, procs: PureWglProcs) StartupError!void {
 fn ensureInitialized(self: *Gl46Renderer, hwnd: win32.HWND) StartupError!void {
     if (self.initialized) {
         if (self.hwnd != hwnd) fatal("the WGL context was asked to move to another window");
-        gl.makeProcTableCurrent(&self.procs);
+        if (!self.activate()) return error.CoreMakeCurrentFailed;
         return;
     }
     if (self.gpu_override_configured) return error.GpuOverrideUnsupported;
@@ -648,14 +672,39 @@ fn ensureInitialized(self: *Gl46Renderer, hwnd: win32.HWND) StartupError!void {
     const dc = win32.GetDC(hwnd) orelse return error.GetDcFailed;
     errdefer _ = win32.ReleaseDC(hwnd, dc);
 
+    if (self.parent) |parent| {
+        if (!parent.initialized) return error.CoreContextRejected;
+        const format = GetPixelFormatRaw(parent.dc.?);
+        var pfd = std.mem.zeroes(win32.PIXELFORMATDESCRIPTOR);
+        if (format == 0 or DescribePixelFormatRaw(dc, format, @sizeOf(win32.PIXELFORMATDESCRIPTOR), &pfd) == 0) return error.PixelFormatUnavailable;
+        if (GetPixelFormatRaw(dc) == 0 and win32.SetPixelFormat(dc, format, &pfd) == 0) return error.SetPixelFormatFailed;
+        if (GetPixelFormatRaw(dc) != format) return error.PixelFormatContractUnavailable;
+        self.hwnd = hwnd;
+        self.dc = dc;
+        self.context = parent.context;
+        self.procs = parent.procs;
+        self.swap_interval = parent.swap_interval;
+        self.grid_program = parent.grid_program;
+        self.image_program = parent.image_program;
+        self.sampler = parent.sampler;
+        self.initialized = true;
+        if (!self.activate()) {
+            self.initialized = false;
+            return error.CoreMakeCurrentFailed;
+        }
+        self.initBuffers();
+        log.info("pane created: id={} context=0x{x} dc=0x{x} mode={s}", .{ self.common.surface_id, @intFromPtr(self.context.?), @intFromPtr(dc), @tagName(self.presentation) });
+        return;
+    }
+
     const context_procs = switch (self.presentation) {
         .interop => blk: {
-            try setLegacyPixelFormat(dc);
+            if (GetPixelFormatRaw(dc) == 0) try setLegacyPixelFormat(dc);
             break :blk try loadContextProcsFromTarget(dc);
         },
         .pure_wgl => blk: {
             const procs = try loadPureWglProcs();
-            try setPurePixelFormat(dc, procs);
+            if (GetPixelFormatRaw(dc) == 0) try setPurePixelFormat(dc, procs);
             break :blk procs.context;
         },
     };
@@ -711,6 +760,28 @@ fn ensureInitialized(self: *Gl46Renderer, hwnd: win32.HWND) StartupError!void {
     const image_program = try createProgram(shader_assets.vertex.spirv, "VertexMain", shader_assets.image_pixel.spirv, "ImagePixelMain");
     errdefer gl.DeleteProgram(image_program);
 
+    self.grid_program = grid_program;
+    self.image_program = image_program;
+    self.initBuffers();
+    self.hwnd = hwnd;
+    self.dc = dc;
+    self.context = context;
+    self.swap_interval = context_procs.swap_interval;
+    self.initialized = true;
+    if (self.presentation.usesInterop()) {
+        log.info(
+            "OpenGL {d}.{d} baseline active: shared SPIR-V, swap interval 1, {d} completion slots; composition bridge {s}",
+            .{ major, minor, frame_count, if (self.interop_state == .unavailable) "unavailable" else "pending" },
+        );
+    } else {
+        log.info(
+            "OpenGL {d}.{d} pure WGL presentation active: alpha+sRGB composited framebuffer, swap interval 1, {d} completion slots",
+            .{ major, minor, frame_count },
+        );
+    }
+}
+
+fn initBuffers(self: *Gl46Renderer) void {
     var storage_alignment: gl.int = 1;
     var uniform_alignment: gl.int = 1;
     gl.GetIntegerv(gl.SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, @ptrCast(&storage_alignment));
@@ -721,33 +792,38 @@ fn ensureInitialized(self: *Gl46Renderer, hwnd: win32.HWND) StartupError!void {
     self.grid_ubo = MappedBuffer.create(self.grid_ubo_stride * frame_count);
     self.ensureImageUboCapacity(1);
 
-    self.grid_program = grid_program;
-    self.image_program = image_program;
-
     gl.CreateVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
-    gl.CreateSamplers(1, @ptrCast(&self.sampler));
-    gl.SamplerParameteri(self.sampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.SamplerParameteri(self.sampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.SamplerParameteri(self.sampler, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.SamplerParameteri(self.sampler, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    inline for (.{ 2, 3, 5 }) |unit| gl.BindSampler(unit, self.sampler);
-
-    self.hwnd = hwnd;
-    self.dc = dc;
-    self.context = context;
-    self.initialized = true;
-    if (self.presentation.usesInterop()) {
-        log.info(
-            "OpenGL {d}.{d} baseline active: shared SPIR-V, swap interval 1, {d} completion slots; composition bridge pending",
-            .{ major, minor, frame_count },
-        );
-    } else {
-        log.info(
-            "OpenGL {d}.{d} pure WGL presentation active: alpha+sRGB composited framebuffer, swap interval 1, {d} completion slots",
-            .{ major, minor, frame_count },
-        );
+    if (self.parent == null) {
+        gl.CreateSamplers(1, @ptrCast(&self.sampler));
+        gl.SamplerParameteri(self.sampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.SamplerParameteri(self.sampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.SamplerParameteri(self.sampler, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.SamplerParameteri(self.sampler, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
+    inline for (.{ 2, 3, 5 }) |unit| gl.BindSampler(unit, self.sampler);
+}
+
+fn activate(self: *Gl46Renderer) bool {
+    if (!self.initialized or self.failure != null) return false;
+    if (win32.wglMakeCurrent(self.dc.?, self.context.?) == 0) {
+        self.recordFailure("activate pane DC", error.CoreMakeCurrentFailed);
+        return false;
+    }
+    gl.makeProcTableCurrent(&self.procs);
+    if (self.swap_interval.?(if (self.common.surface_id == 0) 1 else 0) == 0) {
+        self.recordFailure("set swap interval", error.SwapIntervalFailed);
+        return false;
+    }
+    if (gl.GetGraphicsResetStatus() != gl.NO_ERROR) {
+        self.recordFailure("context reset", error.ContextLost);
+        return false;
+    }
+    return true;
+}
+
+fn recordFailure(self: *Gl46Renderer, operation: []const u8, cause: anyerror) void {
+    if (self.failure == null) self.failure = .{ .operation = operation, .cause = cause };
 }
 
 fn debugMessage(
@@ -845,9 +921,10 @@ fn fatal(message: []const u8) noreturn {
     std.debug.panic("renderer = opengl: {s}", .{message});
 }
 
-fn beginFrame(self: *Gl46Renderer) void {
+fn beginFrame(self: *Gl46Renderer) bool {
+    self.frame_pending = false;
     const next = (self.frame_slot + 1) % frame_count;
-    self.waitForSlot(next);
+    if (!self.waitForSlot(next)) return false;
     if (self.cells.bytes) |mapped| if (self.last_frame_slot) |previous| {
         const used = @as(usize, self.cells_count) * @sizeOf(shader.Cell);
         if (used != 0) {
@@ -858,32 +935,55 @@ fn beginFrame(self: *Gl46Renderer) void {
     };
     self.frame_slot = next;
     self.last_frame_slot = next;
+    return true;
 }
 
-fn waitForSlot(self: *Gl46Renderer, slot: usize) void {
-    const fence = self.fences[slot] orelse return;
+fn waitForSlot(self: *Gl46Renderer, slot: usize) bool {
+    const fence = self.fences[slot] orelse return true;
     var attempts: u32 = 0;
     while (true) : (attempts += 1) {
-        const result = gl.ClientWaitSync(fence, gl.SYNC_FLUSH_COMMANDS_BIT, 100_000_000);
+        const result = gl.ClientWaitSync(fence, gl.SYNC_FLUSH_COMMANDS_BIT, if (self.parent != null) 0 else 100_000_000);
         if (result == gl.ALREADY_SIGNALED or result == gl.CONDITION_SATISFIED) break;
-        if (result == gl.WAIT_FAILED) fatal("glClientWaitSync failed");
-        if (attempts >= 99) fatal("GPU completion did not arrive within 10 seconds");
+        if (result == gl.WAIT_FAILED or attempts >= 99) {
+            self.recordFailure("wait for frame completion", error.CompletionFailed);
+            return false;
+        }
+        if (self.parent != null) {
+            self.frame_pending = true;
+            return false;
+        }
     }
     gl.DeleteSync(fence);
     self.fences[slot] = null;
+    return true;
 }
 
 fn finishFrame(self: *Gl46Renderer, path: interop.Path) void {
-    if (path == .baseline and self.presentation == .pure_wgl)
+    if (path == .baseline)
         self.pure_wgl_surface.blitToWindow();
-    self.fences[self.frame_slot] = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse
-        fatal("glFenceSync failed");
+    self.fences[self.frame_slot] = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
+        self.recordFailure("create completion fence", error.CompletionFailed);
+        return;
+    };
+    gl.Flush();
+    if (self.test_fail_present) {
+        self.test_fail_present = false;
+        const rejected = switch (path) {
+            .baseline => win32.SwapBuffers(@ptrFromInt(1)) == 0,
+            .direct_composition => self.interop_bridge.?.presenter.surface.swap_chain.IDXGISwapChain.Present(5, 0) < 0,
+        };
+        self.recordFailure("diagnostic presentation", if (rejected) error.PresentFailed else error.DiagnosticNotRejected);
+        return;
+    }
     switch (path) {
-        .baseline => if (win32.SwapBuffers(self.dc.?) == 0) fatal("SwapBuffers failed"),
+        .baseline => if (win32.SwapBuffers(self.dc.?) == 0) {
+            self.recordFailure("SwapBuffers", error.PresentFailed);
+        },
         .direct_composition => self.interop_bridge.?.present() catch |err| {
             self.failInterop(err);
         },
     }
+    if (gl.GetError() != gl.NO_ERROR) self.recordFailure("OpenGL frame", error.DrawFailed);
 }
 
 pub fn cellsResize(self: *Gl46Renderer, count: u32) bool {
@@ -958,7 +1058,8 @@ pub fn atlasCopyStaging(
 }
 
 pub fn backgroundImageRelease(self: *Gl46Renderer) void {
-    self.background_image.release();
+    self.bg_image_generation +%= 1;
+    if (self.parent == null) self.background_image.release();
 }
 
 pub fn backgroundImageUpload(self: *Gl46Renderer, decoded: gpu.DecodedBackground) void {
@@ -1029,10 +1130,10 @@ pub fn render(
     url_highlight: ?types.UrlHighlight,
 ) void {
     _ = remote_session;
-    self.ensureInitialized(hwnd) catch |err| std.debug.panic(
-        "renderer = opengl: initialization failed after the startup capability gate ({s})",
-        .{@errorName(err)},
-    );
+    self.ensureInitialized(hwnd) catch |err| {
+        self.recordFailure("initialize surface", err);
+        return;
+    };
     const prepared = self.prepareFrame(hwnd, term, mouse_in_scrollbar) orelse return;
 
     if (self.kitty_images.sync(std.heap.page_allocator, self, tab_id, term)) {
@@ -1055,42 +1156,59 @@ pub fn render(
     );
     self.common.syncBlinkTimer(hwnd, build.has_blink);
 
-    const presentation = self.beginPresentation(hwnd, prepared.client_w, prepared.client_h);
+    const presentation = self.beginPresentation(hwnd, prepared.client_w, prepared.client_h) orelse return;
     self.drawFrame(prepared, tabbar);
     self.finishFrame(presentation);
 }
 
-fn beginPresentation(
-    self: *Gl46Renderer,
-    hwnd: win32.HWND,
-    width: u32,
-    height: u32,
-) interop.Path {
+fn enableBaseline(self: *Gl46Renderer) void {
+    const hwnd = self.hwnd.?;
+    const style = win32.GetWindowLongPtrW(hwnd, win32.GWL_EXSTYLE);
+    const no_redirection: isize = @intCast(@as(u32, @bitCast(win32.WINDOW_EX_STYLE{ .NOREDIRECTIONBITMAP = 1 })));
+    if (style & no_redirection != 0) {
+        _ = win32.SetWindowLongPtrW(hwnd, win32.GWL_EXSTYLE, style & ~no_redirection);
+        _ = win32.SetWindowPos(hwnd, null, 0, 0, 0, 0, .{ .DRAWFRAME = 1, .NOMOVE = 1, .NOSIZE = 1, .NOZORDER = 1, .NOACTIVATE = 1 });
+    }
+}
+
+fn beginPresentation(self: *Gl46Renderer, hwnd: win32.HWND, width: u32, height: u32) ?interop.Path {
     if (!self.presentation.usesInterop()) {
         self.pure_wgl_surface.begin(width, height);
         return .baseline;
     }
     if (self.interop_state == .untried) {
-        self.interop_bridge = interop.Bridge.init(hwnd, width, height) catch |err| {
-            self.interop_state = .unavailable;
-            log.warn(
-                "DirectComposition bridge unavailable ({s}); using baseline WGL presentation",
-                .{@errorName(err)},
-            );
-            gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
-            return .baseline;
-        };
-        self.interop_state = .active;
-        log.info("WGL_NV_DX_interop2 DirectComposition bridge active", .{});
+        if (self.parent) |parent| {
+            if (parent.interop_state != .active) self.interop_state = .unavailable;
+        }
+        if (self.interop_state == .untried) {
+            const parent_bridge: ?*interop.Bridge = if (self.parent) |parent| &parent.interop_bridge.? else null;
+            self.interop_bridge = interop.Bridge.init(hwnd, width, height, parent_bridge) catch |err| {
+                if (self.parent != null) {
+                    self.recordFailure("create pane interop bridge", err);
+                    return null;
+                }
+                self.interop_state = .unavailable;
+                log.warn("DirectComposition bridge unavailable ({s}); using baseline WGL presentation", .{@errorName(err)});
+                self.enableBaseline();
+                self.pure_wgl_surface.begin(width, height);
+                return .baseline;
+            };
+            self.interop_state = .active;
+            log.info("WGL_NV_DX_interop2 DirectComposition bridge active: surface={} device=0x{x}", .{ self.common.surface_id, @intFromPtr(self.interop_bridge.?.presenter.device) });
+        }
     }
-
     if (self.interop_state.path() == .direct_composition) {
         self.interop_bridge.?.begin(width, height) catch |err| {
+            if (err == error.FrameBusy) {
+                self.frame_pending = true;
+                return null;
+            }
             self.failInterop(err);
-            return .baseline;
+            return null;
         };
     } else {
-        gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        self.enableBaseline();
+        self.pure_wgl_surface.begin(width, height);
     }
     return self.interop_state.path();
 }
@@ -1127,13 +1245,51 @@ test "pure WGL pixel format contract requires alpha sRGB and DWM composition" {
 }
 
 fn failInterop(self: *Gl46Renderer, err: anyerror) void {
-    if (self.interop_bridge) |*bridge| bridge.disable();
-    self.interop_state = .failed;
-    gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
-    log.warn(
-        "DirectComposition bridge failed ({s}); reverted to baseline WGL presentation",
-        .{@errorName(err)},
+    self.recordFailure("interop presentation", err);
+}
+
+pub fn renderChrome(self: *Gl46Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
+    _ = remote_session;
+    self.ensureInitialized(hwnd) catch |err| {
+        self.recordFailure("initialize chrome", err);
+        return;
+    };
+    const prepared = self.prepareFrame(hwnd, term, false) orelse return;
+    const path = self.beginPresentation(hwnd, prepared.client_w, prepared.client_h) orelse return;
+    gl.Disable(gl.SCISSOR_TEST);
+    gl.ClearColor(
+        std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
+        std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
+        std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
+        opacity,
     );
+    gl.Clear(gl.COLOR_BUFFER_BIT);
+    gl.Enable(gl.SCISSOR_TEST);
+    gl.ClearColor(0, 0, 0, 0);
+    for (pane_rects) |rect| {
+        gl.Scissor(rect.left, @as(gl.int, @intCast(prepared.client_h)) - rect.bottom, rect.right - rect.left, rect.bottom - rect.top);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
+    }
+    gl.Disable(gl.SCISSOR_TEST);
+    gl.BindVertexArray(self.vao);
+    gl.Viewport(0, 0, @intCast(prepared.client_w), @intCast(prepared.client_h));
+    gl.UseProgram(self.image_program);
+    RenderPass.overlay.begin();
+    self.drawTabBar(prepared, tabbar, 0);
+    self.finishFrame(path);
+}
+
+pub fn syncSurface(self: *Gl46Renderer, parent: *Gl46Renderer) void {
+    if (self.bg_image_generation != parent.bg_image_generation or self.background_image.texture != parent.background_image.texture) {
+        self.background_image = parent.background_image;
+        self.bg_image_generation = parent.bg_image_generation;
+        self.grid_force_full = true;
+    }
+    if (self.bg_image_opacity != parent.bg_image_opacity or self.bg_image_position != parent.bg_image_position or self.bg_image_fit != parent.bg_image_fit or self.bg_image_repeat != parent.bg_image_repeat) self.grid_force_full = true;
+    self.bg_image_opacity = parent.bg_image_opacity;
+    self.bg_image_position = parent.bg_image_position;
+    self.bg_image_fit = parent.bg_image_fit;
+    self.bg_image_repeat = parent.bg_image_repeat;
 }
 
 const PreparedFrame = struct {
@@ -1159,7 +1315,7 @@ fn prepareFrame(
     const client_w: u32 = @intCast(sz.cx);
     const client_h: u32 = @intCast(sz.cy);
     if (client_w == 0 or client_h == 0) return null;
-    self.beginFrame();
+    if (!self.beginFrame()) return null;
 
     const cs = self.font_service.cell_size_xy;
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
@@ -1307,6 +1463,11 @@ fn drawFrame(self: *Gl46Renderer, prepared: PreparedFrame, tabbar: types.TabBarD
         config_index += 1;
     }
 
+    self.drawTabBar(prepared, tabbar, config_index);
+    self.grid_force_full = false;
+}
+
+fn drawTabBar(self: *Gl46Renderer, prepared: PreparedFrame, tabbar: types.TabBarDraw, config_index: usize) void {
     if (prepared.tab_bar_h != 0) {
         const band = self.font_service.cpuBand(prepared.client_w, prepared.tab_bar_h);
         self.ensureTabbarTexture(prepared.client_w, prepared.tab_bar_h);
@@ -1346,7 +1507,6 @@ fn drawFrame(self: *Gl46Renderer, prepared: PreparedFrame, tabbar: types.TabBarD
         };
         self.drawImageConfig(config_index, &config, self.tabbar_texture);
     }
-    self.grid_force_full = false;
 }
 
 fn countVisiblePlacements(self: *Gl46Renderer) usize {
@@ -1401,7 +1561,7 @@ fn ensureTabbarTexture(self: *Gl46Renderer, width: u32, height: u32) void {
 
 pub fn applyGlyphResult(self: *Gl46Renderer, result: *RasterResult) bool {
     if (!self.initialized) return false;
-    gl.makeProcTableCurrent(&self.procs);
+    if (!self.activate()) return false;
     return glyph_mod.applyRasterResult(self, result);
 }
 
@@ -1411,21 +1571,22 @@ pub fn reloadBackgroundImage(
     cfg: *const Config,
     hwnd: win32.HWND,
 ) void {
-    self.ensureInitialized(hwnd) catch |err| std.debug.panic(
-        "renderer = opengl: initialization failed after the startup capability gate ({s})",
-        .{@errorName(err)},
-    );
+    self.ensureInitialized(hwnd) catch |err| {
+        self.recordFailure("initialize surface", err);
+        return;
+    };
+    self.bg_image_allocator = gpa;
     bg_image.reload(self, gpa, cfg, hwnd);
 }
 
 pub fn applyDecodedBackgroundImage(self: *Gl46Renderer, result: *const BgImageDecoded) void {
     if (!self.initialized) return;
-    gl.makeProcTableCurrent(&self.procs);
+    if (!self.activate()) return;
     bg_image.applyDecoded(self, result);
 }
 
 pub fn releaseKittyImagesForTab(self: *Gl46Renderer, tab_id: types.TabId) void {
-    if (self.initialized) gl.makeProcTableCurrent(&self.procs);
+    if (self.initialized and !self.activate()) return;
     self.kitty_images.releaseForTab(std.heap.page_allocator, tab_id);
 }
 
@@ -1448,4 +1609,143 @@ test "three completion slots keep mapped frame data isolated" {
     }
     try std.testing.expect(@sizeOf(shader.GridConfig) <= 256);
     try std.testing.expect(@sizeOf(kitty_image_mod.ImageConfig) <= 256);
+}
+
+test "OpenGL panes share context and programs but own DCs buffers and glyph caches" {
+    const Windows = struct {
+        fn create(parent: ?win32.HWND) !win32.HWND {
+            const name = win32.L("MosttyGlPaneTest");
+            const wc: win32.WNDCLASSEXW = .{
+                .cbSize = @sizeOf(win32.WNDCLASSEXW),
+                .style = .{ .OWNDC = 1 },
+                .lpfnWndProc = bootstrapWndProc,
+                .cbClsExtra = 0,
+                .cbWndExtra = 0,
+                .hInstance = win32.GetModuleHandleW(null),
+                .hIcon = null,
+                .hCursor = null,
+                .hbrBackground = null,
+                .lpszMenuName = null,
+                .lpszClassName = name,
+                .hIconSm = null,
+            };
+            if (win32.RegisterClassExW(&wc) == 0 and win32.GetLastError() != .ERROR_CLASS_ALREADY_EXISTS) return error.TestWindowUnavailable;
+            return win32.CreateWindowExW(.{}, name, win32.L(""), .{ .CHILD = if (parent != null) 1 else 0 }, 0, 0, 200, 160, parent, null, wc.hInstance, null) orelse error.TestWindowUnavailable;
+        }
+    };
+    inline for (.{ Presentation.interop, .pure_wgl }) |mode| {
+        const hwnd = try Windows.create(null);
+        defer _ = win32.DestroyWindow(hwnd);
+        const ah = try Windows.create(hwnd);
+        defer _ = win32.DestroyWindow(ah);
+        const bh = try Windows.create(hwnd);
+        defer _ = win32.DestroyWindow(bh);
+        var common: RendererCommon = undefined;
+        var fonts = FontService.init(&common, 96, .{}, true, null);
+        defer fonts.deinit();
+        var parent = init(&common, &fonts, null, mode);
+        defer parent.deinit();
+        parent.initializeWindow(hwnd) catch |err| switch (err) {
+            error.CreateContextUnavailable,
+            error.CoreContextRejected,
+            error.VersionTooOld,
+            error.PixelFormatExtensionUnavailable,
+            error.PixelFormatContractUnavailable,
+            error.SwapControlUnavailable,
+            error.BootstrapContextFailed,
+            => {
+                log.warn("OpenGL pane GPU test unavailable on this driver: {s}", .{@errorName(err)});
+                return error.SkipZigTest;
+            },
+            else => return err,
+        };
+        var ac = common;
+        ac.surface_id = 1;
+        ac.tab_bar_height = 0;
+        var bc = ac;
+        bc.surface_id = 2;
+        var a = initSurface(&parent, &ac);
+        defer a.deinit();
+        var b = initSurface(&parent, &bc);
+        defer b.deinit();
+        try a.initializeWindow(ah);
+        try b.initializeWindow(bh);
+        try std.testing.expect(a.context == parent.context and b.context == parent.context);
+        try std.testing.expect(a.dc != b.dc and a.dc != parent.dc);
+        try std.testing.expect(a.grid_program == parent.grid_program and b.image_program == parent.image_program);
+        try std.testing.expect(a.font_service == &fonts and b.font_service == &fonts);
+        try std.testing.expect(a.grid_ubo.name != b.grid_ubo.name);
+        try std.testing.expect(a.vao != b.vao);
+        try std.testing.expect(a.activate());
+        try std.testing.expect(a.cellsResize(4));
+        _ = a.atlasEnsure(.{ .x = 32, .y = 32 });
+        try std.testing.expect(b.activate());
+        try std.testing.expect(b.cellsResize(4));
+        _ = b.atlasEnsure(.{ .x = 32, .y = 32 });
+        try std.testing.expect(a.cells.name != b.cells.name and a.atlas != b.atlas);
+        a.glyph_cache = try GlyphIndexCache.init(a.glyph_cache_arena.allocator(), 2);
+        b.glyph_cache = try GlyphIndexCache.init(b.glyph_cache_arena.allocator(), 2);
+        const key: GlyphIndexCache.Key = .init('x', &.{}, .single, .regular);
+        const slot = (try a.glyph_cache.?.reserve(a.glyph_cache_arena.allocator(), key)).newly_reserved_pending;
+        _ = try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key);
+        var result: RasterResult = .{ .surface_id = 1, .slot = slot.index, .slot_gen = slot.slot_gen, .cache_gen = a.cache_gen, .key = key, .bytes = &.{}, .w = 0, .h = 0, .is_color = false, .failed = true };
+        try std.testing.expect(!b.applyGlyphResult(&result));
+        try std.testing.expect((try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key)) == .already_pending);
+        try std.testing.expect(a.applyGlyphResult(&result));
+        try std.testing.expect(win32.wglGetCurrentDC() == a.dc);
+        try std.testing.expect(parent.activate());
+        var pixels = [_]u8{ 0, 64, 128, 255 };
+        parent.backgroundImageUpload(.{ .pixels = &pixels, .w = 1, .h = 1 });
+        a.syncSurface(&parent);
+        b.syncSurface(&parent);
+        try std.testing.expect(a.background_image.texture == parent.background_image.texture and b.background_image.texture != 0);
+        parent.backgroundImageRelease();
+        a.syncSurface(&parent);
+        b.syncSurface(&parent);
+        try std.testing.expect(!a.background_image.loaded() and !b.background_image.loaded());
+        // Destroying one child must leave the borrowed context and programs usable.
+        var transient_common = ac;
+        transient_common.surface_id = 3;
+        var transient = initSurface(&parent, &transient_common);
+        try transient.initializeWindow(ah);
+        transient.deinit();
+        try std.testing.expect(parent.activate());
+        try std.testing.expect(gl.IsProgram(parent.grid_program) == gl.TRUE);
+        if (mode == .pure_wgl) {
+            var hook_context: u8 = 0;
+            var session: @import("../terminal/Session.zig") = undefined;
+            try session.init(.{ .io = std.Io.Threaded.global_single_threaded.io(), .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 8, .rows = 4, .hooks = .{ .context = &hook_context } });
+            defer session.deinit();
+            common.tab_bar_height = 0;
+            const hole = win32.RECT{ .left = 0, .top = 10, .right = 100, .bottom = 50 };
+            parent.renderChrome(hwnd, session.term, .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false }, 0xffffff, 1, false, &.{hole});
+            try std.testing.expect(parent.failure == null);
+            gl.BindFramebuffer(gl.READ_FRAMEBUFFER, parent.pure_wgl_surface.framebuffer);
+            var inside: [4]u8 = undefined;
+            var outside: [4]u8 = undefined;
+            const height = win32.getClientSize(hwnd).cy;
+            // Readback uses lower-left coordinates; the requested pane hole is near the top.
+            gl.ReadPixels(10, height - 20, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, &inside);
+            gl.ReadPixels(10, 20, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, &outside);
+            try std.testing.expectEqual(@as(u8, 0), inside[3]);
+            try std.testing.expectEqual(@as(u8, 255), outside[3]);
+            gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+        }
+    }
+    const recovery_hwnd = try Windows.create(null);
+    defer _ = win32.DestroyWindow(recovery_hwnd);
+    var facade: @import("Renderer.zig") = undefined;
+    try facade.init(96, .{}, true, null, .opengl, false);
+    defer facade.deinit();
+    try std.testing.expect(facade.initializeWindow(recovery_hwnd, null) == null);
+    facade.backend.?.opengl.interop_state = .unavailable;
+    const old_request: u32 = 19;
+    const new_generation: u32 = 43;
+    facade.backend.?.opengl.bg_image_req_id = old_request;
+    try std.testing.expect(facade.recoverOpenGL(recovery_hwnd, null, new_generation));
+    try std.testing.expectEqual(interop.State.unavailable, facade.backend.?.opengl.interop_state);
+    try std.testing.expectEqual(old_request + 1, facade.backend.?.opengl.bg_image_req_id);
+    try std.testing.expectEqual(new_generation, facade.backend.?.opengl.cache_gen);
+    try std.testing.expect(facade.backend.?.opengl.activate());
+    try std.testing.expect(!facade.recoverOpenGL(recovery_hwnd, null, new_generation + 1));
 }

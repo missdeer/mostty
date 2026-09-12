@@ -570,7 +570,10 @@ process. For example, an opaque native Vulkan run is:
 Mostty.exe --renderer native-vulkan --background-opacity 1 --background-blur false
 ```
 
-Both OpenGL choices require an OpenGL 4.6 driver and do not support `gpu`
+Both OpenGL choices support native panes with one shared context and independent
+presentation/caches. Reported presentation failures rebuild graphics resources
+without restarting shells; unrecoverable failure is reported without changing
+the selected renderer. Both choices require an OpenGL 4.6 driver and do not support `gpu`
 adapter overrides. RDP sessions are allowed when their active display driver
 exposes the required capabilities. `pure-opengl` additionally requires a
 double-buffered pixel format with 8-bit alpha, sRGB encoding, and DWM

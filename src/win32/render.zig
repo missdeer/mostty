@@ -76,7 +76,14 @@ pub fn renderWindow(window: *Window) void {
             frame_pending = frame_pending or pane.renderer.?.needsFrame();
             _ = win32.ValidateRect(pane.hwnd.?, null);
         }
-        if (frame_pending) window.requestRender() else global.renderer.d3d12_recovery_attempted = false;
+        if (frame_pending) window.requestRender() else {
+            global.renderer.d3d12_recovery_attempted = false;
+            global.renderer.opengl_recovery_attempted = false;
+        }
+        if (global.renderer.backend.? == .opengl and global.renderer.backend.?.opengl.interop_state == .unavailable and !window.dwm_redirected) {
+            window.dwm_redirected = true;
+            @import("util.zig").applyBlurBehind(window.hwnd, global.config.background_blur, true);
+        }
         return;
     }
     if (global.renderer.render(
@@ -132,9 +139,12 @@ pub fn renderWindow(window: *Window) void {
 
 fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
     std.log.err("pane renderer {s} failed while {s} ({s})", .{ failure.backendName(), failure.operationDescription(), failure.codeName() });
-    std.log.err("D3D12 failure hresult=0x{x}", .{@as(u32, @bitCast(failure.d3d12.hresult))});
+    if (failure == .d3d12) std.log.err("D3D12 failure hresult=0x{x}", .{@as(u32, @bitCast(failure.d3d12.hresult))});
     window.confirming_renderer_fallback = true;
-    var generation = global.renderer.backend.?.d3d12.cache_gen;
+    var generation = switch (global.renderer.backend.?) {
+        inline .d3d12, .opengl => |backend| backend.cache_gen,
+        else => unreachable,
+    };
     for (window.panes.items) |pane| {
         if (pane.renderer) |*surface| {
             generation = @max(generation, surface.cacheGeneration());
@@ -142,7 +152,11 @@ fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
             pane.renderer = null;
         }
     }
-    var recovered = global.renderer.recoverD3d12(window.hwnd, global.config.gpu, generation +% 1);
+    var recovered = switch (failure) {
+        .d3d12 => global.renderer.recoverD3d12(window.hwnd, global.config.gpu, generation +% 1),
+        .opengl => global.renderer.recoverOpenGL(window.hwnd, global.config.gpu, generation +% 1),
+        else => unreachable,
+    };
     if (recovered) {
         for (window.panes.items) |pane| {
             if (pane.closing) continue;
@@ -157,13 +171,13 @@ fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
         }
     }
     if (!recovered) {
-        _ = win32.MessageBoxW(window.hwnd, win32.L("D3D12 pane recovery failed. Mostty will close without switching renderers."), win32.L("Mostty renderer unavailable"), .{ .ICONHAND = 1 });
+        _ = win32.MessageBoxW(window.hwnd, win32.L("Pane renderer recovery failed. Mostty will close without switching renderers."), win32.L("Mostty renderer unavailable"), .{ .ICONHAND = 1 });
         _ = win32.DestroyWindow(window.hwnd);
         return;
     }
     global.renderer.reloadBackgroundImage(global.gpa.allocator(), &global.config, window.hwnd);
     window.confirming_renderer_fallback = false;
-    std.log.warn("D3D12 pane recovery complete: {} sessions and HWNDs retained", .{window.panes.items.len});
+    std.log.warn("{s} pane recovery complete: {} sessions and HWNDs retained", .{ if (failure == .d3d12) "D3D12" else "OpenGL", window.panes.items.len });
     window.requestRender();
 }
 

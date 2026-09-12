@@ -5,16 +5,19 @@ const vt = @import("vt");
 const Renderer = @import("Renderer.zig");
 const d3d11 = @import("d3d11.zig");
 const d3d12 = @import("d3d12/renderer.zig");
+const gl46 = @import("gl46.zig");
+pub const InitError = d3d12.StartupError || gl46.StartupError;
 const types = @import("types.zig");
 
 // Only implementations with a complete pane lifecycle enter this union.
 backend: union(enum) {
     d3d11: d3d11,
     d3d12: d3d12,
+    opengl: gl46,
 },
 font_generation: u32,
 
-pub fn init(parent: *Renderer, common: *Renderer.RendererCommon) d3d12.StartupError!?PaneSurface {
+pub fn init(parent: *Renderer, common: *Renderer.RendererCommon) InitError!?PaneSurface {
     const active = if (parent.backend) |*backend| backend else return null;
     return switch (active.*) {
         .d3d11 => |*backend| .{
@@ -25,6 +28,7 @@ pub fn init(parent: *Renderer, common: *Renderer.RendererCommon) d3d12.StartupEr
             .backend = .{ .d3d12 = try d3d12.initSurface(backend, common) },
             .font_generation = backend.cache_gen,
         },
+        .opengl => |*backend| if (backend.initialized) .{ .backend = .{ .opengl = gl46.initSurface(backend, common) }, .font_generation = backend.cache_gen } else null,
         else => null,
     };
 }
@@ -59,6 +63,9 @@ pub fn runtimeFailure(self: *PaneSurface) ?Renderer.RuntimeFailure {
             _ = backend.healthy();
             if (backend.failure) |failure| return .{ .d3d12 = failure };
         },
+        .opengl => |*backend| if (backend.failure) |failure| {
+            return .{ .opengl = failure };
+        },
         else => {},
     }
     return null;
@@ -66,7 +73,7 @@ pub fn runtimeFailure(self: *PaneSurface) ?Renderer.RuntimeFailure {
 
 pub fn needsFrame(self: *const PaneSurface) bool {
     return switch (self.backend) {
-        .d3d12 => |backend| backend.frame_pending,
+        inline .d3d12, .opengl => |backend| backend.frame_pending,
         else => false,
     };
 }
