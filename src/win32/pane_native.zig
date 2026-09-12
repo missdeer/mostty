@@ -40,7 +40,13 @@ fn create(window: *state.Window, pane: *state.Pane) void {
     pane.common.surface_id = pane.id;
     pane.common.tab_bar_height = 0;
     pane.common.blink_timer_armed = false;
-    pane.renderer = global.renderer.initPaneSurface(&pane.common);
+    pane.renderer = global.renderer.initPaneSurface(&pane.common) catch |err| {
+        pane.closing = true;
+        std.log.err("cannot create pane {} for {s}: {s}", .{ pane.id, @tagName(global.renderer.configured_backend), @errorName(err) });
+        _ = win32.MessageBoxW(window.hwnd, win32.L("The selected renderer could not create this pane. Its session will close; the renderer has not been changed."), win32.L("Mostty pane unavailable"), .{ .ICONHAND = 1 });
+        _ = win32.PostMessageW(window.hwnd, types.WM_APP_CLOSE_PANE, pane.id, 0);
+        return;
+    };
     if (pane.renderer == null) std.debug.panic("selected renderer cannot create a pane surface", .{});
     pane.hwnd = win32.CreateWindowExW(
         .{ .NOREDIRECTIONBITMAP = 1 },
@@ -117,6 +123,7 @@ pub fn reflow(window: *state.Window) void {
     for (window.panes.items) |pane| {
         if (pane.closing) continue;
         if (pane.hwnd == null) create(window, pane);
+        if (pane.closing) continue;
         syncSurface(pane);
         const rect = pane.tab.layout.paneRect(pane.id);
         if (rect) |r| {

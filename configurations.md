@@ -542,7 +542,10 @@ renderer = d3d11
 ```
 
 - `d3d11` is the default validated backend.
-- `d3d12` is the explicit Direct3D 12 research backend.
+- `d3d12` is the explicit Direct3D 12 research backend. Native panes share its
+  device and pipelines while keeping independent presentation and caches. Device
+  recovery retains pane windows and shells; an unsuccessful rebuild reports an
+  error and closes without changing renderers.
 - `opengl` is the OpenGL 4.6 / shared-SPIR-V research backend with the
   `WGL_NV_DX_interop2` DirectComposition bridge when available.
 - `pure-opengl` uses the same OpenGL renderer but presents directly through

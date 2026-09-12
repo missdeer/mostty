@@ -3,8 +3,8 @@
 //! Fulfils the whole renderer facade contract, which is the precondition for
 //! being selectable at all: a backend that could only draw part of the
 //! picture would be a selectable broken terminal. It is nonetheless a
-//! research option, not a default — only static and low-frequency correctness
-//! is claimed here, and sustained-load behaviour is a later concern.
+//! research option, not a default. Pane surfaces retain shared device and
+//! pipeline resources while owning their command, cache and presentation state.
 //!
 //! Everything above the GPU boundary — translating terminal state into cells,
 //! glyph cache policy, grid geometry, dirty ranges — is the shared source in
@@ -48,6 +48,11 @@ const log = std.log.scoped(.d3d12);
 pub const BgImageDecoded = bg_image.BgImageDecoded;
 pub const RasterResult = FontService.RasterResult;
 pub const scrollbarWidth = gpu.scrollbarWidth;
+
+pub const RuntimeFailure = struct {
+    operation: []const u8,
+    hresult: i32,
+};
 
 pub const StartupError = error{
     AdapterUnavailable,
@@ -107,7 +112,10 @@ pub const KittyImage = struct {
     /// that stays conservative: it is rare, so settling first costs nothing in
     /// the sustained path and is the only thing that makes the release safe.
     pub fn release(self: *KittyImage) void {
-        self.owner.settleBeforeRelease();
+        if (!self.owner.tearing_down and !self.owner.settleBeforeRelease()) {
+            self.owner.retired_after_failure.append(std.heap.page_allocator, self.resource) catch @panic("D3D12 resource retirement allocation failed");
+            return;
+        }
         _ = self.resource.IUnknown.Release();
     }
 };
@@ -129,6 +137,10 @@ pub const BackgroundImage = struct {
 
 // --- Shared-layer state (mirrors the other backend field for field) ---
 common: *RendererCommon,
+failure: ?RuntimeFailure = null,
+frame_pending: bool = false,
+tearing_down: bool = false,
+retired_after_failure: std.ArrayListUnmanaged(*win32.ID3D12Resource) = .empty,
 font_service: *FontService,
 shadow_cells: []shader.Cell = &.{},
 glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
@@ -149,6 +161,7 @@ diag_rows_skipped: u64 = 0,
 
 background_image: BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
+bg_image_allocator: ?std.mem.Allocator = null,
 bg_image_opacity: f32 = 1.0,
 bg_image_position: Config.BackgroundImagePosition = .center,
 bg_image_fit: Config.BackgroundImageFit = .contain,
@@ -204,6 +217,16 @@ pub fn init(
     font_service: *FontService,
     configured_gpu: ?[]const u8,
 ) StartupError!D3d12Renderer {
+    return initResources(common, font_service, configured_gpu, null);
+}
+
+pub fn initSurface(parent: *D3d12Renderer, common: *RendererCommon) StartupError!D3d12Renderer {
+    const surface = try initResources(common, parent.font_service, null, parent);
+    log.info("pane created: id={} device=0x{x} queue=0x{x}", .{ common.surface_id, @intFromPtr(parent.device), @intFromPtr(parent.queue) });
+    return surface;
+}
+
+fn initResources(common: *RendererCommon, font_service: *FontService, configured_gpu: ?[]const u8, parent: ?*D3d12Renderer) StartupError!D3d12Renderer {
     const selected_adapter = if (configured_gpu) |name|
         swap_chain_mod.findHardwareAdapterByName(name) orelse return error.AdapterUnavailable
     else
@@ -213,7 +236,10 @@ pub fn init(
     };
 
     var device: *win32.ID3D12Device = undefined;
-    {
+    if (parent) |p| {
+        device = p.device;
+        _ = device.IUnknown.AddRef();
+    } else {
         const hr = win32.D3D12CreateDevice(
             if (selected_adapter) |a| @ptrCast(a) else null,
             .@"11_0",
@@ -225,7 +251,10 @@ pub fn init(
     errdefer _ = device.IUnknown.Release();
 
     var queue: *win32.ID3D12CommandQueue = undefined;
-    {
+    if (parent) |p| {
+        queue = p.queue;
+        _ = queue.IUnknown.AddRef();
+    } else {
         const desc = win32.D3D12_COMMAND_QUEUE_DESC{
             .Type = .DIRECT,
             .Priority = 0,
@@ -285,16 +314,25 @@ pub fn init(
     const fence_event = win32.CreateEventW(null, 0, 0, null) orelse return error.FenceEventUnavailable;
     errdefer _ = win32.CloseHandle(fence_event);
 
-    const root_signature = pipeline.createRootSignature(device) catch return error.BindingLayoutRejected;
+    const root_signature = if (parent) |p| blk: {
+        _ = p.root_signature.IUnknown.AddRef();
+        break :blk p.root_signature;
+    } else pipeline.createRootSignature(device) catch return error.BindingLayoutRejected;
     errdefer _ = root_signature.IUnknown.Release();
-    const pso_grid = pipeline.createPipeline(
+    const pso_grid = if (parent) |p| blk: {
+        _ = p.pso_grid.IUnknown.AddRef();
+        break :blk p.pso_grid;
+    } else pipeline.createPipeline(
         device,
         root_signature,
         shader_assets.pixel.dxil,
         .opaque_write,
     ) catch return error.GridPipelineRejected;
     errdefer _ = pso_grid.IUnknown.Release();
-    const pso_inline_image = pipeline.createPipeline(
+    const pso_inline_image = if (parent) |p| blk: {
+        _ = p.pso_inline_image.IUnknown.AddRef();
+        break :blk p.pso_inline_image;
+    } else pipeline.createPipeline(
         device,
         root_signature,
         shader_assets.image_pixel.dxil,
@@ -313,14 +351,15 @@ pub fn init(
 
     // The other backend classifies the adapter for its present policy; do the
     // same so the shared throttle decision sees identical inputs.
-    common.remote_or_software_adapter = detectRemoteOrSoftware(selected_adapter);
-    log.info(
+    common.remote_or_software_adapter = if (parent) |p| p.common.remote_or_software_adapter else detectRemoteOrSoftware(selected_adapter);
+    if (parent == null) log.info(
         "D3D12 device created (research backend): selection={s}, remote_or_software={}",
         .{ if (configured_gpu != null) "explicit" else "automatic", common.remote_or_software_adapter },
     );
 
     return .{
         .common = common,
+        .cache_gen = if (parent) |p| p.cache_gen else 0,
         .font_service = font_service,
         .device = device,
         .queue = queue,
@@ -340,13 +379,14 @@ pub fn initializeWindow(self: *D3d12Renderer, hwnd: win32.HWND) StartupError!voi
     if (self.surface != null) return;
     const size = win32.getClientSize(hwnd);
     if (size.cx <= 0 or size.cy <= 0) return error.PresentationUnavailable;
-    self.surface = present.Surface.init(
+    self.surface = present.Surface.initLayer(
         &self.queue.IUnknown,
         null,
         hwnd,
         @intCast(size.cx),
         @intCast(size.cy),
         pipeline.render_target_format,
+        self.common.surface_id != 0,
     ) catch return error.PresentationUnavailable;
 }
 
@@ -363,7 +403,15 @@ fn detectRemoteOrSoftware(adapter: ?*win32.IDXGIAdapter1) bool {
 }
 
 pub fn deinit(self: *D3d12Renderer) void {
-    self.waitForGpu();
+    self.tearing_down = true;
+    // A removed device has stopped executing. Otherwise drain submitted work
+    // even when presentation failed before releasing resources it can reference.
+    if (self.device.GetDeviceRemovedReason() >= 0) {
+        self.failure = null;
+        if (!self.submit() or !self.waitForGpu()) {
+            if (self.device.GetDeviceRemovedReason() >= 0) fatal("teardown could not drain a live device", -1);
+        }
+    }
     if (self.recording) {
         _ = self.command_list.Close();
         self.recording = false;
@@ -374,6 +422,8 @@ pub fn deinit(self: *D3d12Renderer) void {
     self.batch_open = false;
 
     self.kitty_images.deinit(std.heap.page_allocator);
+    for (self.retired_after_failure.items) |resource| _ = resource.IUnknown.Release();
+    self.retired_after_failure.deinit(std.heap.page_allocator);
     if (self.glyph_cache) |*c| {
         c.deinit(self.glyph_cache_arena.allocator());
         self.glyph_cache = null;
@@ -383,6 +433,7 @@ pub fn deinit(self: *D3d12Renderer) void {
     self.shadow_cells = &.{};
 
     self.background_image.release();
+    if (self.bg_image_allocator) |allocator| allocator.free(self.bg_image_path);
     self.atlas.release();
     self.cells.release();
     self.back_buffer.release();
@@ -425,8 +476,8 @@ pub fn onFontStateChanged(self: *D3d12Renderer) void {
 /// DWM hiccup must not be able to freeze the message pump.
 const presentation_gate_ms: u32 = 100;
 /// How long the completion signal is allowed to take before we call the GPU
-/// wedged. Unlike the gate above this is a correctness wait, so it is generous
-/// and fatal rather than short and best-effort.
+/// wedged. A timeout enters recovery; only teardown that cannot establish
+/// safety on a still-live device must stop the process.
 const completion_wait_ms: u32 = 10_000;
 
 fn commandAllocator(self: *D3d12Renderer) *win32.ID3D12CommandAllocator {
@@ -443,36 +494,43 @@ fn descriptors(self: *D3d12Renderer) *pipeline.Descriptors {
 
 /// Take ownership of a generation for a new submission batch.
 ///
-/// Every batch passes through here before anything is recorded into it, which
-/// is what keeps the throttle decision below the only one on the frame path:
-/// work arriving between frames — an async glyph landing, say — joins a batch
-/// that has already been let through rather than opening an ungated one.
-fn beginBatch(self: *D3d12Renderer) void {
-    if (self.batch_open) {
-        self.beginRecording();
-        return;
-    }
-    self.awaitNextGeneration();
+/// Recording can begin only after the next generation is safe. Pane renders
+/// separately poll presentation readiness; asynchronous glyphs only need a
+/// safe upload generation, and may join an already-open batch.
+fn beginBatch(self: *D3d12Renderer) bool {
+    if (!self.healthy()) return false;
+    if (self.batch_open) return self.beginRecording();
+    if (!self.awaitNextGeneration()) return false;
     self.ring.advance();
-    if (!self.ring.currentIsSafe(self.fence.GetCompletedValue())) std.debug.panic(
-        "renderer = d3d12: staging generation {d} was handed out while the GPU may still " ++
-            "be reading it",
-        .{self.ring.cursor},
-    );
-    if (self.commandAllocator().Reset() < 0) fatal("CommandAllocator.Reset", 0);
+    std.debug.assert(self.ring.currentIsSafe(self.fence.GetCompletedValue()));
+    if (!self.check(self.commandAllocator().Reset(), "CommandAllocator.Reset")) return false;
     self.arena().recycle();
     self.batch_open = true;
-    self.beginRecording();
+    return self.beginRecording();
 }
 
-/// The single throttle decision.
-///
-/// Presentation readiness and the completion of the generation about to be
-/// reused are solved together, before any ownership is taken. Deciding them in
-/// two places would either serialize two conditions that can progress at once
-/// or leave a hidden idle wait in one of them, and that stacked delay is what
-/// this backend has to avoid to stay level with the other one.
-fn awaitNextGeneration(self: *D3d12Renderer) void {
+pub fn healthy(self: *D3d12Renderer) bool {
+    if (self.failure != null) return false;
+    return self.check(self.device.GetDeviceRemovedReason(), "device removed");
+}
+
+fn check(self: *D3d12Renderer, hr: i32, operation: []const u8) bool {
+    if (hr >= 0) return true;
+    if (self.failure == null) {
+        self.failure = .{ .operation = operation, .hresult = hr };
+    }
+    return false;
+}
+
+fn generationReady(self: *D3d12Renderer) bool {
+    if (!self.healthy()) return false;
+    return self.batch_open or self.fence.GetCompletedValue() >= (self.ring.blocking() orelse 0);
+}
+
+fn awaitNextGeneration(self: *D3d12Renderer) bool {
+    // Child panes never wait on frame admission. Their next paint retries after
+    // the outstanding generation finishes, instead of stacking waits per pane.
+    if (self.common.surface_id != 0) return self.generationReady();
     const owed = self.ring.blocking();
     var handles: [2]win32.HANDLE = undefined;
     var count: u32 = 0;
@@ -480,117 +538,74 @@ fn awaitNextGeneration(self: *D3d12Renderer) void {
         handles[count] = s.frame_latency_waitable;
         count += 1;
     }
-    const armed = if (owed) |value| self.armCompletion(value) else false;
-    if (armed) {
-        handles[count] = self.fence_event;
-        count += 1;
-    }
-    if (count == 0) return;
-
-    // One wait for both conditions: whichever is slower sets the cost, and
-    // neither is observed behind the other.
-    _ = win32.WaitForMultipleObjects(count, &handles, 1, presentation_gate_ms);
-
-    // The presentation gate is best-effort and is now done with either way.
-    // The completion signal is not: handing this generation out early is the
-    // corruption this backend exists to avoid, so it gets the rest of the
-    // budget. In the ordinary case where the GPU is the slower of the two,
-    // the wait above already covered most of it.
-    if (owed) |value| self.awaitCompletion(value);
-}
-
-/// Block until the fence has reached `value`.
-///
-/// One event serves every wait site here, so a wake is not by itself proof
-/// that this value was reached — an earlier registration for a lower value can
-/// signal the same event. The fence is therefore rechecked rather than
-/// trusted, which keeps this correct locally instead of depending on no other
-/// site ever leaving a registration outstanding.
-fn awaitCompletion(self: *D3d12Renderer, value: u64) void {
-    while (self.fence.GetCompletedValue() < value) {
-        if (!self.armCompletion(value)) return;
-        // Bounded so a wedged GPU surfaces as a hang we can see rather than an
-        // unkillable message pump.
-        if (win32.WaitForSingleObject(self.fence_event, completion_wait_ms) != .NO_ERROR) {
-            fatal("WaitForSingleObject(fence)", 0);
+    if (owed) |value| {
+        if (self.fence.GetCompletedValue() < value) {
+            _ = win32.ResetEvent(self.fence_event);
+            if (!self.check(self.fence.SetEventOnCompletion(value, self.fence_event), "SetEventOnCompletion")) return false;
+            handles[count] = self.fence_event;
+            count += 1;
         }
     }
+    if (count > 0) _ = win32.WaitForMultipleObjects(count, &handles, 1, presentation_gate_ms);
+    return if (owed) |value| self.awaitCompletion(value) else self.healthy();
 }
 
-/// Arm the completion event for `value`, reporting whether a wait is needed.
-///
-/// The event is reset first because it is auto-reset: an earlier arming whose
-/// signal nobody consumed would otherwise let the next wait return at once,
-/// which reads as "the GPU is done" when it is not.
-fn armCompletion(self: *D3d12Renderer, value: u64) bool {
-    if (self.fence.GetCompletedValue() >= value) return false;
-    _ = win32.ResetEvent(self.fence_event);
-    if (self.fence.SetEventOnCompletion(value, self.fence_event) < 0) {
-        fatal("SetEventOnCompletion", 0);
+fn awaitCompletion(self: *D3d12Renderer, value: u64) bool {
+    const deadline = win32.GetTickCount64() + completion_wait_ms;
+    while (self.healthy()) {
+        if (self.fence.GetCompletedValue() >= value) return true;
+        _ = win32.ResetEvent(self.fence_event);
+        if (!self.check(self.fence.SetEventOnCompletion(value, self.fence_event), "SetEventOnCompletion")) return false;
+        const now = win32.GetTickCount64();
+        if (now >= deadline) return self.check(@bitCast(@as(u32, 0x800705b4)), "completion timeout");
+        _ = win32.WaitForSingleObject(self.fence_event, @intCast(deadline - now));
     }
+    return false;
+}
+
+fn beginRecording(self: *D3d12Renderer) bool {
+    if (!self.healthy()) return false;
+    if (self.recording) return true;
+    if (!self.check(self.command_list.Reset(self.commandAllocator(), null), "CommandList.Reset")) return false;
+    self.recording = true;
     return true;
 }
 
-fn beginRecording(self: *D3d12Renderer) void {
-    if (self.recording) return;
-    if (self.command_list.Reset(self.commandAllocator(), null) < 0) fatal("CommandList.Reset", 0);
-    self.recording = true;
-}
-
-/// Close and submit whatever is recorded, binding this generation to a new
-/// completion value.
-///
-/// It does not wait. The wait belongs to the single decision point that hands
-/// the generation out again, which is what lets the CPU record the next frame
-/// while the GPU is still reading this one.
-fn submit(self: *D3d12Renderer) void {
-    if (!self.recording) return;
-    if (self.command_list.Close() < 0) fatal("CommandList.Close", 0);
+fn submit(self: *D3d12Renderer) bool {
+    if (!self.healthy()) return false;
+    if (!self.recording) return true;
+    if (!self.check(self.command_list.Close(), "CommandList.Close")) return false;
     self.recording = false;
-
     var lists = [_]?*win32.ID3D12CommandList{@ptrCast(self.command_list)};
     self.queue.ExecuteCommandLists(lists.len, &lists);
-    self.signalCompletion();
+    return self.signalCompletion();
 }
 
-/// Make it safe to release a resource that recorded work may reference.
-///
-/// A D3D12 command list does not keep the resources it names alive, so
-/// waiting on the fence is not enough on its own: anything already recorded
-/// but not yet submitted would execute against freed memory. Submitting first
-/// and only then waiting is what closes that window.
-///
-/// This is one of the lifecycle points kept deliberately conservative: it
-/// retires GPU-visible resources and is rare, so a full wait costs nothing in
-/// the sustained path. The batch stays open across it — it has already passed
-/// the throttle decision and must not take it a second time.
-fn settleBeforeRelease(self: *D3d12Renderer) void {
-    self.submit();
-    self.waitForGpu();
-    if (!self.batch_open) return;
-    // Everything staged in this generation has now executed, so the arena can
-    // be handed back and the allocator reset without leaving the batch.
-    if (self.commandAllocator().Reset() < 0) fatal("CommandAllocator.Reset", 0);
+fn settleBeforeRelease(self: *D3d12Renderer) bool {
+    if (!self.submit() or !self.waitForGpu()) return false;
+    if (!self.batch_open) return true;
+    if (!self.check(self.commandAllocator().Reset(), "CommandAllocator.Reset")) return false;
     self.arena().recycle();
-    self.beginRecording();
+    return self.beginRecording();
 }
 
-fn signalCompletion(self: *D3d12Renderer) void {
+fn signalCompletion(self: *D3d12Renderer) bool {
     self.fence_value += 1;
-    if (self.queue.Signal(self.fence, self.fence_value) < 0) fatal("Queue.Signal", 0);
+    if (!self.check(self.queue.Signal(self.fence, self.fence_value), "Queue.Signal")) return false;
     self.ring.bind(self.fence_value);
+    return true;
 }
 
-/// Block until the queue has drained. Reserved for lifecycle points that
-/// retire or replace GPU-visible resources.
-fn waitForGpu(self: *D3d12Renderer) void {
-    self.signalCompletion();
-    self.awaitCompletion(self.fence_value);
+fn waitForGpu(self: *D3d12Renderer) bool {
+    if (!self.healthy() or !self.signalCompletion()) return false;
+    return self.awaitCompletion(self.fence_value);
 }
 
-fn reserve(self: *D3d12Renderer, len: u64, alignment: u64) upload.Arena.Reservation {
-    return self.arena().reserve(self.device, len, alignment) catch |err| {
-        std.debug.panic("renderer = d3d12: upload staging failed ({s})", .{@errorName(err)});
+fn reserve(self: *D3d12Renderer, len: u64, alignment: u64) ?upload.Arena.Reservation {
+    if (!self.healthy()) return null;
+    return self.arena().reserve(self.device, len, alignment) catch {
+        _ = self.check(-1, "upload staging");
+        return null;
     };
 }
 
@@ -598,7 +613,7 @@ fn reserve(self: *D3d12Renderer, len: u64, alignment: u64) upload.Arena.Reservat
 
 pub fn cellsResize(self: *D3d12Renderer, count: u32) bool {
     if (count == self.cells_count and self.cells.resource != null) return false;
-    self.settleBeforeRelease();
+    if (!self.settleBeforeRelease()) return false;
     self.cells.release();
     self.cells_count = count;
     if (count == 0) {
@@ -613,7 +628,7 @@ pub fn cellsResize(self: *D3d12Renderer, count: u32) bool {
     var resource: *win32.ID3D12Resource = undefined;
     const props = upload.heapProps(.DEFAULT);
     const desc = upload.bufferDesc(bytes);
-    if (self.device.CreateCommittedResource(
+    if (!self.check(self.device.CreateCommittedResource(
         &props,
         .{},
         &desc,
@@ -621,7 +636,7 @@ pub fn cellsResize(self: *D3d12Renderer, count: u32) bool {
         null,
         win32.IID_ID3D12Resource,
         @ptrCast(&resource),
-    ) < 0) fatal("CreateCommittedResource(cells)", 0);
+    ), "CreateCommittedResource(cells)")) return false;
     self.cells = .{ .resource = resource, .state = win32.D3D12_RESOURCE_STATE_COPY_DEST };
 
     self.refreshSharedDescriptors();
@@ -630,11 +645,11 @@ pub fn cellsResize(self: *D3d12Renderer, count: u32) bool {
 
 pub fn cellsUpload(self: *D3d12Renderer, first_cell: u32, cells: []const shader.Cell) void {
     const resource = self.cells.resource orelse return;
-    self.beginBatch();
+    if (!self.beginBatch()) return;
     self.cells.moveTo(self.command_list, win32.D3D12_RESOURCE_STATE_COPY_DEST);
 
     const bytes = std.mem.sliceAsBytes(cells);
-    const res = self.reserve(bytes.len, 4);
+    const res = self.reserve(bytes.len, 4) orelse return;
     @memcpy(res.bytes, bytes);
     self.command_list.CopyBufferRegion(
         resource,
@@ -649,13 +664,13 @@ pub fn atlasEnsure(self: *D3d12Renderer, tex_pixel: CellXY) bool {
     if (self.atlas_size) |s| {
         if (s.eql(tex_pixel)) return true;
     }
-    self.settleBeforeRelease();
+    if (!self.settleBeforeRelease()) return false;
     self.atlas.release();
 
     var resource: *win32.ID3D12Resource = undefined;
     const props = upload.heapProps(.DEFAULT);
     const desc = upload.texture2dDesc(.B8G8R8A8_UNORM, tex_pixel.x, tex_pixel.y, .{});
-    if (self.device.CreateCommittedResource(
+    if (!self.check(self.device.CreateCommittedResource(
         &props,
         .{},
         &desc,
@@ -663,7 +678,7 @@ pub fn atlasEnsure(self: *D3d12Renderer, tex_pixel: CellXY) bool {
         null,
         win32.IID_ID3D12Resource,
         @ptrCast(&resource),
-    ) < 0) fatal("CreateCommittedResource(glyph atlas)", 0);
+    ), "CreateCommittedResource(glyph atlas)")) return false;
     self.atlas = .{ .resource = resource, .state = win32.D3D12_RESOURCE_STATE_COPY_DEST };
     self.atlas_size = tex_pixel;
 
@@ -679,14 +694,14 @@ pub fn atlasWriteCpu(
     src_row_pitch: u32,
 ) void {
     const resource = self.atlas.resource orelse return;
-    self.beginBatch();
+    if (!self.beginBatch()) return;
     self.atlas.moveTo(self.command_list, win32.D3D12_RESOURCE_STATE_COPY_DEST);
 
     // D3D12 requires each staged row to start on a 256-byte boundary, so the
     // caller's rows are repacked rather than copied wholesale.
     const dst_pitch: u32 = @intCast(upload.alignUp(@as(u64, region.x) * 4, upload.texture_row_alignment));
     const total: u64 = @as(u64, dst_pitch) * region.y;
-    const res = self.reserve(total, upload.texture_placement_alignment);
+    const res = self.reserve(total, upload.texture_placement_alignment) orelse return;
     const row_bytes: usize = @as(usize, region.x) * 4;
     var y: u32 = 0;
     while (y < region.y) : (y += 1) {
@@ -743,7 +758,7 @@ pub fn atlasCopyStaging(
 /// descriptor D3D12 will happily sample from.
 pub fn backgroundImageRelease(self: *D3d12Renderer) void {
     if (!self.background_image.loaded()) return;
-    self.settleBeforeRelease();
+    if (!self.settleBeforeRelease()) return;
     self.background_image.release();
     self.refreshSharedDescriptors();
 }
@@ -795,11 +810,17 @@ fn uploadTexture(
         null,
         win32.IID_ID3D12Resource,
         @ptrCast(&resource),
-    ) < 0) return null;
-
-    self.beginBatch();
+    ) < 0) {
+        _ = self.check(-1, "CreateCommittedResource(image)");
+        return null;
+    }
+    var uploaded = false;
+    defer if (!uploaded) {
+        _ = resource.IUnknown.Release();
+    };
+    if (!self.beginBatch()) return null;
     const dst_pitch: u32 = @intCast(upload.alignUp(@as(u64, width) * 4, upload.texture_row_alignment));
-    const res = self.reserve(@as(u64, dst_pitch) * height, upload.texture_placement_alignment);
+    const res = self.reserve(@as(u64, dst_pitch) * height, upload.texture_placement_alignment) orelse return null;
     const row_bytes: usize = @as(usize, width) * 4;
     var y: u32 = 0;
     while (y < height) : (y += 1) {
@@ -833,6 +854,7 @@ fn uploadTexture(
         win32.D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
     )};
     self.command_list.ResourceBarrier(barrier.len, &barrier);
+    uploaded = true;
     return resource;
 }
 
@@ -888,6 +910,45 @@ pub fn render(
     });
 }
 
+pub fn syncSurface(self: *D3d12Renderer, parent: *D3d12Renderer) void {
+    if (self.background_image.resource != parent.background_image.resource) {
+        // Both lists use the same queue: submit the upload before a pane can sample it.
+        if (!parent.submit()) {
+            self.failure = parent.failure;
+            return;
+        }
+        if (!self.settleBeforeRelease()) return;
+        self.background_image.release();
+        self.background_image = parent.background_image;
+        if (self.background_image.resource) |r| _ = r.IUnknown.AddRef();
+        self.refreshSharedDescriptors();
+        self.grid_force_full = true;
+    }
+    if (self.bg_image_opacity != parent.bg_image_opacity or
+        self.bg_image_position != parent.bg_image_position or
+        self.bg_image_fit != parent.bg_image_fit or
+        self.bg_image_repeat != parent.bg_image_repeat) self.grid_force_full = true;
+    self.bg_image_opacity = parent.bg_image_opacity;
+    self.bg_image_position = parent.bg_image_position;
+    self.bg_image_fit = parent.bg_image_fit;
+    self.bg_image_repeat = parent.bg_image_repeat;
+}
+
+pub fn renderChrome(self: *D3d12Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
+    const prepared = self.prepareFrame(hwnd, term, false) orelse return;
+    self.grid_target.moveTo(self.command_list, win32.D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const rgba = [4]f32{
+        std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
+        std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
+        std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
+        opacity,
+    };
+    self.command_list.ClearRenderTargetView(self.render_targets.cpu(), &rgba[0], 0, &.{});
+    const transparent = [4]f32{ 0, 0, 0, 0 };
+    if (pane_rects.len > 0) self.command_list.ClearRenderTargetView(self.render_targets.cpu(), &transparent[0], @intCast(pane_rects.len), pane_rects.ptr);
+    self.presentGrid(prepared, tabbar, remote_session);
+}
+
 const PreparedFrame = struct {
     client_w: u32,
     client_h: u32,
@@ -907,33 +968,33 @@ fn prepareFrame(
     term: *vt.Terminal,
     mouse_in_scrollbar: bool,
 ) ?PreparedFrame {
+    self.frame_pending = false;
+    if (!self.healthy()) return null;
     const sz = win32.getClientSize(hwnd);
     const client_w: u32 = @intCast(sz.cx);
     const client_h: u32 = @intCast(sz.cy);
     if (client_w == 0 or client_h == 0) return null;
 
     if (self.surface == null) {
-        self.surface = present.Surface.init(
+        self.surface = present.Surface.initLayer(
             &self.queue.IUnknown,
             null,
             hwnd,
             client_w,
             client_h,
             pipeline.render_target_format,
-        ) catch |err|
-            std.debug.panic(
-                "renderer = d3d12: presentation surface could not be attached to desktop " ++
-                    "composition ({s}); the backend cannot complete a first frame",
-                .{@errorName(err)},
-            );
+            self.common.surface_id != 0,
+        ) catch {
+            _ = self.check(-1, "create presentation surface");
+            return null;
+        };
     }
     const surface = &self.surface.?;
 
-    const surface_size = surface.size() orelse std.debug.panic(
-        "renderer = d3d12: presentation surface size is unreadable; the grid would be " ++
-            "copied into a back buffer of unknown extent",
-        .{},
-    );
+    const surface_size = surface.size() orelse {
+        _ = self.check(-1, "query presentation size");
+        return null;
+    };
     {
         const current = surface_size;
         if (current.w != client_w or current.h != client_h) {
@@ -943,14 +1004,14 @@ fn prepareFrame(
             // between frames are already reflected in the tracked resource
             // states, so dropping them would leave those states describing
             // barriers the GPU never saw.
-            self.settleBeforeRelease();
+            if (!self.settleBeforeRelease()) return null;
             self.back_buffer.release();
             self.grid_target.release();
             self.grid_size = .{ .cx = 0, .cy = 0 };
-            surface.resize(client_w, client_h) catch |err| std.debug.panic(
-                "renderer = d3d12: presentation surface resize failed ({s})",
-                .{@errorName(err)},
-            );
+            surface.resize(client_w, client_h) catch {
+                _ = self.check(-1, "resize presentation surface");
+                return null;
+            };
         }
     }
 
@@ -960,11 +1021,7 @@ fn prepareFrame(
             self.grid_force_full = true;
             return null;
         }
-        if (hr < 0) std.debug.panic(
-            "renderer = d3d12: occlusion probe failed (hresult=0x{x}); the backend can no " ++
-                "longer meet its baseline and recovery is out of scope",
-            .{@as(u32, @bitCast(hr))},
-        );
+        if (!self.check(hr, "occlusion probe")) return null;
         self.occluded = false;
         self.grid_force_full = true;
     }
@@ -973,9 +1030,16 @@ fn prepareFrame(
     // inside that decision now, together with the completion signal, so the
     // frame is held up once by whichever of the two is slower rather than
     // twice in a row.
-    self.beginBatch();
+    if (self.common.surface_id != 0 and !self.batch_open) {
+        if (!self.generationReady() or win32.WaitForSingleObject(surface.frame_latency_waitable, 0) != .NO_ERROR) {
+            self.frame_pending = self.failure == null;
+            return null;
+        }
+    }
+    if (!self.beginBatch()) return null;
 
     self.ensureGridTarget(client_w, client_h);
+    if (!self.healthy()) return null;
 
     const cs = self.font_service.cell_size_xy;
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
@@ -987,6 +1051,7 @@ fn prepareFrame(
     if (shader_col > cell_buffer.max_shader_col) return null;
 
     const atlas = glyph_mod.setupGlyphAtlas(self);
+    if (!self.healthy()) return null;
     const tex_cell_count = atlas.tex_cell_count;
 
     var sb_geom: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
@@ -1074,7 +1139,7 @@ fn ensureGridTarget(self: *D3d12Renderer, width: u32, height: u32) void {
     {
         return;
     }
-    self.settleBeforeRelease();
+    if (!self.settleBeforeRelease()) return;
     self.grid_target.release();
 
     var resource: *win32.ID3D12Resource = undefined;
@@ -1085,7 +1150,7 @@ fn ensureGridTarget(self: *D3d12Renderer, width: u32, height: u32) void {
         height,
         .{ .ALLOW_RENDER_TARGET = 1 },
     );
-    if (self.device.CreateCommittedResource(
+    if (!self.check(self.device.CreateCommittedResource(
         &props,
         .{},
         &desc,
@@ -1093,7 +1158,7 @@ fn ensureGridTarget(self: *D3d12Renderer, width: u32, height: u32) void {
         null,
         win32.IID_ID3D12Resource,
         @ptrCast(&resource),
-    ) < 0) fatal("CreateCommittedResource(grid)", 0);
+    ), "CreateCommittedResource(grid)")) return;
     self.grid_target = .{
         .resource = resource,
         .state = win32.D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -1126,13 +1191,13 @@ fn drawAndPresent(
     remote_session: bool,
     in: DrawInputs,
 ) void {
-    const surface = &self.surface.?;
-    self.beginBatch();
+    if (!self.beginBatch()) return;
     const list = self.command_list;
 
     // Descriptor growth retires the old heap, so it has to happen before any
     // pipeline state is set: it submits and reopens the command list.
     self.ensureDescriptorCapacity(self.countVisiblePlacements());
+    if (!self.healthy()) return;
 
     // Uploads recorded during cell building must finish before the shader
     // reads them; these two transitions are what make that ordering explicit
@@ -1154,7 +1219,7 @@ fn drawAndPresent(
         list.SetGraphicsRootSignature(self.root_signature);
         var config = prepared.config;
         const config_bytes = std.mem.asBytes(&config);
-        const config_res = self.reserve(config_bytes.len, upload.constant_buffer_alignment);
+        const config_res = self.reserve(config_bytes.len, upload.constant_buffer_alignment) orelse return;
         @memcpy(config_res.bytes, config_bytes);
         list.SetGraphicsRootConstantBufferView(
             0,
@@ -1206,17 +1271,16 @@ fn drawAndPresent(
         self.grid_force_full = false;
     }
 
+    self.presentGrid(prepared, tabbar, remote_session);
+}
+
+fn presentGrid(self: *D3d12Renderer, prepared: PreparedFrame, tabbar: types.TabBarDraw, remote_session: bool) void {
+    const surface = &self.surface.?;
+    const list = self.command_list;
+    if (!self.healthy()) return;
     const back_buffer = surface.getBuffer(win32.ID3D12Resource) orelse {
-        // Submit what was recorded so the list does not carry into the next
-        // frame, then stop: without a back buffer this backend cannot present
-        // at all, and quietly dropping frames forever is precisely the
-        // partially-capable state that must not be allowed to persist.
-        self.submit();
-        std.debug.panic(
-            "renderer = d3d12: the swap chain yielded no back buffer; the backend can no " ++
-                "longer meet its baseline and recovery is out of scope",
-            .{},
-        );
+        _ = self.check(-1, "acquire back buffer");
+        return;
     };
     self.back_buffer.release();
     self.back_buffer = .{
@@ -1229,30 +1293,20 @@ fn drawAndPresent(
     list.CopyResource(back_buffer, self.grid_target.resource.?);
 
     self.copyTabBarBand(prepared, tabbar);
+    if (!self.healthy()) return;
 
     self.back_buffer.moveTo(list, win32.D3D12_RESOURCE_STATE_PRESENT);
     // Submit without waiting, and end the batch here: the next one takes the
     // other generation and passes the throttle decision on its way in, so the
     // CPU can build the next frame while the GPU is still reading this one.
-    self.submit();
+    if (!self.submit()) return;
     self.batch_open = false;
 
-    const sync_interval: u32 = if (self.common.remote_or_software_adapter or remote_session) 1 else 0;
+    const sync_interval: u32 = if (self.common.surface_id == 0 and (self.common.remote_or_software_adapter or remote_session)) 1 else 0;
     const hr = surface.swap_chain.IDXGISwapChain.Present(sync_interval, 0);
     if (hr == present.DXGI_STATUS_OCCLUDED) {
         self.occluded = true;
-    } else if (hr < 0) {
-        // Device removal and presentation failure are outside this slice's
-        // recovery scope. Carrying on would leave a backend that was asked
-        // for by name running in a state it cannot draw from, which is worse
-        // than stopping: a comparison study would record its output as this
-        // backend's real behaviour.
-        std.debug.panic(
-            "renderer = d3d12: Present failed (hresult=0x{x}); the backend can no longer " ++
-                "meet its baseline and recovery is out of scope",
-            .{@as(u32, @bitCast(hr))},
-        );
-    }
+    } else _ = self.check(hr, "Present");
 }
 
 /// Placements that will actually be drawn this frame. Counted before any
@@ -1277,14 +1331,19 @@ fn ensureDescriptorCapacity(self: *D3d12Renderer, placements: u32) void {
     // Every generation's heap is replaced together so they stay
     // interchangeable, which the settle below also makes safe: no submitted
     // work can still be reading the heaps being released.
-    self.settleBeforeRelease();
-    for (&self.descriptor_heaps) |*d| {
-        d.release();
-        d.* = pipeline.Descriptors.init(self.device, wanted) catch |err| std.debug.panic(
-            "renderer = d3d12: descriptor heap for {d} inline images unavailable ({s})",
-            .{ placements, @errorName(err) },
-        );
+    if (!self.settleBeforeRelease()) return;
+    var replacements: [upload.Ring.generations]pipeline.Descriptors = undefined;
+    var created: usize = 0;
+    for (&replacements) |*replacement| {
+        replacement.* = pipeline.Descriptors.init(self.device, wanted) catch {
+            for (replacements[0..created]) |*entry| entry.release();
+            _ = self.check(-1, "grow descriptor heaps");
+            return;
+        };
+        created += 1;
     }
+    for (&self.descriptor_heaps) |*heap| heap.release();
+    self.descriptor_heaps = replacements;
     self.refreshSharedDescriptors();
 }
 
@@ -1298,7 +1357,7 @@ fn ensureDescriptorCapacity(self: *D3d12Renderer, placements: u32) void {
 /// caller reaches here because a shared resource was just replaced, which is
 /// rare enough that the wait does not touch the sustained path.
 fn refreshSharedDescriptors(self: *D3d12Renderer) void {
-    self.settleBeforeRelease();
+    if (!self.settleBeforeRelease()) return;
     const cell_view = win32.D3D12_SHADER_RESOURCE_VIEW_DESC{
         .Format = .UNKNOWN,
         .ViewDimension = .BUFFER,
@@ -1374,7 +1433,7 @@ fn copyTabBarBand(self: *D3d12Renderer, prepared: PreparedFrame, tabbar: types.T
         @as(u64, prepared.client_w) * 4,
         upload.texture_row_alignment,
     ));
-    const res = self.reserve(@as(u64, dst_pitch) * copy_h, upload.texture_placement_alignment);
+    const res = self.reserve(@as(u64, dst_pitch) * copy_h, upload.texture_placement_alignment) orelse return;
     const row_bytes: usize = @as(usize, prepared.client_w) * 4;
     var y: u32 = 0;
     while (y < copy_h) : (y += 1) {
@@ -1464,7 +1523,7 @@ fn drawInlineImages(self: *D3d12Renderer, prepared: PreparedFrame) void {
             .tab_bar_height = @floatFromInt(prepared.tab_bar_h),
         };
         const bytes = std.mem.asBytes(&config);
-        const res = self.reserve(bytes.len, upload.constant_buffer_alignment);
+        const res = self.reserve(bytes.len, upload.constant_buffer_alignment) orelse return;
         @memcpy(res.bytes, bytes);
 
         var scissor = [_]win32.RECT{.{
@@ -1485,6 +1544,13 @@ fn drawInlineImages(self: *D3d12Renderer, prepared: PreparedFrame) void {
 }
 
 pub fn applyGlyphResult(self: *D3d12Renderer, result: *RasterResult) bool {
+    if (!self.generationReady()) {
+        // Requeue the glyph on the next cell build instead of blocking this
+        // message behind a pane's in-flight staging generation.
+        var retry = result.*;
+        retry.failed = true;
+        return glyph_mod.applyRasterResult(self, &retry);
+    }
     return glyph_mod.applyRasterResult(self, result);
 }
 
@@ -1494,6 +1560,7 @@ pub fn reloadBackgroundImage(
     cfg: *const Config,
     hwnd: win32.HWND,
 ) void {
+    self.bg_image_allocator = gpa;
     bg_image.reload(self, gpa, cfg, hwnd);
 }
 
@@ -1533,4 +1600,78 @@ comptime {
     _ = cell_buffer;
     _ = tabbar_paint;
     _ = present;
+}
+
+test "D3D12 panes share device and pipelines but own command and cache resources" {
+    var common: RendererCommon = undefined;
+    var fonts = FontService.init(&common, 96, .{}, true, null);
+    defer fonts.deinit();
+    var parent = try D3d12Renderer.init(&common, &fonts, null);
+    defer parent.deinit();
+    var ac = common;
+    ac.surface_id = 1;
+    ac.tab_bar_height = 0;
+    var bc = ac;
+    bc.surface_id = 2;
+    var a = try D3d12Renderer.initSurface(&parent, &ac);
+    defer a.deinit();
+    var b = try D3d12Renderer.initSurface(&parent, &bc);
+    defer b.deinit();
+    try std.testing.expect(a.device == parent.device and b.device == parent.device);
+    try std.testing.expect(a.queue == parent.queue and b.queue == parent.queue);
+    try std.testing.expect(a.pso_grid == parent.pso_grid and b.root_signature == parent.root_signature);
+    try std.testing.expect(a.font_service == &fonts and b.font_service == &fonts);
+    try std.testing.expect(a.command_list != b.command_list and a.fence != b.fence);
+    try std.testing.expect(a.command_allocators[0] != b.command_allocators[0]);
+    try std.testing.expect(a.descriptor_heaps[0].heap != b.descriptor_heaps[0].heap);
+    try std.testing.expect(a.cellsResize(4) and b.cellsResize(4));
+    _ = a.atlasEnsure(.{ .x = 32, .y = 32 });
+    _ = b.atlasEnsure(.{ .x = 32, .y = 32 });
+    try std.testing.expect(a.cells.resource != b.cells.resource);
+    try std.testing.expect(a.atlas.resource != b.atlas.resource);
+    var pixel = [_]u8{ 0, 64, 128, 255 };
+    parent.backgroundImageUpload(.{ .pixels = &pixel, .w = 1, .h = 1 });
+    a.syncSurface(&parent);
+    b.syncSurface(&parent);
+    const retained = parent.background_image.resource.?;
+    try std.testing.expect(a.background_image.resource == retained and b.background_image.resource == retained);
+    parent.backgroundImageRelease();
+    try std.testing.expect(a.background_image.resource == retained);
+    a.syncSurface(&parent);
+    try std.testing.expect(!a.background_image.loaded() and b.background_image.loaded());
+    b.syncSurface(&parent);
+    try std.testing.expect(!b.background_image.loaded());
+
+    // An unfinished generation in one pane must defer only that pane.
+    a.ring.bound[a.ring.next()] = a.fence_value + 1;
+    const before = win32.GetTickCount64();
+    try std.testing.expect(!a.generationReady());
+    try std.testing.expect(!a.beginBatch());
+    try std.testing.expect(win32.GetTickCount64() - before < 1000);
+    try std.testing.expect(b.generationReady());
+    a.ring.bound[a.ring.next()] = 0;
+}
+
+test "D3D12 device removal is reported by each pane and safely tears down pending uploads" {
+    var common: RendererCommon = undefined;
+    var fonts = FontService.init(&common, 96, .{}, true, null);
+    defer fonts.deinit();
+    var parent = try D3d12Renderer.init(&common, &fonts, null);
+    defer parent.deinit();
+    var pc = common;
+    pc.surface_id = 1;
+    var pane = try D3d12Renderer.initSurface(&parent, &pc);
+    defer pane.deinit();
+    var pixel = [_]u8{ 255, 0, 0, 255 };
+    const image = pane.kittyImageUpload(1, 1, &pixel).?;
+    var device5: *win32.ID3D12Device5 = undefined;
+    try std.testing.expect(parent.device.IUnknown.QueryInterface(win32.IID_ID3D12Device5, @ptrCast(&device5)) >= 0);
+    defer _ = device5.IUnknown.Release();
+    device5.RemoveDevice();
+    try std.testing.expect(!parent.healthy() and !pane.healthy());
+    try std.testing.expect(parent.failure != null and pane.failure != null);
+    try std.testing.expect(!pane.beginBatch());
+    var retired = image;
+    retired.release();
+    try std.testing.expectEqual(@as(usize, 1), pane.retired_after_failure.items.len);
 }

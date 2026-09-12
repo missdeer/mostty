@@ -1,11 +1,12 @@
-param([switch]$KeepRunning, [switch]$ImeOnly, [switch]$CloseOnly)
+param([switch]$KeepRunning, [switch]$ImeOnly, [switch]$CloseOnly, [ValidateSet('d3d11','d3d12')][string]$Renderer='d3d11', [switch]$TestRecovery)
 $ErrorActionPreference = 'Stop'
 $runId = [Guid]::NewGuid().ToString('N')
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$outputRoot = Join-Path $projectRoot 'tmp\pane-acceptance'
+$outputRoot = Join-Path $projectRoot $(if($Renderer -eq 'd3d11'){'tmp\pane-acceptance'}else{'tmp\pane-acceptance-d3d12'})
+if($TestRecovery -and $Renderer -ne 'd3d12'){throw 'Device removal acceptance requires D3D12'}
 $profile = Join-Path $outputRoot 'profile\Mostty'
 New-Item -ItemType Directory -Force -Path $profile | Out-Null
-@('renderer = d3d11', 'font-size = 14', 'background-opacity = 1', 'background-blur = false') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
+@("renderer = $Renderer", 'font-size = 14', 'background-opacity = 1', 'background-blur = false') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 if (-not ('PaneAcceptance' -as [type])) {
@@ -144,7 +145,7 @@ $start.Environment['LOCALAPPDATA'] = Split-Path $profile -Parent
 $start.Environment['MOSTTY_DIAG'] = '1'
 $script:app = [Diagnostics.Process]::Start($start)
 $script:window = [IntPtr]::Zero
-$result = [ordered]@{ process_id = $app.Id; run_id = $runId; status = 'running' }
+$result = [ordered]@{ renderer = $Renderer; process_id = $app.Id; run_id = $runId; status = 'running' }
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
@@ -170,6 +171,13 @@ try {
     $result.directional_focus = 'pass'
     Chord @(0x11,0x10,0x45)
     $panes = Wait-Panes 4
+    if($Renderer -eq 'd3d12'){
+        $devices=@(Select-String -LiteralPath (Join-Path $outputRoot 'tmp\mostty-diag.log') -Pattern 'd3d12: pane created: id=(\d+) device=(0x[0-9a-f]+) queue=(0x[0-9a-f]+)')
+        if($devices.Count -lt 4){throw 'Missing actual D3D12 pane creation evidence'}
+        if(@($devices | ForEach-Object {$_.Matches[0].Groups[2].Value} | Select-Object -Unique).Count -ne 1){throw 'Panes did not share one D3D12 device'}
+        if(@($devices | ForEach-Object {$_.Matches[0].Groups[3].Value} | Select-Object -Unique).Count -ne 1){throw 'Panes did not share one D3D12 command queue'}
+        $result.backend_identity='four D3D12 surfaces sharing one device and queue'
+    }
     if($CloseOnly){
         Test-CloseActions
         $result.status='pass'
@@ -356,8 +364,56 @@ try {
     $result.pty_vt_sizes = $sizes
     $result.shell_process_ids = $shellPids
     Capture 'output-resize'
+    if($TestRecovery){
+        Start-Sleep -Milliseconds 1200
+        Capture 'device-before'
+        $diagPath=Join-Path $outputRoot 'tmp\mostty-diag.log'
+        [void][PaneAcceptance]::PostMessageW($window,0x8006,[UIntPtr]::Zero,[IntPtr]::Zero)
+        $deadline=[DateTime]::UtcNow.AddSeconds(20)
+        do {
+            Start-Sleep -Milliseconds 100
+            if($app.HasExited){throw 'D3D12 process exited during recovery'}
+            if([PaneAcceptance]::Dialog($app.Id) -ne [IntPtr]::Zero){throw 'D3D12 recovery displayed a failure dialog'}
+            $recovered=Select-String -LiteralPath $diagPath -Pattern 'D3D12 pane recovery complete'
+        } while(-not $recovered -and [DateTime]::UtcNow -lt $deadline)
+        if(-not $recovered){throw 'D3D12 recovery did not complete'}
+        $after=Wait-Panes 4
+        if(@(Compare-Object @($panes | ForEach-Object ToInt64) @($after | ForEach-Object ToInt64)).Count -ne 0){throw 'D3D12 recovery replaced pane HWNDs'}
+        Start-Sleep -Milliseconds 1500
+        Capture 'device-repaint'
+        $beforeImage=[Drawing.Bitmap]::new((Join-Path $outputRoot 'device-before.png'))
+        $afterImage=[Drawing.Bitmap]::new((Join-Path $outputRoot 'device-repaint.png'))
+        $rootBox=[PaneAcceptance]::Box($window)
+        $different=0;$compared=0
+        try{
+            foreach($paneHandle in $panes){
+                $rect=[PaneAcceptance]::Box($paneHandle)
+                # Exclude borders, scrollbar and the bottom two cursor rows.
+                for($y=$rect.Top-$rootBox.Top+2;$y -lt $rect.Bottom-$rootBox.Top-2*[int]$groups[4].Value;$y++){
+                    for($x=$rect.Left-$rootBox.Left+2;$x -lt $rect.Right-$rootBox.Left-18;$x++){
+                        $a=$beforeImage.GetPixel($x,$y);$b=$afterImage.GetPixel($x,$y)
+                        if([Math]::Abs([int]$a.R-$b.R) -gt 8 -or [Math]::Abs([int]$a.G-$b.G) -gt 8 -or [Math]::Abs([int]$a.B-$b.B) -gt 8){$different++}
+                        $compared++
+                    }
+                }
+            }
+        }finally{$beforeImage.Dispose();$afterImage.Dispose()}
+        $result.recovery_pixel_difference=$different
+        $result.recovery_pixels_compared=$compared
+        if($different -gt $compared*0.001){throw 'Settled D3D12 text pixels changed after recovery'}
+        for($i=0;$i -lt 4;$i++){
+            Send-Command $panes[$i] ('"{0}" -c "import os; print(os.getppid())" > recovery-{1}-{2}.txt & echo ready > recovery-{1}-{2}.txt.ready' -f $python,$runId,$i)
+        }
+        for($i=0;$i -lt 4;$i++){
+            $out=Join-Path $outputRoot "recovery-$runId-$i.txt"
+            Wait-File "$out.ready"
+            if([int]([IO.File]::ReadAllText($out).Trim()) -ne $shellPids[$i]){throw 'D3D12 recovery restarted a shell'}
+        }
+        $result.device_removal_recovery='pass: original shell PIDs and pane HWNDs retained'
+        Capture 'device-recovered'
+    }
     $previousCellWidth = [int]$groups[3].Value
-    @('renderer = d3d11', 'font-size = 18', 'foreground = #80e090', 'background-opacity = 0.65', 'background-blur = true') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
+    @("renderer = $Renderer", 'font-size = 18', 'foreground = #80e090', 'background-opacity = 0.65', 'background-blur = true') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
     Start-Sleep -Seconds 2
     $null = Wait-Panes 4
     for ($i=0;$i -lt $panes.Count;$i++) {
@@ -378,6 +434,69 @@ try {
     }
     $result.font_reload_sizes = $fontSizes
     Capture 'font-theme-transparency'
+    if($Renderer -eq 'd3d12'){
+        $imageProbe=Join-Path $projectRoot 'tools/pane-image-probe.py'
+        for($i=0;$i -lt 4;$i++){
+            $ready=Join-Path $outputRoot "image-$runId-$i.ready"
+            Send-Command $panes[$i] ('"{0}" "{1}" draw {2} "{3}"' -f $python,$imageProbe,$i,$ready)
+        }
+        for($i=0;$i -lt 4;$i++){Wait-File (Join-Path $outputRoot "image-$runId-$i.ready")}
+        Start-Sleep -Milliseconds 700
+        Capture 'kitty-four-panes'
+        $colors=@([Drawing.Color]::Red,[Drawing.Color]::Lime,[Drawing.Color]::Blue,[Drawing.Color]::Yellow)
+        function Assert-PaneImage([int]$Index){
+            $box=[PaneAcceptance]::Box($panes[$Index])
+            $sample=[Drawing.Bitmap]::new(1,1)
+            $graphics=[Drawing.Graphics]::FromImage($sample)
+            try{
+                $graphics.CopyFromScreen($box.Left+10,$box.Top+[int]$groups[4].Value+10,0,0,$sample.Size)
+                $actual=$sample.GetPixel(0,0);$expected=$colors[$Index]
+                if([Math]::Abs([int]$actual.R-$expected.R) -gt 12 -or [Math]::Abs([int]$actual.G-$expected.G) -gt 12 -or [Math]::Abs([int]$actual.B-$expected.B) -gt 12){throw "Wrong Kitty image color in pane $Index : $actual"}
+            }finally{$graphics.Dispose();$sample.Dispose()}
+        }
+        for($i=0;$i -lt 4;$i++){Assert-PaneImage $i}
+        $ready=Join-Path $outputRoot "image-delete-$runId.ready"
+        Send-Command $panes[0] ('"{0}" "{1}" delete 0 "{2}"' -f $python,$imageProbe,$ready)
+        Wait-File $ready
+        Start-Sleep -Milliseconds 500
+        for($i=1;$i -lt 4;$i++){Assert-PaneImage $i}
+        $result.kitty_isolation='pass: same ID shows four independent colors; deleting in one preserves the others'
+        Capture 'kitty-deleted-pane'
+        # A solid wallpaper with a transparent default cell background gives an exact pixel result.
+        $wallpaper=Join-Path $outputRoot "wallpaper-$runId.bmp"
+        $bitmap=[Drawing.Bitmap]::new(8,8)
+        $graphics=[Drawing.Graphics]::FromImage($bitmap)
+        try{$graphics.Clear([Drawing.Color]::Magenta);$bitmap.Save($wallpaper,[Drawing.Imaging.ImageFormat]::Bmp)}finally{$graphics.Dispose();$bitmap.Dispose()}
+        foreach($paneHandle in $panes){Send-Command $paneHandle 'cls'}
+        @("renderer = $Renderer",'font-size = 18','background-opacity = 0','background-blur = false',"background-image = $wallpaper",'background-image-opacity = 1','background-image-fit = stretch') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
+        $deadline=[DateTime]::UtcNow.AddSeconds(8)
+        do{Start-Sleep -Milliseconds 100;$loaded=Select-String -LiteralPath (Join-Path $outputRoot 'tmp/mostty-diag.log') -SimpleMatch "loaded '$wallpaper'"}while(-not $loaded -and [DateTime]::UtcNow -lt $deadline)
+        if(-not $loaded){throw 'Wallpaper update did not finish decoding'}
+        Start-Sleep -Milliseconds 500
+        foreach($paneHandle in $panes){
+            $rect=[PaneAcceptance]::Box($paneHandle)
+            $sample=[Drawing.Bitmap]::new(1,1);$graphics=[Drawing.Graphics]::FromImage($sample)
+            try{
+                $graphics.CopyFromScreen($rect.Right-40,$rect.Bottom-45,0,0,$sample.Size)
+                $pixel=$sample.GetPixel(0,0)
+                if($pixel.R -lt 243 -or $pixel.B -lt 243 -or $pixel.G -gt 12){throw 'Wallpaper update failed to reach a D3D12 pane'}
+            }finally{$graphics.Dispose();$sample.Dispose()}
+        }
+        Capture 'wallpaper-updated'
+        @("renderer = $Renderer",'font-size = 18','background-opacity = 1','background-blur = false','background-image =') | Set-Content -LiteralPath (Join-Path $profile 'config') -Encoding utf8
+        Start-Sleep -Milliseconds 800
+        foreach($paneHandle in $panes){
+            $rect=[PaneAcceptance]::Box($paneHandle)
+            $sample=[Drawing.Bitmap]::new(1,1);$graphics=[Drawing.Graphics]::FromImage($sample)
+            try{
+                $graphics.CopyFromScreen($rect.Right-40,$rect.Bottom-45,0,0,$sample.Size)
+                $pixel=$sample.GetPixel(0,0)
+                if($pixel.R -ge 243 -and $pixel.B -ge 243 -and $pixel.G -le 12){throw 'Wallpaper removal left a stale D3D12 texture'}
+            }finally{$graphics.Dispose();$sample.Dispose()}
+        }
+        $result.wallpaper_reload='pass: all four panes displayed the new wallpaper and removed it'
+        Capture 'wallpaper-removed'
+    }
     $monitors=[PaneAcceptance]::Monitors()
     $result.monitor_dpi=@($monitors | ForEach-Object {$_.Dpi})
     foreach($monitor in $monitors){

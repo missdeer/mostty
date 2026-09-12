@@ -50,6 +50,8 @@ pub const WM_APP_BG_IMAGE_DECODED = win32.WM_APP + 3;
 // and frees the struct + bytes.
 pub const WM_APP_GLYPH_READY = win32.WM_APP + 4;
 pub const WM_APP_CLOSE_PANE = win32.WM_APP + 5;
+// Diagnostic-only device removal for the pane recovery acceptance runner.
+pub const WM_APP_TEST_D3D12_REMOVAL = win32.WM_APP + 6;
 pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;

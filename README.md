@@ -63,13 +63,13 @@ fixed until restart. See [Command-line options](configurations.md#command-line-o
 for all accepted options, including legacy font options that are parsed but
 not applied.
 
-Windows D3D11 supports native panes within each tab: use the split shortcuts below,
+Windows D3D11 and D3D12 support native panes within each tab: use the split shortcuts below,
 click or navigate by direction to focus a pane, and drag dividers to resize.
 The window’s system menu also exposes split, close-pane and maximize/restore
 commands when another app intercepts a keyboard shortcut. Pane maximize/restore
 and tab switching retain the running shells. Closing a pane
 collapses its region; closing the last pane closes the tab. The per-window limit
-is 63 sessions across at most 32 tabs. Research backends keep their single-surface
+is 63 sessions across at most 32 tabs. OpenGL and Vulkan variants keep their single-surface
 behavior and explicitly reject split requests without changing renderer.
 
 Renderer changes require a restart. Unsupported drivers or presentation capabilities are reported at startup; research backends may offer an explicit D3D11 fallback but never switch silently. See [Configuration](configurations.md#renderer) for requirements and backend-specific behavior.

@@ -1,5 +1,9 @@
 param([Parameter(Mandatory=$true)][ValidateSet('d3d12','opengl','pure-opengl','vulkan','native-vulkan')][string]$Renderer)
 $ErrorActionPreference='Stop'
+if($Renderer -eq 'd3d12'){
+    & (Join-Path $PSScriptRoot 'pane-acceptance.ps1') -Renderer d3d12 -TestRecovery
+    return
+}
 $root=Split-Path $PSScriptRoot -Parent
 $outputRoot=Join-Path $root "tmp\pane-backend-$Renderer"
 $profile=Join-Path $outputRoot 'profile\Mostty'

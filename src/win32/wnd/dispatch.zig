@@ -80,6 +80,7 @@ const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
     .{ .msg = types.WM_APP_CONFIG_CHANGED, .handler = &misc.onAppConfigChanged },
     .{ .msg = types.WM_APP_BG_IMAGE_DECODED, .handler = &misc.onAppBgImageDecoded },
     .{ .msg = types.WM_APP_GLYPH_READY, .handler = &misc.onAppGlyphReady },
+    .{ .msg = types.WM_APP_TEST_D3D12_REMOVAL, .handler = &misc.onAppTestD3d12Removal },
 };
 
 comptime {

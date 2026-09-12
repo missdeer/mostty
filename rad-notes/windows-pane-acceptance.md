@@ -90,3 +90,37 @@ MOSTTY-78 through MOSTTY-81 track the remaining backends and combined acceptance
 - Local evidence: tmp/MOSTTY-77-tests.log, tmp/MOSTTY-77-build.log,
   tmp/MOSTTY-77-runtime.log and
   tmp/pane-acceptance/result-e2a2808dc6264fd4825979ca9c9a6332.json.
+
+## D3D12 native panes — MOSTTY-78
+
+Verified on September 12, 2026. The D3D12 row in the earlier MOSTTY-74 matrix
+is historical: D3D12 now supports native panes; OpenGL and Vulkan remain pending.
+
+- Build and full tests used Zig 0.16.0 and D:/zig-cache: 45/45 test steps,
+  250/252 tests passed. Both skips are the macOS config-path test in Windows
+  test roots. Real D3D12 sharing, per-pane command/cache separation, busy-frame
+  deferral and isolated device-removal tests all executed.
+- Full native command: tools/pane-acceptance.ps1 -Renderer d3d12 -TestRecovery.
+  Run 7001699b2b174e93b6dfb82926adf8f8 passed, with four different shell PIDs
+  and logged D3D12 surfaces sharing one device and queue. Mixed nested layout,
+  divider drag, direction/click focus, maximize/restore, tab retention, IME,
+  mouse reports/capture, Unicode paste, selection, scrolling, sustained output
+  during resize, matching ConPTY/VT dimensions and closing all passed.
+- Live device removal rebuilt the shared D3D12 device in the same process.
+  Shell PIDs and child HWNDs were unchanged; 564,590 sampled text-region pixels
+  had zero differences after rasterization settled. The initial immediate
+  capture had pending glyphs, so acceptance now compares settled before/after
+  captures instead of treating session survival as visual correctness.
+- All four panes displayed different colors with the same Kitty image ID;
+  deleting in one pane preserved the others. Wallpaper replacement and removal
+  were checked through actual pixels in all four panes. The wallpaper test uses
+  transparent default backgrounds, consistent with cells compositing over it.
+- Font/theme/transparency updates passed. Recovery, Kitty and wallpaper captures
+  were inspected. Both attached monitors were 96 DPI; physical mixed-DPI moves
+  and RDP recovery were not executed or counted as passes.
+- Focused D3D11 regression: tools/pane-acceptance.ps1 -Renderer d3d11 -CloseOnly,
+  run 0f7f035c812840069e4bd3c904c628b2, passed split/direction focus and independent
+  shell, pane, tab and window closure. This does not claim a new full D3D11 run.
+- Logs and captures are preserved in tmp/MOSTTY-78-evidence. Failed exploratory
+  runs were not counted as passes; they exposed a PID-file completion race and
+  an incorrect opaque-background setting in the wallpaper test, both corrected.

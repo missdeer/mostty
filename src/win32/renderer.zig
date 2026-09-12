@@ -91,11 +91,13 @@ pub const StartupFailure = union(enum) {
 };
 
 pub const RuntimeFailure = union(enum) {
+    d3d12: d3d12.Renderer.RuntimeFailure,
     vulkan: vulkan.RuntimeFailure,
     @"native-vulkan": vulkan.RuntimeFailure,
 
     pub fn operationDescription(self: RuntimeFailure) []const u8 {
         return switch (self) {
+            .d3d12 => |failure| failure.operation,
             .vulkan => |failure| failure.operation.description(),
             .@"native-vulkan" => |failure| failure.operation.description(),
         };
@@ -103,6 +105,7 @@ pub const RuntimeFailure = union(enum) {
 
     pub fn codeName(self: RuntimeFailure) []const u8 {
         return switch (self) {
+            .d3d12 => "D3D12RuntimeFailure",
             .vulkan => |failure| @errorName(failure.cause),
             .@"native-vulkan" => |failure| @errorName(failure.cause),
         };
@@ -118,6 +121,7 @@ font_service: FontService,
 configured_backend: Config.RendererBackend,
 backend: ?RendererBackend,
 vulkan_recovery_attempted: bool,
+d3d12_recovery_attempted: bool = false,
 requires_alpha_composition: bool,
 
 // Initialize in place: the backend borrows `common`, and the async glyph
@@ -145,6 +149,7 @@ pub fn init(
     );
     self.configured_backend = backend;
     self.vulkan_recovery_attempted = false;
+    self.d3d12_recovery_attempted = false;
     self.requires_alpha_composition = requires_alpha_composition;
     self.backend = switch (backend) {
         .d3d11 => .{ .d3d11 = try d3d11.init(&self.common, &self.font_service, configured_gpu) },
@@ -328,6 +333,7 @@ fn fallbackToD3d11With(
     self.backend = null;
     self.configured_backend = .d3d11;
     self.vulkan_recovery_attempted = false;
+    self.d3d12_recovery_attempted = false;
     self.requires_alpha_composition = false;
     const replacement = try init_fn(&self.common, &self.font_service, configured_gpu);
     self.backend = .{ .d3d11 = replacement };
@@ -379,17 +385,46 @@ fn deinitBackend(self: *Renderer) void {
     };
 }
 
-pub fn supportsPanes(self: *const Renderer) bool {
-    return if (self.backend) |backend| backend == .d3d11 else false;
+pub fn paneRuntimeFailure(self: *Renderer) ?RuntimeFailure {
+    const active = if (self.backend) |*backend| backend else return null;
+    switch (active.*) {
+        .d3d12 => |*backend| {
+            _ = backend.healthy();
+            if (backend.failure) |failure| return .{ .d3d12 = failure };
+        },
+        else => {},
+    }
+    return null;
 }
 
-pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) ?PaneSurface {
+// All borrowing pane surfaces must be released before rebuilding the device.
+pub fn recoverD3d12(self: *Renderer, hwnd: win32.HWND, configured_gpu: ?[]const u8, generation: u32) bool {
+    if (self.d3d12_recovery_attempted) return false;
+    self.d3d12_recovery_attempted = true;
+    const parent = &self.backend.?.d3d12;
+    const background_generation = parent.bg_image_req_id +% 1;
+    parent.deinit();
+    self.backend = null;
+    if (self.initializeWindow(hwnd, configured_gpu)) |failure| {
+        std.log.err("D3D12 recovery initialization failed: {s}", .{failure.description()});
+        return false;
+    }
+    self.backend.?.d3d12.cache_gen = generation;
+    self.backend.?.d3d12.bg_image_req_id = background_generation;
+    return true;
+}
+
+pub fn supportsPanes(self: *const Renderer) bool {
+    return if (self.backend) |backend| (backend == .d3d11 or backend == .d3d12) else false;
+}
+
+pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) d3d12.Renderer.StartupError!?PaneSurface {
     return PaneSurface.init(self, common);
 }
 
 pub fn renderChrome(self: *Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
     switch (self.activeBackend().*) {
-        .d3d11 => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
+        inline .d3d11, .d3d12 => |*backend| backend.renderChrome(hwnd, term, tabbar, background, opacity, remote_session, pane_rects),
         else => unreachable, // Only reached after the pane capability gate.
     }
 }
@@ -655,8 +690,8 @@ test "pane capability rejects unsupported or unavailable backends without changi
     var renderer: Renderer = undefined;
     renderer.backend = null;
     try std.testing.expect(!renderer.supportsPanes());
-    try std.testing.expect(renderer.initPaneSurface(undefined) == null);
-    inline for (.{ Config.RendererBackend.d3d12, .opengl, .@"pure-opengl", .vulkan, .@"native-vulkan" }) |selected| {
+    try std.testing.expect((try renderer.initPaneSurface(undefined)) == null);
+    inline for (.{ Config.RendererBackend.opengl, .@"pure-opengl", .vulkan, .@"native-vulkan" }) |selected| {
         renderer.configured_backend = selected;
         renderer.backend = switch (selected) {
             .d3d12 => .{ .d3d12 = undefined },
@@ -666,24 +701,26 @@ test "pane capability rejects unsupported or unavailable backends without changi
             else => unreachable,
         };
         try std.testing.expect(!renderer.supportsPanes());
-        try std.testing.expect(renderer.initPaneSurface(undefined) == null);
+        try std.testing.expect((try renderer.initPaneSurface(undefined)) == null);
         try std.testing.expectEqual(selected, renderer.configured_backend);
     }
 }
 
 test "pane facade retains shared infrastructure but isolates caches and update generations" {
     var renderer: Renderer = undefined;
+    renderer.d3d12_recovery_attempted = true;
     try renderer.init(96, .{}, true, null, .d3d11, false);
     defer renderer.deinit();
+    try std.testing.expect(!renderer.d3d12_recovery_attempted);
     try std.testing.expect(renderer.supportsPanes());
     var first_common = renderer.common;
     first_common.surface_id = 1;
     first_common.tab_bar_height = 0;
     var second_common = first_common;
     second_common.surface_id = 2;
-    var first = renderer.initPaneSurface(&first_common).?;
+    var first = (try renderer.initPaneSurface(&first_common)).?;
     defer first.deinit();
-    var second = renderer.initPaneSurface(&second_common).?;
+    var second = (try renderer.initPaneSurface(&second_common)).?;
     defer second.deinit();
     const parent = &renderer.backend.?.d3d11;
     const a = &first.backend.d3d11;

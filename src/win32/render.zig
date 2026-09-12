@@ -42,6 +42,10 @@ pub fn renderWindow(window: *Window) void {
         };
     };
     if (@import("pane_native.zig").supported()) {
+        if (global.renderer.paneRuntimeFailure()) |failure| {
+            handlePaneFailure(window, failure);
+            return;
+        }
         var pane_rects: [types.MAX_PANES]win32.RECT = undefined;
         var pane_rect_count: usize = 0;
         for (window.panes.items) |pane| {
@@ -51,6 +55,11 @@ pub fn renderWindow(window: *Window) void {
             pane_rect_count += 1;
         }
         global.renderer.renderChrome(window.hwnd, window.active().term, tabbar, theme.background, global.config.background_opacity, window.remote_session, pane_rects[0..pane_rect_count]);
+        if (global.renderer.paneRuntimeFailure()) |failure| {
+            handlePaneFailure(window, failure);
+            return;
+        }
+        var frame_pending = false;
         for (window.panes.items) |pane| {
             if (pane.closing or pane.tab != window.activeTab() or pane.tab.layout.paneRect(pane.id) == null) continue;
             @import("pane_native.zig").syncSurface(pane);
@@ -60,8 +69,14 @@ pub fn renderWindow(window: *Window) void {
             } else null;
             const captured = win32.GetCapture() == pane.hwnd;
             pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, if (captured and window.mouse_capture == .selecting) 1.0 else pane.selection_fade, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
+            if (pane.renderer.?.runtimeFailure()) |failure| {
+                handlePaneFailure(window, failure);
+                return;
+            }
+            frame_pending = frame_pending or pane.renderer.?.needsFrame();
             _ = win32.ValidateRect(pane.hwnd.?, null);
         }
+        if (frame_pending) window.requestRender() else global.renderer.d3d12_recovery_attempted = false;
         return;
     }
     if (global.renderer.render(
@@ -113,6 +128,43 @@ pub fn renderWindow(window: *Window) void {
         std.log.warn("renderer: user accepted runtime fallback from {s} to d3d11", .{failure.backendName()});
         _ = win32.InvalidateRect(window.hwnd, null, 0);
     }
+}
+
+fn handlePaneFailure(window: *Window, failure: Renderer.RuntimeFailure) void {
+    std.log.err("pane renderer {s} failed while {s} ({s})", .{ failure.backendName(), failure.operationDescription(), failure.codeName() });
+    std.log.err("D3D12 failure hresult=0x{x}", .{@as(u32, @bitCast(failure.d3d12.hresult))});
+    window.confirming_renderer_fallback = true;
+    var generation = global.renderer.backend.?.d3d12.cache_gen;
+    for (window.panes.items) |pane| {
+        if (pane.renderer) |*surface| {
+            generation = @max(generation, surface.cacheGeneration());
+            surface.deinit();
+            pane.renderer = null;
+        }
+    }
+    var recovered = global.renderer.recoverD3d12(window.hwnd, global.config.gpu, generation +% 1);
+    if (recovered) {
+        for (window.panes.items) |pane| {
+            if (pane.closing) continue;
+            pane.renderer = global.renderer.initPaneSurface(&pane.common) catch {
+                recovered = false;
+                break;
+            };
+            if (pane.renderer == null) {
+                recovered = false;
+                break;
+            }
+        }
+    }
+    if (!recovered) {
+        _ = win32.MessageBoxW(window.hwnd, win32.L("D3D12 pane recovery failed. Mostty will close without switching renderers."), win32.L("Mostty renderer unavailable"), .{ .ICONHAND = 1 });
+        _ = win32.DestroyWindow(window.hwnd);
+        return;
+    }
+    global.renderer.reloadBackgroundImage(global.gpa.allocator(), &global.config, window.hwnd);
+    window.confirming_renderer_fallback = false;
+    std.log.warn("D3D12 pane recovery complete: {} sessions and HWNDs retained", .{window.panes.items.len});
+    window.requestRender();
 }
 
 // Pixel position of the top-left of the active tab's cursor cell, including

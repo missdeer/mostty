@@ -553,8 +553,8 @@ The renderer facade gates pane support and dispatches main-window chrome.
 `PaneSurface` owns the pane backend and its last synchronized font generation;
 creation, synchronization, drawing, glyph delivery and teardown go through that
 wrapper. HWND layout and input routing do not inspect backend-specific fields.
-Only complete pane implementations enter its backend union; D3D11 is currently
-the sole member, and other renderers retain their explicit split restriction.
+Only complete pane implementations enter its backend union; D3D11 and D3D12
+are members, while the OpenGL and Vulkan variants retain their split restriction.
 The process renderer must outlive its pane surfaces.
 
 D3D11 creates the main chrome surface and one child-HWND surface per pane.
@@ -568,6 +568,27 @@ teardown, without sharing glyph, cell or Kitty caches. Glyph
 jobs/results carry a stable surface ID as well as cache and slot generations.
 The main composition target is below child windows and clears pane regions to
 transparent, so a pane applies its own background opacity once.
+
+D3D12 pane surfaces retain the process device, direct queue, root signature and
+pipelines. Each has its own two-generation command allocator/list, completion
+fence/event, upload arenas, descriptor heaps, cell/atlas/grid textures, Kitty
+cache and DirectComposition swapchain. Pane frame admission polls completion
+and presentation readiness and requests a later frame if busy; asynchronous
+glyphs cancel their pending reservation for retry if no upload generation is
+available. Only main chrome performs the bounded presentation wait. Lifecycle
+resource retirement submits outstanding commands and drains before release.
+The main composition target is below the children and clears pane rectangles;
+the child presents without a per-pane vblank wait. Wallpaper textures retain
+per-surface references; the process upload is submitted on the shared queue
+before pane sampling, and replaced descriptors are rewritten after completion.
+
+D3D12 errors are retained by the affected surface and handled by the window.
+Recovery destroys all pane graphics state before rebuilding the shared renderer,
+then recreates surfaces against the existing HWNDs and sessions. Cache and
+background-request generations advance to reject pre-recovery worker results.
+A failed or immediately repeated rebuild reports an error and closes without
+changing renderer. Debug builds with MOSTTY_DIAG accept the diagnostic device
+removal message used by the pane acceptance runner; release builds ignore it.
 
 The `d3d11` struct owns:
 
@@ -687,9 +708,9 @@ retain the M5a CPU handoff. Observed vendor results live in
 `render.zig:renderWindow` dispatches main chrome through `Renderer` and paints
 every visible pane through `PaneSurface`, with
 its own terminal, selection, hover and focused-cursor state. Hidden sessions
-continue consuming PTY output. Research backends retain the single-surface
-facade path; requesting a split reports its D3D11 requirement without switching
-backend. A pane frame runs:
+continue consuming PTY output. OpenGL and Vulkan backends retain the single-surface
+facade path; requesting a split reports the unsupported capability without
+switching backend. A pane frame runs:
 
 1. **prepareFrame** (`d3d11.zig`): client-size query; swap-chain
    create-or-resize; cheap occlusion test (`Present(0, TEST)`);
@@ -996,7 +1017,7 @@ WM_CHAR
 
 ### 9.3 Tab, pane and session commands
 
-Windows split commands update `SplitLayout`; `Ctrl+Shift+D` splits left/right and `Ctrl+Shift+E` splits up/down. `Ctrl+Alt+Arrow` follows physical pane geometry without wrapping. `Ctrl+Shift+Enter` maximizes/restores the focused pane while retaining every session. `Ctrl+Shift+W` closes one pane; only the last pane closes its tab. Divider capture stores a split ID, and child HWND input, IME and capture are resolved through the pane registry. Non-D3D11 backends remain single-surface until independently validated and are never silently replaced.
+Windows split commands update `SplitLayout`; `Ctrl+Shift+D` splits left/right and `Ctrl+Shift+E` splits up/down. `Ctrl+Alt+Arrow` follows physical pane geometry without wrapping. `Ctrl+Shift+Enter` maximizes/restores the focused pane while retaining every session. `Ctrl+Shift+W` closes one pane; only the last pane closes its tab. Divider capture stores a split ID, and child HWND input, IME and capture are resolved through the pane registry. OpenGL and Vulkan backends remain single-surface until independently validated and are never silently replaced.
 
 ### 9.4 Tab open / close
 

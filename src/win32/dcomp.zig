@@ -38,6 +38,18 @@ pub const Surface = struct {
         height: u32,
         format: win32.DXGI_FORMAT,
     ) Error!Surface {
+        return initLayer(producer, rendering_device, hwnd, width, height, format, true);
+    }
+
+    pub fn initLayer(
+        producer: *win32.IUnknown,
+        rendering_device: ?*win32.IDXGIDevice,
+        hwnd: win32.HWND,
+        width: u32,
+        height: u32,
+        format: win32.DXGI_FORMAT,
+        above_children: bool,
+    ) Error!Surface {
         var factory: *win32.IDXGIFactory4 = undefined;
         if (win32.CreateDXGIFactory1(win32.IID_IDXGIFactory4, @ptrCast(&factory)) < 0)
             return error.PresentationUnavailable;
@@ -62,7 +74,7 @@ pub const Surface = struct {
         errdefer _ = dcomp_device.IUnknown.Release();
 
         var dcomp_target: *win32.IDCompositionTarget = undefined;
-        if (dcomp_device.CreateTargetForHwnd(hwnd, 1, @ptrCast(&dcomp_target)) < 0)
+        if (dcomp_device.CreateTargetForHwnd(hwnd, @intFromBool(above_children), @ptrCast(&dcomp_target)) < 0)
             return error.PresentationUnavailable;
         errdefer _ = dcomp_target.IUnknown.Release();
 

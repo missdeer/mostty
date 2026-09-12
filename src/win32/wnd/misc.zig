@@ -790,3 +790,19 @@ pub fn onAppGlyphReady(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?wi
     }
     return 0;
 }
+
+pub fn onAppTestD3d12Removal(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    const active = if (global.renderer.backend) |*backend| backend else return 0;
+    if (active.* != .d3d12) return 0;
+    var device5: *win32.ID3D12Device5 = undefined;
+    if (active.d3d12.device.IUnknown.QueryInterface(win32.IID_ID3D12Device5, @ptrCast(&device5)) < 0) {
+        std.log.err("D3D12 diagnostic removal unavailable: ID3D12Device5 missing", .{});
+        return 0;
+    }
+    defer _ = device5.IUnknown.Release();
+    std.log.warn("D3D12 diagnostic device removal requested", .{});
+    device5.RemoveDevice();
+    if (global.window) |*window| window.requestRender();
+    return 0;
+}

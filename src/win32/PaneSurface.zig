@@ -4,19 +4,25 @@ const win32 = @import("win32").everything;
 const vt = @import("vt");
 const Renderer = @import("Renderer.zig");
 const d3d11 = @import("d3d11.zig");
+const d3d12 = @import("d3d12/renderer.zig");
 const types = @import("types.zig");
 
 // Only implementations with a complete pane lifecycle enter this union.
 backend: union(enum) {
     d3d11: d3d11,
+    d3d12: d3d12,
 },
 font_generation: u32,
 
-pub fn init(parent: *Renderer, common: *Renderer.RendererCommon) ?PaneSurface {
+pub fn init(parent: *Renderer, common: *Renderer.RendererCommon) d3d12.StartupError!?PaneSurface {
     const active = if (parent.backend) |*backend| backend else return null;
     return switch (active.*) {
         .d3d11 => |*backend| .{
             .backend = .{ .d3d11 = d3d11.initSurface(backend, common) },
+            .font_generation = backend.cache_gen,
+        },
+        .d3d12 => |*backend| .{
+            .backend = .{ .d3d12 = try d3d12.initSurface(backend, common) },
             .font_generation = backend.cache_gen,
         },
         else => null,
@@ -32,8 +38,8 @@ pub fn deinit(self: *PaneSurface) void {
 
 pub fn sync(self: *PaneSurface, parent: *Renderer, focused: bool) void {
     switch (self.backend) {
-        .d3d11 => |*backend| {
-            const source = &parent.backend.?.d3d11;
+        inline else => |*backend, tag| {
+            const source = &@field(parent.backend.?, @tagName(tag));
             if (self.font_generation != source.cache_gen) {
                 backend.onFontStateChanged();
                 self.font_generation = source.cache_gen;
@@ -45,6 +51,30 @@ pub fn sync(self: *PaneSurface, parent: *Renderer, focused: bool) void {
             backend.syncSurface(source);
         },
     }
+}
+
+pub fn runtimeFailure(self: *PaneSurface) ?Renderer.RuntimeFailure {
+    switch (self.backend) {
+        .d3d12 => |*backend| {
+            _ = backend.healthy();
+            if (backend.failure) |failure| return .{ .d3d12 = failure };
+        },
+        else => {},
+    }
+    return null;
+}
+
+pub fn needsFrame(self: *const PaneSurface) bool {
+    return switch (self.backend) {
+        .d3d12 => |backend| backend.frame_pending,
+        else => false,
+    };
+}
+
+pub fn cacheGeneration(self: *const PaneSurface) u32 {
+    return switch (self.backend) {
+        inline else => |backend| backend.cache_gen,
+    };
 }
 
 pub fn applyGlyphResult(self: *PaneSurface, result: *Renderer.RasterResult) bool {

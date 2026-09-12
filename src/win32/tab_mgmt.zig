@@ -335,7 +335,7 @@ fn releasePane(window: *Window, tab: *Tab) void {
 
 pub fn splitActive(window: *Window, axis: state.SplitLayout.Axis) void {
     if (!native.supported()) {
-        _ = win32.MessageBoxW(window.hwnd, win32.L("Native split panes currently require D3D11. The selected renderer has not been changed."), win32.L("Mostty split panes"), .{ .ICONASTERISK = 1 });
+        _ = win32.MessageBoxW(window.hwnd, win32.L("Native split panes are not yet supported by the selected renderer. The selected renderer has not been changed."), win32.L("Mostty split panes"), .{ .ICONASTERISK = 1 });
         return;
     }
     if (window.tabs.items.len == 0 or window.panes.items.len >= types.MAX_PANES) return;
