@@ -68,7 +68,9 @@ equivalent configuration overrides; use its config file.
 The file is watched live. Saving it re-applies changes without a restart:
 
 - **Font** changes rebuild the renderer and reflow every tab.
-- **Font ligature** changes repaint immediately without resizing tabs (Windows only).
+- **Font ligature** changes repaint immediately without resizing tabs.
+- **Tab-bar font** changes update title rendering and strip height.
+- **Background image** path, opacity, fit, position, and tiling changes repaint every pane.
 - **Theme/color** changes re-baseline every tab's colors (preserving any live
   `OSC 10/11/12/4` color overrides an app set at runtime).
 - **Launchers** are read on demand, so they take effect immediately.
@@ -77,7 +79,7 @@ The file is watched live. Saving it re-applies changes without a restart:
 
 On macOS the config file's *directory* is watched, because editors save by
 writing a temporary file and renaming it over the original. Font, color, window
-opacity, and render-cadence changes are re-applied to every live tab; `maximize`
+opacity, wallpaper, tab-bar font, and render-cadence changes are re-applied to every live tab; `maximize`
 and `fullscreen` are not, since they describe the initial window state and
 re-applying them would fight a window you have since resized.
 
@@ -92,7 +94,7 @@ unknown keys follow the rules in [Syntax](#syntax).
 
 | Key | Windows | macOS |
 | --- | --- | --- |
-| `font-family`, `font-size`, `font-family-bold`, `font-family-italic`, `font-family-bold-italic` | yes | yes (only the first `font-family` entry; the OS resolves missing glyphs) |
+| `font-family`, `font-size`, `font-family-bold`, `font-family-italic`, `font-family-bold-italic` | yes | yes (ordered font-family cascade, followed by system fallback) |
 | `theme`, `background`, `foreground`, `palette` | yes | yes |
 | `cursor-color`, `cursor-text` | yes | yes |
 | `selection-background`, `selection-foreground` | yes | yes |
@@ -102,9 +104,9 @@ unknown keys follow the rules in [Syntax](#syntax).
 | `confirm-close-surface` | no | yes |
 | `render-interval-local-ms` | yes | yes |
 | `launcher`, `env` | yes | yes |
-| `emoji-font-family`, `font-ligatures`, `font-feature`, `font-codepoint-map`, `font-style`, `font-style-bold`, `font-style-italic`, `font-style-bold-italic`, `font-synthetic-style` | yes | no — macOS uses CoreText per cell without these font controls |
-| `tabbar-font-family`, `tabbar-font-size` | yes | no |
-| `background-image`, `background-image-opacity`, `background-image-position`, `background-image-fit`, `background-image-repeat` | yes | no |
+| `emoji-font-family`, `font-ligatures`, `font-feature`, `font-codepoint-map`, `font-style`, `font-style-bold`, `font-style-italic`, `font-style-bold-italic`, `font-synthetic-style` | yes | yes (CoreText) |
+| `tabbar-font-family`, `tabbar-font-size` | yes | yes |
+| `background-image`, `background-image-opacity`, `background-image-position`, `background-image-fit`, `background-image-repeat` | yes | yes (ImageIO/CoreGraphics) |
 | `render-interval-remote-ms` | yes | no — macOS has no remote-session concept |
 | `gpu`, `renderer` | yes | no — Direct3D / OpenGL / Vulkan backend selection is Windows-only |
 
@@ -124,8 +126,10 @@ supported.
 ### `font-family`
 
 Comma-separated list of font family names. May be repeated; all entries
-accumulate into a fallback chain on Windows (first match wins per glyph).
-macOS uses only the first family and lets CoreText resolve missing glyphs.
+accumulate into a fallback chain on both platforms (first match wins per glyph).
+macOS attaches the configured families to CoreText's cascade; system fonts
+resolve glyphs missing from the configured chain. Font reloads and backing-scale
+changes rebuild the cascade. Use `emoji-font-family` for the separate emoji chain.
 
 ```
 font-family = JetBrains Mono, Consolas
@@ -144,9 +148,15 @@ instead of the normal text fallback chain.
 emoji-font-family = Noto Color Emoji, Segoe UI Emoji
 ```
 
-Default: unset, which uses Mostty's built-in emoji default. Prefer this
+Default: unset, which uses Segoe UI Emoji on Windows and Apple Color Emoji on
+macOS. Prefer this
 explicit key for color emoji fonts and keep `font-family` for text, CJK, icon,
 and symbol fonts.
+
+On macOS, fonts must use a color format CoreText can rasterize. COLRv1-only
+and CBDT-only fonts are skipped so the next configured family or Apple Color
+Emoji can render the glyph. For example, a COLRv1 build of Noto Color Emoji
+can be installed and discoverable while still requiring this fallback.
 
 ### `font-size`
 
@@ -161,7 +171,7 @@ Default: `13.0` on both Windows and macOS, including when no config file exists.
 ### `font-ligatures`
 
 Whether Mostty shapes common programming-symbol runs such as `=>`, `==`, `!=`,
-`->`, `&&`, and `||` through DirectWrite so fonts with ligature support can
+`->`, `&&`, and `||` through DirectWrite (Windows) or CoreText (macOS) so fonts with ligature support can
 render them as a joined glyph.
 
 ```
@@ -176,10 +186,12 @@ When disabled, symbol runs use the normal per-cell glyph path. This is useful
 with fonts that do not provide programming ligatures, where shaping the run
 would otherwise consume extra atlas slots without changing the visual result.
 Hot-reloads — toggling the key triggers a repaint without resizing tabs.
+Runs stop at row, cursor, selection-color, and text-style boundaries.
 
 ### `font-feature`
 
-Apply OpenType feature settings through DirectWrite typography. The syntax is
+Apply OpenType feature settings through DirectWrite typography on Windows and
+CoreText font descriptors on macOS. The syntax is
 compatible with Ghostty's `font-feature` / CSS `font-feature-settings` shape:
 
 ```
@@ -193,7 +205,7 @@ Feature names must be four-character printable ASCII tags such as `liga`,
 from specific fonts are also supported. Values default to `1`; use `off`,
 `false`, `0`, or a leading `-` to disable a feature. Malformed tags (not
 exactly four characters or containing non-printable characters) are skipped
-with a warning. Hot-reloads rebuild the font atlas so changed features take
+with a warning. Hot-reloads rebuild the font resources so changed features take
 effect on the next repaint.
 
 ### `tabbar-font-family` / `tabbar-font-size`
@@ -214,13 +226,14 @@ the fallback for codepoints the tab-bar family lacks (CJK / emoji titles).
 Tab titles are rendered proportionally (the font's natural glyph widths, not
 one glyph per terminal cell), and the tab-bar height auto-sizes to the tab-bar
 font's line height so the whole glyph is visible. Tab widths and the close/new
-buttons stay aligned to the terminal cell grid. Long titles are ellipsized.
+buttons stay aligned to the terminal cell grid on Windows. macOS keeps its
+native equal-width tabs and fixed-size close/new controls. Long titles are ellipsized.
 
 ### `font-family-bold` / `font-family-italic` / `font-family-bold-italic`
 
 Single family name to use for cells with the corresponding SGR style. When
-unset, the style inherits `font-family`'s primary entry and DirectWrite
-synthesizes bold / oblique on top (subject to `font-synthetic-style`).
+unset, the style inherits `font-family`'s primary entry. Real bold/italic faces
+are preferred; missing styles may be synthesized (subject to `font-synthetic-style`).
 
 ```
 font-family-bold        = JetBrains Mono
@@ -230,16 +243,14 @@ font-family-bold-italic = Cascadia Code
 
 Each is a single family — comma lists are not parsed here. The regular
 `font-family` chain still acts as the fallback for codepoints the style-family
-lacks on Windows, so a style-family covering only ASCII gracefully degrades to
-the main font for CJK / icons / emoji. On macOS, CoreText applies the style's
-bold/italic traits to the selected family (or the regular family when unset)
-and uses system glyph fallback; `font-synthetic-style` has no effect.
+lacks, so a style-family covering only ASCII gracefully degrades to the main
+font for CJK / icons. Emoji presentation uses the separate emoji chain.
 
 ### `font-style` / `font-style-bold` / `font-style-italic` / `font-style-bold-italic`
 
 Pin a specific named face within the chosen family. Mostty looks up the face
-by its **en-us** face name (case-insensitive), reads its real weight / slant /
-stretch, and uses those instead of DirectWrite's synthetic defaults.
+by its **en-us** face name on Windows or CoreText style name on macOS
+(case-insensitive), and uses the real face's weight / slant / stretch.
 
 ```
 font-style             = SemiBold
@@ -248,9 +259,9 @@ font-style-italic      = Italic
 font-style-bold-italic = ExtraBold Italic
 ```
 
-Special value `false` disables a slot explicitly — combined with
-`font-synthetic-style = no-*` it forces those cells to render with the regular
-text format instead.
+Special value `false` disables a bold/italic/bold-italic slot explicitly and
+forces those cells to use the regular face, regardless of synthesis policy.
+For the regular slot, `false` leaves the natural regular face in use.
 
 ```
 font-style-italic = false
@@ -259,13 +270,13 @@ font-style-italic = false
 If the named face doesn't exist in the family, Mostty warns and keeps the
 slot's natural attributes (synthesizing per `font-synthetic-style`).
 
-Known limitation: only the en-us face name table is matched. Localized face
+Windows limitation: only the en-us face name table is matched. Localized face
 names (e.g. on a localized Windows build) are not — use the canonical en-us
 name.
 
 ### `font-synthetic-style`
 
-Controls whether DirectWrite is allowed to synthesize a style (algorithmic
+Controls whether the renderer is allowed to synthesize a style (algorithmic
 bold / oblique) when the chosen family lacks a real face. Default: all three
 allowed. Syntax:
 
@@ -277,8 +288,8 @@ font-synthetic-style = no-bold, no-italic, no-bold-italic   # forbid the named s
 ```
 
 When a slot is forbidden AND its family has no real matching face, cells of
-that style render with the regular text format instead (the cache also folds
-them into the regular atlas slots, so no redundant rasterization).
+that style render with the regular face instead. macOS uses CoreText real faces
+when available and CoreGraphics emboldening/shearing for permitted missing styles.
 
 Known limitation: only the PRIMARY family of each slot is checked. Fallback
 faces inside the chain may still be per-glyph synthesized by DirectWrite —
@@ -301,7 +312,7 @@ or `U+HEX-U+HEX` (inclusive). Bare hex without the `U+` prefix is also
 accepted as a pragmatic convenience. Multiple ranges may share one family
 with commas. To map different families, repeat the key. May be repeated.
 
-Earlier entries win on overlap (DirectWrite first-match). Known limitation:
+Earlier entries win on overlap. Known limitation:
 the mapping kicks in only when the primary family doesn't cover the
 codepoint — if your `font-family` itself supplies a glyph for the range, that
 glyph is used (the typical case where the primary is a monospace font and the
@@ -445,6 +456,35 @@ the DWM call and triggers a repaint.
 leaving the configured transparency in place. The same accepted values above
 act only as on/off switches, not blur radii or selectable glass materials.
 Changes hot-reload; at full opacity the backdrop is not used.
+
+### `background-image` and related settings
+
+Draw a PNG/JPEG behind the terminal background. The path may be absolute or
+relative to the application's working directory; use a full path rather than
+`~`. An empty value removes the image. Explicit cell backgrounds hide it;
+`background-opacity = 1` also hides it completely.
+
+```
+background-image = /Users/me/Pictures/wallpaper.png
+background-opacity = 0.75
+background-image-opacity = 1
+background-image-fit = cover
+background-image-position = center
+background-image-repeat = false
+```
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `background-image-opacity` | Non-negative multiplier of the source alpha; values above 1 are allowed | `1` |
+| `background-image-fit` | `contain` (fit inside), `cover` (fill and crop), `stretch`, `none` (source pixels) | `contain` |
+| `background-image-position` | `top-left`, `top-center`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-center`, `bottom-right` | `center` |
+| `background-image-repeat` | Boolean; tile the fitted image from the chosen anchor | `false` |
+
+All five settings hot-reload. Windows decodes with WIC on a worker;
+macOS decodes with ImageIO when the configured path changes and caches the
+image per pane. Invalid/unreadable images produce a warning and clear the
+wallpaper. macOS limits encoded files to 64 MiB and dimensions to 10,000 pixels
+per side. These settings are independent of `images-enabled`.
 
 ### `maximize`
 

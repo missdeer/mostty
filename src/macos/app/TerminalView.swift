@@ -326,7 +326,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     private func startBlink() {
         let timer = Timer(timeInterval: 0.53, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            // The cursor is drawn into the frame, so re-render on each toggle.
+            // The cursor and SGR blinking text both need a frame on each toggle.
             self.blinkOn.toggle()
             self.dirty = true
         }
@@ -351,7 +351,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         let focused = window?.firstResponder === self
         let cursorOn = focused && blinkOn
         var c: UInt32 = 0, r: UInt32 = 0
-        guard let texPtr = mostty_tab_render(t, cursorOn, &c, &r) else { return }
+        guard let texPtr = mostty_tab_render(t, cursorOn, blinkOn, &c, &r) else { return }
         cols = c; rows = r
         guard let src = Unmanaged<AnyObject>.fromOpaque(texPtr).takeUnretainedValue() as? MTLTexture else { return }
         guard let drawable = layer.nextDrawable() else { dirty = true; return }

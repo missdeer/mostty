@@ -186,43 +186,14 @@ fn decodeWorker(
 // within a `container_w` x `container_h` pixel area (the terminal grid region
 // below the tab bar). Returns offset.xy + size.xy in that space. Pure geometry.
 pub fn computeDest(self: anytype, container_w: f32, container_h: f32) [4]f32 {
-    const sw: f32 = @floatFromInt(self.background_image.src_w);
-    const sh: f32 = @floatFromInt(self.background_image.src_h);
-    if (sw <= 0 or sh <= 0) return .{ 0, 0, 0, 0 };
-
-    var dw: f32 = sw;
-    var dh: f32 = sh;
-    switch (self.bg_image_fit) {
-        .none => {},
-        .stretch => {
-            dw = container_w;
-            dh = container_h;
-        },
-        .contain => {
-            const s = @min(container_w / sw, container_h / sh);
-            dw = sw * s;
-            dh = sh * s;
-        },
-        .cover => {
-            const s = @max(container_w / sw, container_h / sh);
-            dw = sw * s;
-            dh = sh * s;
-        },
-    }
-
-    const free_x = container_w - dw;
-    const free_y = container_h - dh;
-    const ox: f32 = switch (self.bg_image_position) {
-        .top_left, .center_left, .bottom_left => 0,
-        .top_center, .center, .bottom_center => free_x * 0.5,
-        .top_right, .center_right, .bottom_right => free_x,
-    };
-    const oy: f32 = switch (self.bg_image_position) {
-        .top_left, .top_center, .top_right => 0,
-        .center_left, .center, .center_right => free_y * 0.5,
-        .bottom_left, .bottom_center, .bottom_right => free_y,
-    };
-    return .{ ox, oy, dw, dh };
+    return @import("../../renderer/background_geometry.zig").computeDest(
+        @floatFromInt(self.background_image.src_w),
+        @floatFromInt(self.background_image.src_h),
+        container_w,
+        container_h,
+        self.bg_image_fit,
+        self.bg_image_position,
+    );
 }
 
 // Linear/clamp sampler for the background image. CLAMP is fine even when

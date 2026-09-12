@@ -91,6 +91,9 @@ MosttyTab *clipboard_test_created_tab(void) { return tab_count ? (MosttyTab *)&t
 MosttyTab *clipboard_test_write_tab(void) { return write_tab; }
 void mostty_tab_destroy(MosttyTab *tab) {}
 float mostty_config_background_opacity(void) { return 1; }
+void *mostty_config_copy_tabbar_font(void) {
+    return (void *)CFBridgingRetain([NSFont fontWithName:@"Menlo" size:13]);
+}
 uint32_t mostty_config_render_interval_ms(void) { return 16; }
 bool mostty_tab_apply_config(MosttyTab *tab) { return false; }
 void *mostty_tab_metal_device(MosttyTab *tab) {
@@ -112,7 +115,7 @@ void mostty_tab_write(MosttyTab *tab, const uint8_t *ptr, size_t len) {
 bool mostty_tab_set_surface(MosttyTab *tab, uint32_t w, uint32_t h, float scale, uint32_t *cols, uint32_t *rows) {
     *cols = w / 10; *rows = h / 20; return true;
 }
-void *mostty_tab_render(MosttyTab *tab, bool cursor, uint32_t *cols, uint32_t *rows) { return NULL; }
+void *mostty_tab_render(MosttyTab *tab, bool cursor, bool text_blink_on, uint32_t *cols, uint32_t *rows) { return NULL; }
 size_t mostty_tab_title(MosttyTab *tab, uint8_t *buf, size_t cap) { return 0; }
 bool mostty_tab_poll_exit(MosttyTab *tab, int32_t *code) { return false; }
 void mostty_tab_cell_size(MosttyTab *tab, uint32_t *w, uint32_t *h) { *w = 10; *h = 20; }

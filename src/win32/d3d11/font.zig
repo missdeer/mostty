@@ -450,27 +450,14 @@ pub fn computeEffectiveStyle(
     };
     for (slots, 0..) |s, ai| {
         const spec = style_specs[s.slot];
-        // Explicit user opt-out always collapses, regardless of synthesis policy.
-        if (spec == .disabled) {
-            out[s.slot] = .regular;
-            continue;
-        }
-        // `.named`: trust the user's pin — if the name resolved at format-build
-        // time, the slot has a real face. We don't re-probe here.
-        if (spec == .named) {
-            const fam = style_primaries[ai] orelse regular_primary;
-            if (resolveNamedFace(factory, fam, spec.named) == null) {
-                // Name didn't match anything real. Treat like "no real face":
-                // if user also forbids synthesis we MUST collapse, otherwise
-                // keep the slot (DirectWrite will synthesize from natural).
-                if (!synthesize[ai]) out[s.slot] = .regular;
-            }
-            continue;
-        }
-        // `.default`: legacy Step 2.3 rule.
-        if (synthesize[ai]) continue;
         const fam = style_primaries[ai] orelse regular_primary;
-        if (!familyHasRealFace(factory, fam, s.match_bold, s.match_italic)) {
+        const has_real_face = switch (spec) {
+            .disabled => false,
+            .named => resolveNamedFace(factory, fam, spec.named) != null,
+            // No need to enumerate real faces when synthesis is allowed.
+            .default => synthesize[ai] or familyHasRealFace(factory, fam, s.match_bold, s.match_italic),
+        };
+        if (@import("../../renderer/font_policy.zig").useRegular(spec == .disabled, has_real_face, synthesize[ai])) {
             out[s.slot] = .regular;
         }
     }

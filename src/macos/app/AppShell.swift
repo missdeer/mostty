@@ -110,6 +110,8 @@ final class AppModel: ObservableObject {
     @Published var launchers: [TerminalLauncher] = []
     @Published var themes: [String] = []
     @Published var activeTheme = ""
+    @Published var tabbarFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    var tabbarHeight: CGFloat { max(28, ceil(tabbarFont.ascender - tabbarFont.descender + tabbarFont.leading) + 8) }
     private var confirmingClose = false
     private var lastPaneID: UInt32 = 0
     private let windowDelegate = TerminalWindowDelegate()
@@ -174,6 +176,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshMenus() {
+        if let font = mostty_config_copy_tabbar_font() {
+            tabbarFont = Unmanaged<NSFont>.fromOpaque(font).takeRetainedValue()
+        }
         launchers = (0..<mostty_config_launcher_count()).map { index in
             TerminalLauncher(
                 label: readText { mostty_config_launcher_text(index, 0, $0, $1) },
@@ -697,7 +702,7 @@ struct TabBar: View {
             LauncherButton(model: model)
                 .frame(width: 28, height: 28)
         }
-        .frame(height: 28)
+        .frame(height: model.tabbarHeight)
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(Color(nsColor: TabPalette.bar))
@@ -714,6 +719,7 @@ struct TabChip: NSViewRepresentable {
         button.title = tab.title
         button.selected = model.selectedID == tab.id
         button.number = (model.tabs.firstIndex { $0.id == tab.id } ?? 0) + 1
+        button.titleFont = model.tabbarFont
         button.activateTab = { [weak model, weak tab] in
             guard let tab = tab else { return }
             model?.selectedID = tab.id
@@ -733,6 +739,9 @@ struct TabChip: NSViewRepresentable {
 final class TabChipButton: NSButton {
     var selected = false
     var number = 1
+    var titleFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) {
+        didSet { invalidateIntrinsicContentSize(); needsDisplay = true }
+    }
     var activateTab: () -> Void = {}
     var closeTab: () -> Void = {}
     let closeButton = TabSymbolButton(frame: .zero)
@@ -767,7 +776,10 @@ final class TabChipButton: NSButton {
 
     override var acceptsFirstResponder: Bool { false }
     // Long titles must never impose a minimum width on the equal-width strip.
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 28) }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric,
+               height: max(28, ceil(titleFont.ascender - titleFont.descender + titleFont.leading) + 8))
+    }
 
     @objc private func activate(_ sender: Any?) { activateTab() }
     @objc private func close(_ sender: Any?) { closeTab() }
@@ -821,8 +833,8 @@ final class TabChipButton: NSButton {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byTruncatingTail
-        let font = NSFont.systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
-        let textHeight = ceil(font.ascender - font.descender)
+        let font = titleFont
+        let textHeight = ceil(font.ascender - font.descender + font.leading)
         let rect = NSRect(x: side, y: (bounds.height - textHeight) / 2,
                           width: max(0, bounds.width - side * 2), height: textHeight)
         let foreground = selected ? NSColor(white: 0.95, alpha: 1) : TabPalette.text
@@ -832,8 +844,10 @@ final class TabChipButton: NSButton {
         }
         if !shortcut.isEmpty {
             paragraph.alignment = .right
-            (shortcut as NSString).draw(in: NSRect(x: bounds.width - 38, y: rect.minY, width: 28, height: textHeight),
-                                       withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            let shortcutFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+            let shortcutHeight = ceil(shortcutFont.ascender - shortcutFont.descender)
+            (shortcut as NSString).draw(in: NSRect(x: bounds.width - 38, y: (bounds.height - shortcutHeight) / 2, width: 28, height: shortcutHeight),
+                                       withAttributes: [.font: shortcutFont,
                                                         .foregroundColor: foreground, .paragraphStyle: paragraph])
         }
     }

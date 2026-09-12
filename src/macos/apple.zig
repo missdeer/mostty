@@ -29,9 +29,25 @@ extern "c" fn CFStringCreateWithCharacters(
 extern "c" fn CFRelease(value: *anyopaque) void;
 extern "c" fn CFRetain(value: *anyopaque) *anyopaque;
 extern "c" fn CFDataCreate(allocator: ?*anyopaque, bytes: [*]const u8, count: CFIndex) ?*anyopaque;
+extern "c" fn CFDataGetLength(data: *anyopaque) CFIndex;
+extern "c" fn CFDataGetBytePtr(data: *anyopaque) [*]const u8;
 extern "c" fn CFEqual(lhs: *anyopaque, rhs: *anyopaque) bool;
 extern "c" fn CFDictionaryGetValue(dict: *anyopaque, key: *anyopaque) ?*anyopaque;
+extern "c" fn CFDictionaryCreate(allocator: ?*anyopaque, keys: [*]const *anyopaque, values: [*]const *anyopaque, count: CFIndex, key_callbacks: ?*const anyopaque, value_callbacks: ?*const anyopaque) ?*anyopaque;
+extern "c" var kCFTypeDictionaryKeyCallBacks: anyopaque;
+extern "c" var kCFTypeDictionaryValueCallBacks: anyopaque;
+extern "c" fn CFArrayCreateMutable(allocator: ?*anyopaque, capacity: CFIndex, callbacks: ?*const anyopaque) ?*anyopaque;
+extern "c" fn CFArrayAppendValue(array: *anyopaque, value: *anyopaque) void;
+extern "c" fn CFArrayGetCount(array: *anyopaque) CFIndex;
+extern "c" fn CFArrayGetValueAtIndex(array: *anyopaque, index: CFIndex) *anyopaque;
+extern "c" fn CFStringCompare(lhs: CFStringRef, rhs: CFStringRef, flags: usize) CFIndex;
+extern "c" fn CFNumberCreate(allocator: ?*anyopaque, kind: CFIndex, value: *const anyopaque) ?*anyopaque;
+extern "c" var kCFTypeArrayCallBacks: anyopaque;
 extern "c" fn CFNumberGetValue(number: *anyopaque, kind: CFIndex, value: *i64) bool;
+extern "c" var kCFBooleanTrue: *anyopaque;
+extern "c" fn CFAttributedStringCreateMutable(allocator: ?*anyopaque, capacity: CFIndex) ?*anyopaque;
+extern "c" fn CFAttributedStringReplaceString(string: *anyopaque, range: Range, replacement: CFStringRef) void;
+extern "c" fn CFAttributedStringSetAttribute(string: *anyopaque, range: Range, name: CFStringRef, value: *anyopaque) void;
 
 extern "c" fn CGImageSourceCreateWithData(data: *anyopaque, options: ?*anyopaque) ?*anyopaque;
 extern "c" fn CGImageSourceGetType(source: *anyopaque) ?CFStringRef;
@@ -51,6 +67,19 @@ extern "c" fn CGContextRestoreGState(context: CGContextRef) void;
 extern "c" fn CGContextClipToRect(context: CGContextRef, rect: Rect) void;
 
 extern "c" fn CTFontDescriptorCreateWithNameAndSize(name: CFStringRef, size: f64) ?CTFontDescriptorRef;
+extern "c" fn CTFontDescriptorCreateWithAttributes(attributes: *anyopaque) ?CTFontDescriptorRef;
+extern "c" fn CTFontCopyFontDescriptor(font: CTFontRef) CTFontDescriptorRef;
+extern "c" fn CTFontCopyTable(font: CTFontRef, tag: u32, options: u32) ?*anyopaque;
+extern "c" fn CTFontDescriptorCreateMatchingFontDescriptors(descriptor: CTFontDescriptorRef, mandatory: ?*anyopaque) ?*anyopaque;
+extern "c" fn CTFontDescriptorCopyAttribute(descriptor: CTFontDescriptorRef, name: CFStringRef) ?*anyopaque;
+extern "c" fn CTFontGetSymbolicTraits(font: CTFontRef) CTFontSymbolicTraits;
+extern "c" var kCTFontFamilyNameAttribute: CFStringRef;
+extern "c" var kCTFontStyleNameAttribute: CFStringRef;
+extern "c" var kCTFontFeatureSettingsAttribute: CFStringRef;
+extern "c" var kCTFontOpenTypeFeatureTag: CFStringRef;
+extern "c" var kCTFontOpenTypeFeatureValue: CFStringRef;
+extern "c" fn CTFontCreateCopyWithAttributes(font: CTFontRef, size: f64, matrix: ?*const AffineTransform, descriptor: CTFontDescriptorRef) ?CTFontRef;
+extern "c" var kCTFontCascadeListAttribute: CFStringRef;
 extern "c" fn CTFontCreateWithFontDescriptor(
     descriptor: CTFontDescriptorRef,
     size: f64,
@@ -77,19 +106,17 @@ extern "c" fn CTFontGetAdvancesForGlyphs(
     advances: ?[*]Size,
     count: CFIndex,
 ) f64;
-extern "c" fn CTFontDrawGlyphs(
-    font: CTFontRef,
-    glyphs: [*]const CGGlyph,
-    positions: [*]const Point,
-    count: usize,
-    context: CGContextRef,
-) void;
 extern "c" fn CTFontGetAscent(font: CTFontRef) f64;
 extern "c" fn CTFontGetDescent(font: CTFontRef) f64;
 extern "c" fn CTFontGetLeading(font: CTFontRef) f64;
 extern "c" fn CTFontGetUnderlinePosition(font: CTFontRef) f64;
 extern "c" fn CTFontGetUnderlineThickness(font: CTFontRef) f64;
 extern "c" fn CTFontGetXHeight(font: CTFontRef) f64;
+extern "c" var kCTFontAttributeName: CFStringRef;
+extern "c" var kCTForegroundColorFromContextAttributeName: CFStringRef;
+extern "c" fn CTLineCreateWithAttributedString(string: *anyopaque) ?*anyopaque;
+extern "c" fn CTLineGetTypographicBounds(line: *anyopaque, ascent: ?*f64, descent: ?*f64, leading: ?*f64) f64;
+extern "c" fn CTLineDraw(line: *anyopaque, context: CGContextRef) void;
 
 extern "c" fn CGColorSpaceCreateDeviceRGB() ?CGColorSpaceRef;
 extern "c" fn CGColorSpaceRelease(space: CGColorSpaceRef) void;
@@ -108,6 +135,14 @@ extern "c" fn CGContextSetShouldAntialias(context: CGContextRef, value: bool) vo
 extern "c" fn CGContextSetShouldSmoothFonts(context: CGContextRef, value: bool) void;
 extern "c" fn CGContextSetTextDrawingMode(context: CGContextRef, mode: c_int) void;
 extern "c" fn CGContextSetTextMatrix(context: CGContextRef, transform: AffineTransform) void;
+extern "c" fn CGContextSetTextPosition(context: CGContextRef, x: f64, y: f64) void;
+extern "c" fn CGContextTranslateCTM(context: CGContextRef, x: f64, y: f64) void;
+extern "c" fn CGContextScaleCTM(context: CGContextRef, x: f64, y: f64) void;
+extern "c" fn CGContextConcatCTM(context: CGContextRef, transform: AffineTransform) void;
+extern "c" fn CGContextSetLineWidth(context: CGContextRef, width: f64) void;
+extern "c" fn CGContextSetRGBStrokeColor(context: CGContextRef, red: f64, green: f64, blue: f64, alpha: f64) void;
+extern "c" fn CGContextSetAlpha(context: CGContextRef, alpha: f64) void;
+extern "c" fn CGContextDrawTiledImage(context: CGContextRef, rect: Rect, image: CGImageRef) void;
 extern "c" fn CGContextSetRGBFillColor(context: CGContextRef, red: f64, green: f64, blue: f64, alpha: f64) void;
 extern "c" fn CGContextFillRect(context: CGContextRef, rect: Rect) void;
 extern "c" fn CGContextClearRect(context: CGContextRef, rect: Rect) void;
@@ -252,6 +287,21 @@ pub const graphics = struct {
     };
 
     pub const Context = struct {
+        pub fn drawTiledImage(value: *BitmapContext, rect: Apple.Rect, image: *Image) void {
+            CGContextDrawTiledImage(@ptrCast(value), rect, @ptrCast(image));
+        }
+        pub fn setAlpha(value: *BitmapContext, alpha: f64) void {
+            CGContextSetAlpha(@ptrCast(value), alpha);
+        }
+        pub fn concat(value: *BitmapContext, transform: Apple.AffineTransform) void {
+            CGContextConcatCTM(@ptrCast(value), transform);
+        }
+        pub fn setLineWidth(value: *BitmapContext, width: f64) void {
+            CGContextSetLineWidth(@ptrCast(value), width);
+        }
+        pub fn setRGBStrokeColor(value: *BitmapContext, red: f64, green: f64, blue: f64, alpha: f64) void {
+            CGContextSetRGBStrokeColor(@ptrCast(value), red, green, blue, alpha);
+        }
         pub fn drawImage(value: *BitmapContext, rect: Apple.Rect, image: *Image) void {
             CGContextDrawImage(@ptrCast(value), rect, @ptrCast(image));
         }
@@ -290,6 +340,18 @@ pub const graphics = struct {
             CGContextSetTextMatrix(@ptrCast(value), transform);
         }
 
+        pub fn setTextPosition(value: *BitmapContext, x: f64, y: f64) void {
+            CGContextSetTextPosition(@ptrCast(value), x, y);
+        }
+
+        pub fn translate(value: *BitmapContext, x: f64, y: f64) void {
+            CGContextTranslateCTM(@ptrCast(value), x, y);
+        }
+
+        pub fn scale(value: *BitmapContext, x: f64, y: f64) void {
+            CGContextScaleCTM(@ptrCast(value), x, y);
+        }
+
         pub fn setRGBFillColor(value: *BitmapContext, red: f64, green: f64, blue: f64, alpha: f64) void {
             CGContextSetRGBFillColor(@ptrCast(value), red, green, blue, alpha);
         }
@@ -308,10 +370,39 @@ pub const graphics = struct {
 
     pub const TextDrawingMode = enum(c_int) {
         fill = 0,
+        fill_stroke = 2,
     };
 };
 
 pub const text = struct {
+    pub const Line = opaque {
+        /// Shape the whole cluster so fallback, variation selectors and emoji
+        /// ligatures are resolved together. Ordinary glyphs use the cell color.
+        pub fn create(characters: []const u16, font: *Font) !*Line {
+            const string = try foundation.String.createWithCharacters(characters);
+            defer string.release();
+            const attributed = CFAttributedStringCreateMutable(null, 0) orelse return error.OutOfMemory;
+            defer CFRelease(attributed);
+            CFAttributedStringReplaceString(attributed, Range.init(0, 0), @ptrCast(string));
+            const range = Range.init(0, characters.len);
+            CFAttributedStringSetAttribute(attributed, range, kCTFontAttributeName, @ptrCast(font));
+            CFAttributedStringSetAttribute(attributed, range, kCTForegroundColorFromContextAttributeName, kCFBooleanTrue);
+            return @ptrCast(CTLineCreateWithAttributedString(attributed) orelse return error.OutOfMemory);
+        }
+
+        pub fn getTypographicBounds(self: *Line, ascent: *f64, descent: *f64) f64 {
+            return CTLineGetTypographicBounds(@ptrCast(self), ascent, descent, null);
+        }
+
+        pub fn draw(self: *Line, context: *graphics.BitmapContext) void {
+            CTLineDraw(@ptrCast(self), @ptrCast(context));
+        }
+
+        pub fn release(self: *Line) void {
+            CFRelease(@ptrCast(self));
+        }
+    };
+
     pub const FontSymbolicTraits = packed struct(u32) {
         italic: bool = false,
         bold: bool = false,
@@ -332,6 +423,120 @@ pub const text = struct {
     };
 
     pub const Font = opaque {
+        /// Enumerate real faces within the family. Matching the style name
+        /// separately prevents CoreText from silently substituting another face.
+        pub fn findFace(family: []const u8, style: ?[]const u8, traits: ?FontSymbolicTraits, size: f64) !?*Font {
+            const name = try foundation.String.createWithBytes(family, .utf8, false);
+            defer name.release();
+            const attrs = CFDictionaryCreate(null, &.{kCTFontFamilyNameAttribute}, &.{@ptrCast(name)}, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return error.OutOfMemory;
+            defer CFRelease(attrs);
+            const desc = CTFontDescriptorCreateWithAttributes(attrs) orelse return error.OutOfMemory;
+            defer CFRelease(desc);
+            const matches = CTFontDescriptorCreateMatchingFontDescriptors(desc, null) orelse return null;
+            defer CFRelease(matches);
+            const wanted = if (style) |s| try foundation.String.createWithBytes(s, .utf8, false) else null;
+            defer if (wanted) |s| s.release();
+            var i: CFIndex = 0;
+            while (i < CFArrayGetCount(matches)) : (i += 1) {
+                const candidate = CFArrayGetValueAtIndex(matches, i);
+                const actual_family = CTFontDescriptorCopyAttribute(candidate, kCTFontFamilyNameAttribute) orelse continue;
+                defer CFRelease(actual_family);
+                if (CFStringCompare(actual_family, @ptrCast(name), 1) != 0) continue;
+                if (wanted) |w| {
+                    const face_name = CTFontDescriptorCopyAttribute(candidate, kCTFontStyleNameAttribute) orelse continue;
+                    defer CFRelease(face_name);
+                    if (CFStringCompare(face_name, @ptrCast(w), 1) != 0) continue;
+                }
+                const font: *Font = @ptrCast(CTFontCreateWithFontDescriptor(candidate, size, null) orelse continue);
+                if (wanted == null and traits != null and (font.symbolicTraits().bold != traits.?.bold or font.symbolicTraits().italic != traits.?.italic)) {
+                    font.release();
+                    continue;
+                }
+                return font;
+            }
+            return null;
+        }
+
+        pub fn symbolicTraits(self: *Font) FontSymbolicTraits {
+            return @bitCast(CTFontGetSymbolicTraits(@ptrCast(self)));
+        }
+
+        /// CoreText advertises the color trait even for COLRv1-only fonts
+        /// whose glyphs it cannot paint. Do not let those cmap entries block
+        /// a usable fallback. Fonts with sbix/SVG or legacy COLR layers work.
+        pub fn hasUnsupportedColorFormat(self: *Font) bool {
+            for ([_]u32{ 0x73626978, 0x53564720 }) |tag| { // sbix, SVG
+                if (CTFontCopyTable(@ptrCast(self), tag, 0)) |data| {
+                    CFRelease(data);
+                    return false;
+                }
+            }
+            if (CTFontCopyTable(@ptrCast(self), 0x434f4c52, 0)) |data| { // COLR
+                defer CFRelease(data);
+                if (CFDataGetLength(data) < 4) return true;
+                const header = CFDataGetBytePtr(data)[0..4];
+                return std.mem.readInt(u16, header[0..2], .big) > 0 and
+                    std.mem.readInt(u16, header[2..4], .big) == 0;
+            }
+            if (CTFontCopyTable(@ptrCast(self), 0x43424454, 0)) |data| { // CBDT
+                CFRelease(data);
+                return true;
+            }
+            return false;
+        }
+
+        pub fn copyWithFeatures(self: *Font, features: []const @import("../config.zig").FontFeature) !*Font {
+            if (features.len == 0) {
+                self.retain();
+                return self;
+            }
+            const settings = CFArrayCreateMutable(null, 0, &kCFTypeArrayCallBacks) orelse return error.OutOfMemory;
+            defer CFRelease(settings);
+            for (features) |feature| {
+                // Config stores tags in DirectWrite's little-endian byte order.
+                const bytes = [4]u8{ @truncate(feature.tag), @truncate(feature.tag >> 8), @truncate(feature.tag >> 16), @truncate(feature.tag >> 24) };
+                const tag = try foundation.String.createWithBytes(&bytes, .utf8, false);
+                defer tag.release();
+                const value: i64 = feature.value;
+                const number = CFNumberCreate(null, 4, &value) orelse return error.OutOfMemory;
+                defer CFRelease(number);
+                const setting = CFDictionaryCreate(null, &.{ kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue }, &.{ @ptrCast(tag), number }, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return error.OutOfMemory;
+                defer CFRelease(setting);
+                CFArrayAppendValue(settings, setting);
+            }
+            const attrs = CFDictionaryCreate(null, &.{kCTFontFeatureSettingsAttribute}, &.{settings}, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return error.OutOfMemory;
+            defer CFRelease(attrs);
+            const desc = CTFontDescriptorCreateWithAttributes(attrs) orelse return error.OutOfMemory;
+            defer CFRelease(desc);
+            return @ptrCast(CTFontCreateCopyWithAttributes(@ptrCast(self), 0, null, desc) orelse return error.OutOfMemory);
+        }
+
+        /// The primary face is consulted first, then the regular face and the
+        /// configured families in order. CoreText supplies system fallback last.
+        pub fn copyWithCascade(self: *Font, regular: *Font, families: []const []const u8) !*Font {
+            const cascade = CFArrayCreateMutable(null, 0, &kCFTypeArrayCallBacks) orelse return error.OutOfMemory;
+            defer CFRelease(cascade);
+            const regular_descriptor = CTFontCopyFontDescriptor(@ptrCast(regular));
+            defer CFRelease(regular_descriptor);
+            CFArrayAppendValue(cascade, regular_descriptor);
+            for (families) |family| {
+                if (try Font.findFace(family, null, null, 0)) |font| {
+                    defer font.release();
+                    if (font.hasUnsupportedColorFormat()) continue;
+                }
+                const name = try foundation.String.createWithBytes(family, .utf8, false);
+                defer name.release();
+                const descriptor = try FontDescriptor.createWithNameAndSize(name, 0);
+                defer descriptor.release();
+                CFArrayAppendValue(cascade, @ptrCast(descriptor));
+            }
+            const attributes = CFDictionaryCreate(null, &.{kCTFontCascadeListAttribute}, &.{cascade}, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return error.OutOfMemory;
+            defer CFRelease(attributes);
+            const descriptor = CTFontDescriptorCreateWithAttributes(attributes) orelse return error.OutOfMemory;
+            defer CFRelease(descriptor);
+            return @ptrCast(CTFontCreateCopyWithAttributes(@ptrCast(self), 0, null, descriptor) orelse return error.OutOfMemory);
+        }
+
         pub fn createWithFontDescriptor(descriptor: *FontDescriptor, size: f64) !*Font {
             return @ptrCast(CTFontCreateWithFontDescriptor(
                 @ptrCast(descriptor),
@@ -390,22 +595,6 @@ pub const text = struct {
                 glyphs.ptr,
                 if (advances) |values| values.ptr else null,
                 @intCast(glyphs.len),
-            );
-        }
-
-        pub fn drawGlyphs(
-            self: *Font,
-            glyphs: []const graphics.Glyph,
-            positions: []const graphics.Point,
-            context: *graphics.BitmapContext,
-        ) void {
-            std.debug.assert(glyphs.len == positions.len);
-            CTFontDrawGlyphs(
-                @ptrCast(self),
-                glyphs.ptr,
-                positions.ptr,
-                glyphs.len,
-                @ptrCast(context),
             );
         }
 

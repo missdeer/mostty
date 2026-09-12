@@ -96,6 +96,8 @@ Windows release archives bundle `conpty.dll` and `OpenConsole.exe` in the `conpt
 
 A native SwiftUI/AppKit application using PTY sessions, CoreText text rendering, and Metal presentation on the same `libghostty-vt` terminal core. Requires macOS 13 or newer. Building requires Zig 0.16.0 and full Xcode 26 or newer for the Icon Composer asset compiler (`actool`). `zig build` on a macOS host assembles a launchable `Mostty.app` into `zig-out/`, and CI publishes an arm64 `.dmg` on tagged releases.
 
+<img alt="macOSScreenshot" src="screenshot-macOS.png" />
+
 #### macOS-specific features
 
 Configuration is read from `~/Library/Application Support/com.dfordsoft.mostty.terminal/Config`;
@@ -109,7 +111,7 @@ platform differences, and examples; macOS does not use the Windows command-line 
 - **Live theme selection.** **Mostty > Theme** changes all tabs immediately while retaining explicit color overrides. Menu choices last until the next config reload or restart.
 - **Kitty graphics over the native PTY.** Supports RGB/RGBA and PNG images, chunked transmissions and replies, Unicode placeholder placements, and images below or above text, without a bundled ConPTY dependency.
 
-The default terminal font is **Menlo at 13pt**. Font size and regular/bold/italic/bold-italic families are configurable; macOS uses only the first `font-family` entry and lets CoreText resolve missing glyphs. Windows-only controls for ligatures, OpenType features, custom fallback/emoji chains, codepoint maps, synthetic styles, tab-bar fonts, background images, GPU/backend selection, and remote-session render cadence are not applied on macOS.
+The default terminal font is **Menlo at 13pt**. macOS supports ordered text and emoji font chains, programming ligatures, OpenType features, named faces, codepoint fallback maps, synthetic-style controls, and separate tab-bar fonts. Font and wallpaper settings hot-reload across all panes; background images support opacity, fitting, positioning, and tiling. GPU/backend selection and remote-session render cadence remain Windows-only.
 
 ### Shortcuts and mouse actions
 

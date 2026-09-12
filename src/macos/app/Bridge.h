@@ -41,6 +41,8 @@ void mostty_tab_destroy(MosttyTab *tab);
 bool mostty_config_reload(void);
 size_t mostty_config_path(uint8_t *buf, size_t cap);
 float mostty_config_background_opacity(void);
+// Retained CTFont/NSFont; caller releases it.
+void *mostty_config_copy_tabbar_font(void);
 bool mostty_config_background_blur(void);
 bool mostty_config_maximize(void);
 bool mostty_config_fullscreen(void);
@@ -65,7 +67,7 @@ void mostty_tab_write(MosttyTab *tab, const uint8_t *ptr, size_t len);
 
 bool mostty_tab_set_surface(MosttyTab *tab, uint32_t pixel_width, uint32_t pixel_height,
                             float scale, uint32_t *out_cols, uint32_t *out_rows);
-void *mostty_tab_render(MosttyTab *tab, bool cursor_on, uint32_t *out_cols, uint32_t *out_rows);
+void *mostty_tab_render(MosttyTab *tab, bool cursor_on, bool text_blink_on, uint32_t *out_cols, uint32_t *out_rows);
 
 size_t mostty_tab_title(MosttyTab *tab, uint8_t *buf, size_t cap);
 bool mostty_tab_poll_exit(MosttyTab *tab, int32_t *out_code);

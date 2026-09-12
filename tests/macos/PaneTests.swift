@@ -144,7 +144,7 @@ struct PaneTests {
         expect(dimensionsMatch(), "each real PTY reports rows and columns matching its own Metal drawable")
         func pixels(_ pane: PaneItem) throws -> (bytes: [UInt8], width: Int, height: Int) {
             var cols: UInt32 = 0, rows: UInt32 = 0
-            guard let pointer = mostty_tab_render(pane.view.testSession!, false, &cols, &rows),
+            guard let pointer = mostty_tab_render(pane.view.testSession!, false, true, &cols, &rows),
                   let texture = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLTexture,
                   let buffer = texture.device.makeBuffer(length: texture.width * texture.height * 4, options: .storageModeShared),
                   let command = texture.device.makeCommandQueue()?.makeCommandBuffer(),

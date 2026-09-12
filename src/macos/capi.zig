@@ -62,15 +62,20 @@ fn config() *Config {
 
 fn fontOptions(cfg: *const Config) CoreTextRenderer.FontOptions {
     return .{
-        // The CoreText renderer resolves missing glyphs through the system
-        // fallback chain, so only the primary `font-family` entry is used.
         .family = if (cfg.font_families.len > 0)
             cfg.font_families[0]
         else
             CoreTextRenderer.default_family,
+        .fallback_families = if (cfg.font_families.len > 1) cfg.font_families[1..] else &.{},
         .family_bold = cfg.font_family_bold,
         .family_italic = cfg.font_family_italic,
         .family_bold_italic = cfg.font_family_bold_italic,
+        .emoji_families = cfg.emoji_font_families,
+        .styles = .{ cfg.font_style, cfg.font_style_bold, cfg.font_style_italic, cfg.font_style_bold_italic },
+        .synthetic = cfg.font_synthetic_style,
+        .features = cfg.font_features,
+        .codepoint_maps = cfg.font_codepoint_maps,
+        .ligatures = cfg.font_ligatures,
         .size = cfg.font_size_pt orelse CoreTextRenderer.default_font_size,
     };
 }
@@ -84,6 +89,16 @@ fn paintOptions(cfg: *const Config) CoreTextRenderer.Paint {
         // (see ThemeColors.applyToNewTerminal), so an app's OSC 12 override
         // survives a config reload.
         .cursor_text = optionalRgba(cfg.theme.cursor_text),
+    };
+}
+
+fn backgroundOptions(cfg: *const Config) @import("background_image.zig").Options {
+    return .{
+        .path = cfg.background_image,
+        .opacity = cfg.background_image_opacity,
+        .fit = cfg.background_image_fit,
+        .position = cfg.background_image_position,
+        .repeat = cfg.background_image_repeat,
     };
 }
 
@@ -125,6 +140,7 @@ fn createTab(pixel_width: u32, pixel_height: u32, scale: f32, launcher: ?*const 
         .allocator = allocator,
         .font = fontOptions(cfg),
         .paint = paintOptions(cfg),
+        .background_image = backgroundOptions(cfg),
         .scale = if (scale > 0) scale else 1,
         .pixel_width = pixel_width,
         .pixel_height = pixel_height,
@@ -205,7 +221,13 @@ export fn mostty_tab_apply_config(tab_opt: ?*Tab) bool {
     tab.renderer.paint = paintOptions(cfg);
     tab.pty.terminal.setImagesEnabled(cfg.images_enabled);
     cfg.theme.rebaseTerminal(tab.pty.terminal.term);
-    return tab.renderer.reconfigure(fontOptions(cfg)) catch false;
+    tab.renderer.background_image.reconfigure(allocator, runtimeIo(), backgroundOptions(cfg)) catch |err| {
+        std.log.warn("background-image reload: {t}", .{err});
+    };
+    return tab.renderer.reconfigure(fontOptions(cfg)) catch |err| {
+        std.log.warn("font config reload: {t}; keeping previous fonts", .{err});
+        return false;
+    };
 }
 
 /// Path of the config file the host watches for changes. Returns the byte count
@@ -222,6 +244,14 @@ export fn mostty_config_path(buf: [*]u8, cap: usize) usize {
 /// layer and window must be translucent.
 export fn mostty_config_background_opacity() f32 {
     return std.math.clamp(config().background_opacity, 0, 1);
+}
+
+/// Returns a retained CTFont/NSFont. The host owns and releases it.
+export fn mostty_config_copy_tabbar_font() ?*anyopaque {
+    return @ptrCast(CoreTextRenderer.createTabbarFont(config()) catch |err| {
+        std.log.warn("tabbar font: {t}", .{err});
+        return null;
+    });
 }
 
 export fn mostty_config_background_blur() bool {
@@ -497,8 +527,9 @@ export fn mostty_tab_set_surface(
 /// Render the current terminal state and return the presentable Metal texture
 /// (the renderer's target). Writes the rendered grid size to out params. When
 /// `cursor_on` is set the block cursor is drawn, provided DECTCEM is enabled and
-/// the viewport is at the bottom (host drives blink by toggling `cursor_on`).
-export fn mostty_tab_render(tab_opt: ?*Tab, cursor_on: bool, out_cols: *u32, out_rows: *u32) ?*anyopaque {
+/// the viewport is at the bottom. `text_blink_on` controls SGR blink separately
+/// so hiding the cursor or unfocusing a pane does not hide blinking text.
+export fn mostty_tab_render(tab_opt: ?*Tab, cursor_on: bool, text_blink_on: bool, out_cols: *u32, out_rows: *u32) ?*anyopaque {
     const tab = tab_opt orelse return null;
     const term = tab.pty.terminal.term;
     const screen = term.screens.active;
@@ -519,6 +550,7 @@ export fn mostty_tab_render(tab_opt: ?*Tab, cursor_on: bool, out_cols: *u32, out
     }
 
     tab.renderer.selection = visibleSelection(tab);
+    tab.renderer.text_blink_on = text_blink_on;
     const result = tab.renderer.render(&tab.pty.terminal, cursor_cell) catch return null;
     out_cols.* = result.cols;
     out_rows.* = result.rows;
@@ -732,7 +764,7 @@ test "bridge feeds content, renders a texture, and reports mode/selection" {
 
     var cols: u32 = 0;
     var rows: u32 = 0;
-    const texture = mostty_tab_render(tab, true, &cols, &rows);
+    const texture = mostty_tab_render(tab, true, true, &cols, &rows);
     try std.testing.expect(texture != null);
     try std.testing.expect(cols > 0 and rows > 0);
 
@@ -1030,15 +1062,61 @@ test "URL hover changes rendered underline pixels and clears them on leave" {
     tab.pty.terminal.feed("http://x.test/a");
     var cols: u32 = 0;
     var rows: u32 = 0;
-    try std.testing.expect(mostty_tab_render(tab, false, &cols, &rows) != null);
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
     const plain = try std.testing.allocator.dupe(u8, tab.renderer.pixels);
     defer std.testing.allocator.free(plain);
     try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
-    try std.testing.expect(mostty_tab_render(tab, false, &cols, &rows) != null);
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
     try std.testing.expect(!std.mem.eql(u8, plain, tab.renderer.pixels));
     try std.testing.expect(!mostty_tab_hover_url(tab, false, 0, 0));
-    try std.testing.expect(mostty_tab_render(tab, false, &cols, &rows) != null);
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
     try std.testing.expectEqualSlices(u8, plain, tab.renderer.pixels);
+}
+
+test "SGR blink toggles text and decorations independently of the cursor" {
+    const tab = mostty_tab_create(320, 96, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(tab);
+    // Keep the cursor hidden: text must still blink in an unfocused pane or
+    // when an application disables DECTCEM. Include font, emoji and sprite paths.
+    tab.pty.terminal.feed("\x1b[?25l\x1b[38;2;255;255;255;48;2;18;52;86mA\x1b[5;4mB👍█\x1b[25;24mC\x1b[5;8mD");
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
+    const visible = try std.testing.allocator.dupe(u8, tab.renderer.pixels);
+    defer std.testing.allocator.free(visible);
+    try std.testing.expect(mostty_tab_render(tab, true, false, &cols, &rows) != null);
+    const cw = tab.renderer.metrics.cell_width;
+    const ch = tab.renderer.metrics.cell_height;
+    var changed: [4]bool = @splat(false);
+    for (0..tab.renderer.pixel_height) |row| {
+        for (0..tab.renderer.pixel_width) |col| {
+            const offset = (row * tab.renderer.pixel_width + col) * 4;
+            const before = visible[offset..][0..4];
+            const after = tab.renderer.pixels[offset..][0..4];
+            if (row < ch and col >= cw and col < 5 * cw) {
+                // Off means only the original background remains, including
+                // where the underline and both halves of the emoji were drawn.
+                try std.testing.expectEqualSlices(u8, &.{ 86, 52, 18, 255 }, after);
+                if (!std.mem.eql(u8, before, after)) changed[col / cw - 1] = true;
+            } else {
+                try std.testing.expectEqualSlices(u8, before, after);
+            }
+            if (row < ch and col >= 6 * cw and col < 7 * cw) {
+                // SGR invisible must stay hidden even during blink's on phase.
+                try std.testing.expectEqualSlices(u8, &.{ 86, 52, 18, 255 }, before);
+            }
+        }
+    }
+    for (changed) |value| try std.testing.expect(value);
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
+    try std.testing.expectEqualSlices(u8, visible, tab.renderer.pixels);
+
+    // Rewriting with SGR 25 preserves the same visible content in both phases.
+    tab.pty.terminal.feed("\x1b[H\x1b[25;28mA\x1b[4mB👍█\x1b[24mC\x1b[8mD");
+    for ([_]bool{ false, true }) |phase| {
+        try std.testing.expect(mostty_tab_render(tab, false, phase, &cols, &rows) != null);
+        try std.testing.expectEqualSlices(u8, visible, tab.renderer.pixels);
+    }
 }
 
 test "config colors decide the rendered defaults and palette entries" {
@@ -1120,7 +1198,8 @@ test "font keys reach the renderer, and their absence falls back to the platform
     // builds. The rule when a key is absent is the documented macOS default, not
     // a literal duplicated in the host layer.
     var configured = Config.parse(allocator,
-        \\font-family = Iosevka, Ignored Fallback
+        \\font-family = Iosevka, PingFang SC
+        \\font-family = Symbols Nerd Font Mono
         \\font-family-bold = Iosevka Heavy
         \\font-size = 17.5
         \\
@@ -1128,6 +1207,9 @@ test "font keys reach the renderer, and their absence falls back to the platform
     defer configured.deinit();
     const options = fontOptions(&configured);
     try std.testing.expectEqualStrings("Iosevka", options.family);
+    try std.testing.expectEqual(@as(usize, 2), options.fallback_families.len);
+    try std.testing.expectEqualStrings("PingFang SC", options.fallback_families[0]);
+    try std.testing.expectEqualStrings("Symbols Nerd Font Mono", options.fallback_families[1]);
     try std.testing.expectEqualStrings("Iosevka Heavy", options.family_bold);
     try std.testing.expectEqual(@as(f32, 17.5), options.size);
     // Unset per-style families stay empty so the renderer synthesizes them.
@@ -1137,6 +1219,7 @@ test "font keys reach the renderer, and their absence falls back to the platform
     defer empty.deinit();
     const defaults = fontOptions(&empty);
     try std.testing.expectEqualStrings((Config{}).font_families[0], defaults.family);
+    try std.testing.expectEqual(@as(usize, 0), defaults.fallback_families.len);
     try std.testing.expectEqual((Config{}).font_size_pt.?, defaults.size);
 }
 
@@ -1288,6 +1371,77 @@ test "launcher bridge starts the chosen command in its directory and reports nat
     _ = try tab.pty.wait();
     var code: i32 = undefined;
     try std.testing.expect(mostty_tab_poll_exit(tab, &code));
+}
+
+test "launcher and env config reload affect new processes while live sessions keep their environment" {
+    const previous = loaded_config;
+    loaded_config = Config.parse(allocator,
+        \\launcher = Probe | read line; printf 'env:%s:' "$MOSTTY_CONFIG_TEST"; pwd | /usr
+        \\env = MOSTTY_CONFIG_TEST=old
+    , "launcher-env-test");
+    defer {
+        loaded_config.?.deinit();
+        loaded_config = previous;
+    }
+    const first = mostty_tab_create(640, 240, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(first);
+    loaded_config.?.deinit();
+    loaded_config = Config.parse(allocator,
+        \\launcher = Probe | read line; printf 'env:%s:' "$MOSTTY_CONFIG_TEST"; pwd | /usr
+        \\env = MOSTTY_CONFIG_TEST=overridden
+        \\env = MOSTTY_CONFIG_TEST=new
+        \\font-family = Menlo, Songti SC
+        \\font-style = Bold
+        \\font-style-italic = false
+        \\font-synthetic-style = false
+        \\font-ligatures = false
+        \\font-feature = liga=0
+        \\font-codepoint-map = U+4E2D=PingFang SC
+        \\emoji-font-family = Apple Color Emoji
+        \\tabbar-font-family = Courier New
+        \\tabbar-font-size = 28
+        \\background-image-fit = cover
+        \\background-image-position = bottom-right
+        \\background-image-repeat = true
+        \\background-image-opacity = 0.5
+    , "launcher-env-reload-test");
+    _ = mostty_tab_apply_config(first);
+    const second = mostty_tab_create(640, 240, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(second);
+    // Both the reload and creation paths adopt all font/background settings.
+    for ([_]*Tab{ first, second }) |tab| {
+        const font = tab.renderer.families.options;
+        try std.testing.expectEqualStrings("Bold", font.styles[0].named);
+        try std.testing.expect(font.styles[2] == .disabled and !font.synthetic.bold and !font.ligatures);
+        try std.testing.expectEqual(@as(u32, 0), font.features[0].value);
+        try std.testing.expectEqualStrings("PingFang SC", font.codepoint_maps[0].family);
+        try std.testing.expectEqualStrings("Apple Color Emoji", font.emoji_families[0]);
+        const background = tab.renderer.background_image.options;
+        try std.testing.expect(background.fit == .cover and background.position == .bottom_right and background.repeat);
+        try std.testing.expectEqual(@as(f32, 0.5), background.opacity);
+    }
+    const native_font: *@import("apple.zig").text.Font = @ptrCast(mostty_config_copy_tabbar_font() orelse return error.FontCreateFailed);
+    defer native_font.release();
+    try std.testing.expect(native_font.getAscent() > first.renderer.fonts.regular.getAscent());
+    for ([_]*Tab{ first, second }, [_][]const u8{ "env:old:/usr", "env:new:/usr" }) |tab, expected| {
+        try tab.pty.write("\n");
+        var buffer: [4096]u8 = undefined;
+        var eof = false;
+        for (0..200) |_| {
+            const n = mostty_tab_read(tab, &buffer, buffer.len);
+            if (n == -2) continue;
+            if (n <= 0) {
+                eof = true;
+                break;
+            }
+            mostty_tab_feed(tab, &buffer, @intCast(n));
+        }
+        try std.testing.expect(eof);
+        const contents = try tab.pty.terminal.term.plainString(allocator);
+        defer allocator.free(contents);
+        try std.testing.expect(std.mem.indexOf(u8, contents, expected) != null);
+        _ = try tab.pty.wait();
+    }
 }
 
 test "theme choice rebases all sessions while preserving explicit config and OSC colors" {

@@ -43,9 +43,8 @@ pub const SyntheticStyle = struct {
 };
 
 // Ghostty's `font-style*` value. `.default` = no override (current
-// synthesis/family logic applies). `.disabled` = explicitly forbid using a
-// real face for this style; combined with `font-synthetic-style = no-X` this
-// forces fall-through to the regular text format. `.named` = pick the named
+// synthesis/family logic applies). `.disabled` = use the regular text format
+// for this style, regardless of synthesis policy. `.named` = pick the named
 // face within the chosen family, using its real weight/style/stretch.
 pub const FontStyle = union(enum) {
     default,
@@ -204,12 +203,12 @@ font_style_bold: FontStyle = .default,
 font_style_italic: FontStyle = .default,
 font_style_bold_italic: FontStyle = .default,
 font_size_pt: ?f32 = 13.0,
-// Shape common programming-symbol ligatures through DirectWrite. Enabled by
+// Shape common programming-symbol ligatures through the native font backend. Enabled by
 // default for MOSTTY-1; users on non-ligature fonts can disable the extra run
 // atlas entries with `font-ligatures = false`.
 font_ligatures: bool = true,
 // Ghostty-compatible OpenType feature settings (`font-feature = "liga" off`).
-// Applied through IDWriteTypography to every DirectWrite text layout.
+// Applied through DirectWrite typography or CoreText font descriptors.
 font_features: []const FontFeature = &.{},
 // Tab-bar-only font overrides. Empty/null means "inherit the terminal
 // font-family / font-size". Only the primary family is used; the tab bar's

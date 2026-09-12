@@ -38,6 +38,9 @@ src/
   vendor/ghostty-sprite/   vendored Ghostty sprite face (block/box/braille/...)
   renderer/sprite.zig      shared ghostty-sprite dispatcher and alpha/BGRA output
   renderer/cell_style.zig  shared VT colors, SGR flags, explicit-background resolution
+  renderer/emoji.zig       shared Unicode emoji presentation and UTF-16 encoding
+  renderer/font_policy.zig shared style suppression and programming-symbol rules
+  renderer/background_geometry.zig shared wallpaper fit/position geometry
   renderer/image_pixels.zig shared Kitty decoded-pixel conversion to RGBA
   renderer/image_geometry.zig shared image source crop and viewport row arithmetic
   win32/
@@ -402,11 +405,42 @@ caller and cleaned up before initialization succeeds.
 
 The macOS renderer reads the shared VT viewport through `GridModel`, which
 resolves cell geometry, wide-cell spans, colors, and text styles without Apple
-APIs. `CoreTextRenderer` selects regular, bold, italic, and fallback fonts,
-rasterizes the resolved cells into a BGRA buffer, and submits that buffer through
+APIs. `CoreTextRenderer` selects regular, bold, and italic fonts, then shapes
+each complete grapheme cluster with CoreText `CTLine` for font fallback,
+emoji presentation and sequence ligatures. Each face carries a CoreText cascade
+of the regular primary and all configured `font-family` fallbacks in order,
+followed by system fallback. Emoji presentation uses its own configurable font
+chain. Codepoint maps prepend a range-specific fallback without overriding a
+covering primary face. Named CoreText faces and OpenType feature descriptors
+are applied when fonts are built; style suppression uses the shared policy,
+with CoreGraphics emboldening/shearing for permitted missing styles.
+The renderer owns all font strings and settings across config reloads and
+rebuilds the cascades on font or backing-scale changes. Adjacent programming
+symbols with identical styles are shaped together when ligatures are enabled,
+stopping at cursor, row and paint boundaries.
+Each renderer retains up to 1024 shaped lines and their typographic metrics,
+keyed by font identity and the complete UTF-16 text. Direct-mapped collisions
+replace the old entry after shaping succeeds; keys longer than 128 UTF-16 units
+bypass the cache. Font reloads and backing-scale changes clear cached lines
+before publishing replacement fonts. Colors, clipping and cell fitting remain
+dynamic, so repainting selections or blink phases reuses the same shapes.
+Shaped clusters are scaled down as
+needed to fit their VT cell spans, preserving color glyphs in the BGRA buffer.
+The renderer submits that buffer through
 `MetalBackend` to an offscreen Metal texture. Resize and backing-scale changes
 replace the font metrics, pixel buffer, and Metal textures together. The later
 SwiftUI shell owns presentation of that texture and all input/window lifecycle.
+Its blink timer passes the text phase separately from cursor visibility; SGR
+blink hides glyphs and decorations during the off phase, preserving backgrounds.
+The host takes ownership of a retained CoreText/NSFont for tab titles; config
+reload replaces this font and updates the strip height. Wallpaper resources
+in `macos/background_image.zig` are decoded with ImageIO on configuration
+changes, cached per pane, and drawn behind the translucent terminal background.
+Fit/position geometry is shared with Windows; CoreGraphics handles tiling and
+image opacity. Removing or failing to decode a configured image clears it.
+Path changes prepare the image and any opacity-boosted copy before replacing
+the current resources; reported allocation failures preserve the old wallpaper
+and its options so a later reload can retry.
 Tile-design characters use the shared sprite rasterizer at exact cell dimensions.
 The macOS renderer caches linear alpha masks until cell metrics change and paints
 them with the resolved foreground color; Windows retains its gamma-encoded BGRA
@@ -1028,8 +1062,9 @@ bridge returns offsets into Swift's input buffer, with no Zig allocation to
 release. File reads and shell quoting remain native. Interaction tests link
 the real `input_capi.zig` object alongside their window/PTY test doubles.
 
-The renderers share baseline cell colors and SGR flags through
-`renderer/cell_style.zig`. Faint, blink/reverse handling, selection, cursor,
+The renderers share baseline cell colors, SGR flags and blink/invisible text
+visibility rules through `renderer/cell_style.zig`. Blink timers, faint,
+terminal-wide reverse handling, selection, cursor,
 glyph shaping and GPU attribute packing retain their host behavior. Kitty
 image uploaders share RGBA conversion and source-crop arithmetic, while
 placement visibility, ordering, Unicode placeholders and native image-resource

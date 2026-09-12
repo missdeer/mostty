@@ -9,6 +9,12 @@ pub const Resolved = struct {
     flags: @FieldType(vt.Style, "flags"),
 };
 
+/// Accepts VT flags or a renderer's resolved style with blink/invisible fields.
+/// Hosts supply the blink phase; backgrounds remain visible in either phase.
+pub fn textVisible(flags: anytype, blink_on: bool) bool {
+    return !flags.invisible and (!flags.blink or blink_on);
+}
+
 pub fn rgbToU24(rgb: anytype) u24 {
     return @as(u24, rgb.r) << 16 | @as(u24, rgb.g) << 8 | rgb.b;
 }
@@ -47,6 +53,17 @@ pub fn forCell(cell: anytype, page: anytype, palette: *const vt.color.Palette, f
         else => {},
     }
     return result;
+}
+
+test "SGR visibility keeps ordinary text steady and invisible text hidden across blink phases" {
+    for ([_]bool{ false, true }) |phase| {
+        try std.testing.expect(textVisible((vt.Style{}).flags, phase));
+        try std.testing.expectEqual(phase, textVisible((vt.Style{ .flags = .{ .blink = true } }).flags, phase));
+        for ([_]bool{ false, true }) |blink| {
+            const style: vt.Style = .{ .flags = .{ .invisible = true, .blink = blink } };
+            try std.testing.expect(!textVisible(style.flags, phase));
+        }
+    }
 }
 
 test "default backgrounds remain translucent candidates while explicit and inverse colors do not" {

@@ -70,6 +70,18 @@ private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
         $0.convert($0.bounds, to: host).minX < $1.convert($1.bounds, to: host).minX
     }
     let plus = descendants(host, of: LauncherMenuButton.self).first!
+    let originalFont = model.tabbarFont
+    model.tabbarFont = NSFont(name: "Courier New", size: 30)!
+    window.setContentSize(NSSize(width: 1200, height: model.tabbarHeight + 8))
+    settle()
+    expect(chips.allSatisfy { $0.titleFont.familyName == "Courier New" && $0.titleFont.pointSize == 30 },
+           "live tabbar font changes reach every tab title")
+    expect(chips[0].bounds.height >= ceil(model.tabbarFont.ascender - model.tabbarFont.descender + model.tabbarFont.leading),
+           "large configured tabbar fonts expand the strip without clipping")
+    snapshot("tabbar-large-font")
+    model.tabbarFont = originalFont
+    window.setContentSize(NSSize(width: 1200, height: model.tabbarHeight + 8))
+    settle()
     expect(chips[0].isAccessibilityElement() && chips[0].accessibilityRole() == .radioButton &&
            chips[0].accessibilityLabel() == first.title && chips[0].accessibilityChildren()?.isEmpty == true,
            "accessibility exposes a named tab instead of its underlying button cell")

@@ -422,12 +422,9 @@ fn visualFromCell(
     const bold = resolved.flags.bold;
     const italic = resolved.flags.italic;
     const faint = resolved.flags.faint;
-    var invisible = resolved.flags.invisible;
+    const invisible = !cell_style.textVisible(resolved.flags, blink_visible);
     var attrs: u32 = @as(u32, @intFromEnum(resolved.flags.underline)) & gpu.cell_attr_underline_mask;
-    if (resolved.flags.blink) {
-        result.has_blink = true;
-        if (!blink_visible) invisible = true;
-    }
+    if (resolved.flags.blink) result.has_blink = true;
     if (resolved.flags.strikethrough) attrs |= gpu.cell_attr_strikethrough;
     if (resolved.flags.overline) attrs |= gpu.cell_attr_overline;
     if (emoji.isColorGlyphRun(codepoint, grapheme)) attrs |= gpu.cell_attr_color_glyph;
@@ -479,12 +476,7 @@ fn visualFromCell(
     };
 }
 
-fn isLigatureTrigger(cp: u21) bool {
-    return switch (cp) {
-        '=', '>', '<', '!', '-', '+', '*', '&', '|', '/', '\\', ':', '?', '.', '#', '%', '^', '~' => true,
-        else => false,
-    };
-}
+const isLigatureTrigger = @import("../../renderer/font_policy.zig").isLigatureTrigger;
 
 fn markDirty(result: *BuildResult, row: u32) void {
     if (result.dirty_min_row == null or row < result.dirty_min_row.?) result.dirty_min_row = row;
