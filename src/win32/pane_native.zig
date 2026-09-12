@@ -40,9 +40,12 @@ fn create(window: *state.Window, pane: *state.Pane) void {
     pane.common.surface_id = pane.id;
     pane.common.tab_bar_height = 0;
     pane.common.blink_timer_armed = false;
-    const parent = &global.renderer.backend.?.d3d11;
-    pane.renderer = d3d11.initSurface(parent, &pane.common);
-    pane.font_generation = parent.cache_gen;
+    pane.renderer = global.renderer.initPaneSurface(&pane.common);
+    if (pane.renderer == null) std.debug.panic("selected renderer cannot create a pane surface", .{});
+    pane.font_generation = switch (global.renderer.backend.?) {
+        .d3d11 => |backend| backend.cache_gen,
+        else => 0,
+    };
     pane.hwnd = win32.CreateWindowExW(
         .{ .NOREDIRECTIONBITMAP = 1 },
         class_name,
@@ -71,7 +74,7 @@ pub fn destroy(window: *state.Window, pane: *state.Pane) void {
             window.capture_pane_id = null;
             _ = win32.ReleaseCapture();
         }
-        if (pane.renderer) |*renderer| renderer.deinit();
+        if (pane.renderer) |*renderer| global.renderer.deinitPaneSurface(renderer);
         pane.renderer = null;
         _ = win32.DestroyWindow(hwnd);
         pane.hwnd = null;
@@ -135,7 +138,10 @@ pub fn reflow(window: *state.Window) void {
 }
 
 pub fn syncSurface(pane: *state.Pane) void {
-    const parent = &global.renderer.backend.?.d3d11;
+    const parent = switch (global.renderer.backend.?) {
+        .d3d11 => |*backend| backend,
+        else => return,
+    };
     const surface = &pane.renderer.?;
     if (pane.font_generation != parent.cache_gen) {
         surface.onFontStateChanged();

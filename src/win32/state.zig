@@ -30,9 +30,7 @@ pub const Tab = struct {
 pub const Pane = struct {
     tab: *Tab,
     hwnd: ?win32.HWND = null,
-    common: @import("renderer_common.zig") = undefined,
-    renderer: ?@import("d3d11.zig") = null,
-    font_generation: u32 = 0,
+    common: @import("renderer_common.zig") = undefined,`r`n    renderer: ?@import("renderer.zig").PaneSurface = null,`r`n    font_generation: u32 = 0,
     selection_fade: f32 = 0,
     wheel_accum: i32 = 0,
     id: TabId,

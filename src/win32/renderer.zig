@@ -21,6 +21,8 @@ pub const BgImageDecoded = d3d11.BgImageDecoded;
 pub const RasterResult = FontService.RasterResult;
 pub const FontConfig = FontService.FontConfig;
 pub const D3d11InitError = d3d11.InitError;
+/// Per-pane surface handle owned by the selected process renderer.
+pub const PaneSurface = d3d11;
 pub const scrollbarWidth = d3d11.scrollbarWidth;
 pub const default_primary_font_family = FontService.default_primary_font_family;
 pub const default_font_size_pt = FontService.default_font_size_pt;
@@ -377,6 +379,18 @@ fn deinitBackend(self: *Renderer) void {
     };
 }
 
+pub fn initPaneSurface(self: *Renderer, common: *RendererCommon) ?PaneSurface {
+    const active = if (self.backend) |*backend| backend else return null;
+    return switch (active.*) {
+        .d3d11 => |*backend| d3d11.initSurface(backend, common),
+        else => null,
+    };
+}
+
+pub fn deinitPaneSurface(_: *Renderer, surface: *PaneSurface) void {
+    surface.deinit();
+}
+
 pub fn cellSizeForDpi(self: *Renderer, dpi: u32) win32.SIZE {
     return self.font_service.cellSizeForDpi(dpi);
 }
@@ -632,4 +646,10 @@ test "font service owns font and raster lifecycle outside the backend" {
         try std.testing.expect(@hasField(FontService, field_name));
         try std.testing.expect(!@hasField(d3d11, field_name));
     }
+}
+
+test "pane surface lifecycle is exposed by the renderer facade" {
+    try std.testing.expect(@hasDecl(Renderer, "initPaneSurface"));
+    try std.testing.expect(@hasDecl(Renderer, "deinitPaneSurface"));
+    try std.testing.expectEqual(PaneSurface, d3d11);
 }
