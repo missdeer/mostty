@@ -257,7 +257,7 @@ Handlers by family:
          └─► mouse_report    (left/middle/right press while VT mode active)
 
   Each transition pairs with SetCapture(); release runs the dedicated exit:
-   - selecting    → copy selection to clipboard, arm TIMER_SELECTION_FADE
+   - selecting    → copy selection to clipboard, leave the highlight up
    - scrollbar_drag → reset, requestRender
    - mouse_report → send SGR/X10 release report; clear mouse_report_tab_id
   ```
@@ -272,8 +272,7 @@ Handlers by family:
   and skips `url_hover.detectAt` while the mouse stays inside that cell.
 
 - **Misc / app messages** (`wnd/misc.zig`):
-  - `WM_TIMER` dispatches by id: `TIMER_SELECTION_FADE` decays
-    `Window.selection_fade`; `TIMER_CONFIG_RELOAD` debounces and runs
+  - `WM_TIMER` dispatches by id: `TIMER_CONFIG_RELOAD` debounces and runs
     `reloadConfig`; `TIMER_TEXT_BLINK` ticks SGR blink phase;
     `TIMER_RENDER_FRAME` is the render throttle (see §6);
     `TIMER_PTY_DRAIN` continues bounded PTY backlog drains.
@@ -839,8 +838,8 @@ Color resolution (`d3d11/color.zig`):
 - Inverse swaps fg/bg.
 - Faint dims fg in linear space via a precomputed gamma-2.2 LUT to avoid
   the "naïve halve" black-out.
-- Selection fade lerps cell colors toward `selection_bg/fg` via
-  premultiplied-alpha-safe lerp, driven by `Window.selection_fade`.
+- Selected cells take `selection_bg/fg`, falling back to inverse video when
+  either is unset.
 - Default-bg cells inherit `background_opacity` (so DWM blur and the
   background image show through), explicit-bg cells stay opaque.
 
@@ -1116,8 +1115,13 @@ WM_MOUSEMOVE (capture .selecting)
 WM_LBUTTONUP (capture .selecting)
   → ReleaseCapture
   → screen.selectionString → paste.copyToClipboard
-  → arm TIMER_SELECTION_FADE (16 ms tick, fade over ~1 s)
 ```
+
+The highlight stays after the copy — it marks what the clipboard holds, as in
+iTerm2 / xterm — and is dropped by the next grid click or by `onKeyDown` before
+it forwards input. Shortcut keys, paste included, return ahead of that clear and
+leave the highlight up. The macOS host follows the same rules, clearing after
+its Command-shortcut branch.
 
 ### 9.6 Mouse-report
 

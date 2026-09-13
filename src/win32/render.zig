@@ -67,8 +67,7 @@ pub fn renderWindow(window: *Window) void {
                 if (h.tab_id != pane.id) break :blk null;
                 break :blk .{ .start_row = h.hit.start_row, .start_col = h.hit.start_col, .end_row = h.hit.end_row, .end_col = h.hit.end_col };
             } else null;
-            const captured = win32.GetCapture() == pane.hwnd;
-            pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, if (captured and window.mouse_capture == .selecting) 1.0 else pane.selection_fade, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
+            pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
             if (pane.renderer.?.runtimeFailure()) |failure| {
                 handlePaneFailure(window, failure);
                 return;
@@ -94,7 +93,6 @@ pub fn renderWindow(window: *Window) void {
         tabbar,
         window.resizing,
         window.mouse_in_scrollbar,
-        if (window.mouse_capture == .selecting) 1.0 else window.active().selection_fade,
         theme.cursor_text,
         theme.selection_background,
         theme.selection_foreground,

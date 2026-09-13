@@ -133,12 +133,27 @@ struct ClipboardTests {
         clipboard("sentinel")
         view.copy(nil)
         expect(pasteboard.string(forType: .string) == "hello", "manual copy still works")
+        expect(clipboard_test_selection_active(), "the copied selection stays highlighted after release")
+        let typedKey = KeypadEvent()
+        typedKey.code = 82
+        typedKey.text = "0"
+        view.keyDown(with: typedKey)
+        expect(!clipboard_test_selection_active(),
+               "input drops the highlight because it no longer marks what the clipboard holds")
         clipboard("sentinel")
         view.mouseDown(with: mouse(.leftMouseDown, 0))
         view.mouseUp(with: mouse(.leftMouseUp, 0))
         expect(pasteboard.string(forType: .string) == "sentinel", "a click without selection preserves the clipboard")
         view.mouseUp(with: mouse(.leftMouseUp, 4))
         expect(pasteboard.string(forType: .string) == "sentinel", "an unmatched release preserves the clipboard")
+        clipboard_test_reset(false)
+        clipboard("right-paste")
+        view.rightMouseDown(with: mouse(.rightMouseDown, 2))
+        view.rightMouseUp(with: mouse(.rightMouseUp, 2))
+        var rightBytes = [UInt8](repeating: 0, count: 64)
+        let rightCount = clipboard_test_written(&rightBytes, rightBytes.count)
+        expect(Array(rightBytes.prefix(rightCount)) == Array("right-paste".utf8),
+               "the right press pastes like the Win32 host when the application is not reading the mouse")
         clipboard_test_mouse_mode(true)
         clipboard("sentinel")
         view.mouseDown(with: mouse(.leftMouseDown, 2))

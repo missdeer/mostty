@@ -83,7 +83,6 @@ pub fn buildAndUpload(
     tex_cell_count: gpu.CellXY,
     atlas: gpu.AtlasFrame,
     resizing: bool,
-    selection_fade: f32,
     cursor_text: ?u24,
     selection_bg: ?u24,
     selection_fg: ?u24,
@@ -237,7 +236,6 @@ pub fn buildAndUpload(
                 sel_row_range,
                 selection_bg,
                 selection_fg,
-                selection_fade,
                 cursor_on_row,
                 screen.cursor.x,
                 cursor_bg_rgba,
@@ -295,7 +293,6 @@ pub fn buildAndUpload(
                         sel_row_range,
                         selection_bg,
                         selection_fg,
-                        selection_fade,
                         cursor_on_row,
                         screen.cursor.x,
                         cursor_bg_rgba,
@@ -397,7 +394,6 @@ fn visualFromCell(
     sel_row_range: ?SelRange,
     selection_bg: ?u24,
     selection_fg: ?u24,
-    selection_fade: f32,
     cursor_on_row: bool,
     cursor_x: u32,
     cursor_bg_rgba: Rgba8,
@@ -443,12 +439,10 @@ fn visualFromCell(
     if (sel_row_range) |r| {
         if (col >= r.sx and col <= r.ex) {
             const orig_bg = bg;
-            var target_bg = if (selection_bg) |s| Rgba8.fromU24(s) else fg;
-            target_bg.a = 255;
-            var target_fg = if (selection_fg) |s| Rgba8.fromU24(s) else orig_bg;
-            target_fg.a = 255;
-            bg = color.lerpRgba8(orig_bg, target_bg, selection_fade);
-            fg = color.lerpRgba8(fg, target_fg, selection_fade);
+            bg = if (selection_bg) |s| Rgba8.fromU24(s) else fg;
+            bg.a = 255;
+            fg = if (selection_fg) |s| Rgba8.fromU24(s) else orig_bg;
+            fg.a = 255;
         }
     }
 

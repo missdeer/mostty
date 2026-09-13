@@ -30,17 +30,6 @@ var config_reload_retries: u32 = 0;
 const config_reload_max_retries: u32 = 3;
 
 pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
-    if (wparam == types.TIMER_SELECTION_FADE) {
-        const window = global_mod.windowFromHwnd(hwnd);
-        const pane = global_mod.inputPane(hwnd);
-        pane.selection_fade -= 0.05;
-        if (pane.selection_fade <= 0) {
-            pane.selection_fade = 0;
-            _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
-            pane.term.screens.active.clearSelection();
-        }
-        window.requestRender();
-    }
     if (wparam == types.TIMER_CONFIG_RELOAD) {
         _ = win32.KillTimer(hwnd, types.TIMER_CONFIG_RELOAD);
         reloadConfig(hwnd);

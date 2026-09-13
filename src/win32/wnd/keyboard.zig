@@ -157,8 +157,6 @@ pub fn onKeyDown(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32
     const screen = tab.term.screens.active;
     if (screen.selection != null) {
         screen.clearSelection();
-        tab.selection_fade = 0;
-        _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
         window.requestRender();
     }
 

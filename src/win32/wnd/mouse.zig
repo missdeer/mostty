@@ -365,8 +365,6 @@ pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
         }
     } else {
         const screen = global_mod.inputPane(hwnd).term.screens.active;
-        global_mod.inputPane(hwnd).selection_fade = 0;
-        _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
         const col: usize = @intCast(@divTrunc(@max(mouse_x, 0), cs.cx));
         const row: usize = @intCast(@divTrunc(@max(grid_mouse_y, 0), cs.cy));
         if (screen.pages.pin(.{ .viewport = .{ .x = @intCast(col), .y = @intCast(row) } })) |pin| {
@@ -456,11 +454,6 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
     screen.clearSelection();
     screen.select(sel) catch util.oom(error.OutOfMemory);
 
-    // Cancel any in-progress fade from the prior single-click release so the
-    // freshly-expanded selection doesn't immediately start dimming.
-    global_mod.inputPane(hwnd).selection_fade = 0;
-    _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
-
     // Re-capture so the upcoming WM_LBUTTONUP runs the .selecting branch and
     // copies the word to the clipboard — same exit path as a normal drag.
     window.mouse_capture = .selecting;
@@ -495,8 +488,6 @@ pub fn onLButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
                 if (text.len > 0) {
                     paste.copyToClipboard(hwnd, text);
                 }
-                global_mod.inputPane(hwnd).selection_fade = 1.0;
-                _ = win32.SetTimer(hwnd, types.TIMER_SELECTION_FADE, 16, null);
             }
         },
         .mouse_report => unreachable,

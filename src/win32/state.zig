@@ -38,7 +38,6 @@ pub const Pane = struct {
     hwnd: ?win32.HWND = null,
     common: @import("renderer_common.zig") = undefined,
     renderer: ?@import("renderer.zig").PaneSurface = null,
-    selection_fade: f32 = 0,
     wheel_accum: i32 = 0,
     id: TabId,
     child_process: ChildProcess,
@@ -355,9 +354,6 @@ pub const Window = struct {
     }
 
     pub fn onActiveChanged(self: *Window) void {
-        const pane = self.active();
-        pane.selection_fade = 0;
-        if (pane.hwnd) |hwnd| _ = win32.KillTimer(hwnd, types.TIMER_SELECTION_FADE);
         // A URL hover belongs to a specific tab — switching tabs makes the
         // cached cell coordinates point at unrelated content. Drop both the
         // hover and the cell throttle so the next mouse move re-evaluates

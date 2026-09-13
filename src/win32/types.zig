@@ -55,7 +55,6 @@ pub const WM_APP_TEST_D3D12_REMOVAL = win32.WM_APP + 6;
 pub const WM_APP_TEST_OPENGL_FAILURE = win32.WM_APP + 7;
 pub const WM_APP_TEST_VULKAN_FAILURE = win32.WM_APP + 8;
 pub const WM_APP_TEST_RENDERER_DPI = win32.WM_APP + 9;
-pub const TIMER_SELECTION_FADE: usize = 1;
 pub const TIMER_CONFIG_RELOAD: usize = 2;
 pub const TIMER_TEXT_BLINK: usize = 3;
 pub const TIMER_RENDER_FRAME: usize = 4;

@@ -1,10 +1,7 @@
-//! Color math used by the per-cell loop: palette resolution, gamma-aware
-//! faint dimming, and premultiplied-alpha-safe selection fades.
+//! Color math used by the per-cell loop: palette resolution and gamma-aware
+//! faint dimming.
 
 const std = @import("std");
-const gpu = @import("gpu.zig");
-
-const Rgba8 = gpu.Rgba8;
 
 pub const rgbToU24 = @import("../../renderer/cell_style.zig").rgbToU24;
 
@@ -29,19 +26,4 @@ pub fn dimColor(c: u24) u24 {
     const g = faint_lut[(c >> 8) & 0xFF];
     const b = faint_lut[c & 0xFF];
     return @as(u24, r) << 16 | @as(u24, g) << 8 | b;
-}
-
-pub fn lerpRgba8(a: Rgba8, b: Rgba8, t: f32) Rgba8 {
-    return .{
-        .r = lerpU8(a.r, b.r, t),
-        .g = lerpU8(a.g, b.g, t),
-        .b = lerpU8(a.b, b.b, t),
-        .a = lerpU8(a.a, b.a, t),
-    };
-}
-
-pub fn lerpU8(a: u8, b: u8, t: f32) u8 {
-    const af: f32 = @floatFromInt(a);
-    const bf: f32 = @floatFromInt(b);
-    return @intFromFloat(af + (bf - af) * t);
 }

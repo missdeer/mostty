@@ -66,6 +66,7 @@ func clipboard_test_restore_url_open() {
     }
 }
 func clipboard_test_reset(_ bracketed: Bool) { written.removeAll(); bracketedPaste = bracketed }
+func clipboard_test_selection_active() -> Bool { selectionActive }
 func clipboard_test_keypad_mode(_ enabled: Bool) { applicationKeypad = enabled; keypadQueries = 0 }
 func clipboard_test_keypad_queries() -> Int { keypadQueries }
 func clipboard_test_written(_ buffer: UnsafeMutablePointer<UInt8>, _ capacity: Int) -> Int {

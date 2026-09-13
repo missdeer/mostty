@@ -462,6 +462,12 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         }
         let flags = event.modifierFlags
         if flags.contains(.command) { super.keyDown(with: event); return }
+        // Input makes the highlighted region stale. Command shortcuts returned
+        // above, so Cmd-C still copies what is on screen.
+        if hasSelection {
+            hasSelection = false
+            publishSelection()
+        }
         if KeyInput.isKeypad(event.keyCode),
            let bytes = KeyInput.keypadBytes(event.keyCode, applicationMode: mostty_tab_app_keypad(t)) {
             writeBytes(bytes)
@@ -693,7 +699,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     override func rightMouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        if !beginMouseReport(event, button: 2) { super.rightMouseDown(with: event) }
+        // Matches the Win32 host: the right press pastes unless the application
+        // is consuming the button as a mouse report.
+        if !beginMouseReport(event, button: 2) { paste(nil) }
     }
     override func rightMouseDragged(with event: NSEvent) {
         if reportingButtons.contains(2) { reportMouse(event, action: 2, button: 2) }
