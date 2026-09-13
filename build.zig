@@ -237,11 +237,18 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     for ([_][]const u8{ "Bridge.h", "key_input.swift", "terminal_view.swift", "pane_container.swift", "app_shell.swift" }) |name| {
         pane_link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
     }
+    const pane_client = b.addSystemCommand(&.{ "swiftc", "-target", b.fmt("{s}-apple-macos13.0", .{swift_arch}) });
+    pane_client.addArgs(&.{ "-module-cache-path", b.pathFromRoot("tmp/swift-module-cache") });
+    pane_client.addFileArg(b.path("tests/macos/pane-client.swift"));
+    pane_client.addArg("-o");
+    const pane_client_exe = pane_client.addOutputFileArg("pane-client");
     const pane_run = b.addSystemCommand(&.{"/usr/bin/env"});
     pane_run.addFileArg(pane_exe);
+    pane_run.addFileArg(pane_client_exe);
     b.step("test-macos-panes", "Exercise native panes with real PTYs and Metal in a macOS GUI session").dependOn(&pane_run.step);
     const pane_config_run = b.addSystemCommand(&.{"/usr/bin/env"});
     pane_config_run.addFileArg(pane_exe);
+    pane_config_run.addFileArg(pane_client_exe);
     pane_config_run.addArg("--config-reload");
     b.step("test-macos-pane-config", "Test native pane reloads with temporary user config changes (restores original config)").dependOn(&pane_config_run.step);
 

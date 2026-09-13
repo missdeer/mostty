@@ -216,8 +216,7 @@ struct ClipboardTests {
         expect(pasteboard.string(forType: .string) == "sentinel", "a new single click clears word selection")
 
         func openedURL() -> String? {
-            guard let value = clipboard_test_opened_url() else { return nil }
-            return String(cString: value)
+            clipboard_test_opened_url()
         }
         // Intercept only the platform browser dispatch; the production mouse handlers run unchanged.
         clipboard_test_url("https://example.test/a", true)
@@ -302,7 +301,7 @@ struct ClipboardTests {
                "unsupported drag operation sends no input")
         dragBoard.clearContents()
         dragBoard.setString("ordinary text", forType: .string)
-        let textDrag = clipboard_test_drag(dragBoard, .copy)!
+        let textDrag = clipboard_test_drag(dragBoard, .copy)
         expect(view.draggingEntered(textDrag).isEmpty && !view.performDragOperation(textDrag),
                "non-file drags are rejected")
         expect(writtenBytes().isEmpty, "rejected drags preserve terminal input")

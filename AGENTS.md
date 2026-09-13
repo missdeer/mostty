@@ -52,6 +52,15 @@ On a macOS host, `zig build` assembles a launchable `Mostty.app` into `zig-out/`
 
 There is no separate lint step. The Windows build requires the MSVC ABI (`build.zig` defaults to it and fails fast on Windows-GNU).
 
+## Platform test languages
+
+These restrictions apply to platform-specific test scripts and their test helpers, including embedded code:
+
+- **macOS:** use only shell, Swift, or AppleScript for tests, including those in `tests/macos/`.
+- **Windows:** use only PowerShell for tests.
+
+When migrating an existing test written in another language, preserve its coverage, update its callers, and delete the replaced files.
+
 ## Build Command for Developer
 
 - For the Windows build, use `cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir D:\zig-cache"`.

@@ -36,7 +36,7 @@ jobs:
         run: zig build test
 
       - name: Verify bundled themes
-        run: python3 tests/macos/bundle-themes.py zig-out/Mostty.app
+        run: swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/bundle-themes.swift zig-out/Mostty.app
 
       - name: Package app bundle
         run: |

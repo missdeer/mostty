@@ -18,6 +18,8 @@ struct PaneTests {
     }
 
     private static func run() throws -> Int32 {
+        guard CommandLine.arguments.count >= 2 else { fatalError("usage: pane-tests pane-client [--config-reload]") }
+        let client = "'" + CommandLine.arguments[1].replacingOccurrences(of: "'", with: "'\\''") + "'"
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.regular)
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -85,7 +87,7 @@ struct PaneTests {
         }
         func launcher(_ name: String) -> TerminalLauncher {
             TerminalLauncher(label: name,
-                command: "python3 -u tests/macos/pane-client.py \(name) tmp/macos-pane-tests",
+                command: "\(client) \(name) tmp/macos-pane-tests",
                 directory: root.path)
         }
         func input(_ pane: PaneItem, _ text: String) {
