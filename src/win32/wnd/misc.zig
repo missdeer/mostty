@@ -177,6 +177,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
     // render-interval-*-ms may have changed; re-apply against the current
     // session state. No-op when the effective interval is unchanged.
     if (global.window) |*window| {
+        window.smart_ime = global.config.smart_ime;
         for (window.panes.items) |tab| tab.session.setImagesEnabled(global.config.images_enabled);
         window.applyRenderInterval(
             global.config.render_interval_local_ms,

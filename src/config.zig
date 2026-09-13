@@ -87,6 +87,8 @@ pub const RendererBackend = enum {
     }
 };
 
+pub const SmartIme = enum { off, tab, pane };
+
 // Scaling mode for `background-image-fit`. Mirrors Ghostty's values.
 pub const BackgroundImageFit = enum {
     contain,
@@ -251,6 +253,8 @@ background_image_fit: BackgroundImageFit = .contain,
 background_image_repeat: bool = false,
 // Controls terminal image protocols, independently of the wallpaper.
 images_enabled: bool = true,
+// Scope of the input method remembered and restored across switches (Windows).
+smart_ime: SmartIme = .tab,
 
 // Start each new window maximized. Applied after the initial ShowWindow.
 // When `fullscreen` is also true, fullscreen takes effect on top of this so
@@ -394,6 +398,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var background_image_fit = defaults.background_image_fit;
     var background_image_repeat = defaults.background_image_repeat;
     var images_enabled = defaults.images_enabled;
+    var smart_ime = defaults.smart_ime;
     var maximize = defaults.maximize;
     var fullscreen = defaults.fullscreen;
     var confirm_close_surface = defaults.confirm_close_surface;
@@ -575,6 +580,11 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 std.log.warn("config: {s}:{}: invalid images-enabled '{s}' (expect true/false)", .{ source_name, line_no, value });
                 continue;
             };
+        } else if (std.mem.eql(u8, key, "smart-ime")) {
+            smart_ime = parseSmartIme(value) orelse {
+                std.log.warn("config: {s}:{}: invalid smart-ime '{s}' (expect false, tab, or pane)", .{ source_name, line_no, value });
+                continue;
+            };
         } else if (std.mem.eql(u8, key, "background-image")) {
             // Empty value clears a prior line (no image).
             background_image = if (value.len == 0) &.{} else a.dupe(u8, value) catch oom();
@@ -680,6 +690,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .background_image_fit = background_image_fit,
         .background_image_repeat = background_image_repeat,
         .images_enabled = images_enabled,
+        .smart_ime = smart_ime,
         .maximize = maximize,
         .fullscreen = fullscreen,
         .confirm_close_surface = confirm_close_surface,
@@ -689,6 +700,15 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .renderer = renderer,
         .arena = arena,
     };
+}
+
+// `tab`/`pane` pick the scope; every boolean spelling `parseStrictBool` accepts
+// stays valid so `smart-ime = false` reads like the other switches, with `true`
+// meaning the default scope.
+fn parseSmartIme(value: []const u8) ?SmartIme {
+    if (std.ascii.eqlIgnoreCase(value, "tab")) return .tab;
+    if (std.ascii.eqlIgnoreCase(value, "pane")) return .pane;
+    return if (parseStrictBool(value) orelse return null) .tab else .off;
 }
 
 fn parseBackgroundImagePosition(value: []const u8) ?BackgroundImagePosition {
@@ -1573,6 +1593,25 @@ test "parse font-ligatures switch" {
         defer cfg.deinit();
         try std.testing.expect(cfg.font_ligatures);
     }
+}
+
+test "parse smart-ime modes" {
+    var cfg = parse(std.testing.allocator, "", "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(SmartIme.tab, cfg.smart_ime);
+    var disabled = parse(std.testing.allocator, "smart-ime = false\n", "test");
+    defer disabled.deinit();
+    try std.testing.expectEqual(SmartIme.off, disabled.smart_ime);
+    var pane = parse(std.testing.allocator, "smart-ime = pane\n", "test");
+    defer pane.deinit();
+    try std.testing.expectEqual(SmartIme.pane, pane.smart_ime);
+    // A bare `true` means "on", which is the default scope, not a third mode.
+    var enabled = parse(std.testing.allocator, "smart-ime = true\n", "test");
+    defer enabled.deinit();
+    try std.testing.expectEqual(SmartIme.tab, enabled.smart_ime);
+    var invalid = parse(std.testing.allocator, "smart-ime = window\n", "test");
+    defer invalid.deinit();
+    try std.testing.expectEqual(cfg.smart_ime, invalid.smart_ime);
 }
 
 test "parse emoji-font-family list and repeated lines" {

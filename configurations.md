@@ -100,6 +100,7 @@ unknown keys follow the rules in [Syntax](#syntax).
 | `selection-background`, `selection-foreground` | yes | yes |
 | `background-opacity`, `background-blur` | yes | yes |
 | `images-enabled` | yes | yes |
+| `smart-ime` | yes | no |
 | `maximize`, `fullscreen` | yes | yes |
 | `confirm-close-surface` | no | yes |
 | `render-interval-local-ms` | yes | yes |
@@ -485,6 +486,20 @@ macOS decodes with ImageIO when the configured path changes and caches the
 image per pane. Invalid/unreadable images produce a warning and clear the
 wallpaper. macOS limits encoded files to 64 MiB and dimensions to 10,000 pixels
 per side. These settings are independent of `images-enabled`.
+
+### `smart-ime`
+
+Controls Windows input method restoration when switching tabs or panes. Values
+are `false` (disabled), `tab` (remember per tab, default), or `pane` (remember
+per pane); the boolean spellings the other switches accept also work, with
+`true` meaning `tab`. A new tab starts on the system default input language; a
+new split pane does too under `pane`, but adopts its tab's remembered layout
+under `tab`. `false` never changes the input method for you.
+
+**Hot-reload:** yes, from the next tab or pane switch on — the current input
+method is left alone. The remembered layouts keep tracking even while the
+setting is `false`, so re-enabling it restores your latest choice rather than a
+stale one.
 
 ### `maximize`
 

@@ -13,6 +13,7 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     std.debug.assert(global.window == null);
     global.window = .{
         .hwnd = hwnd,
+        .smart_ime = global.config.smart_ime,
         .dwm_redirected = global.config.renderer.usesDwmRedirection(),
     };
     const window = &global.window.?;

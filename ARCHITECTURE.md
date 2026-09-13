@@ -241,7 +241,12 @@ Handlers by family:
   pin the IME UI at the caret pixel via `ImmSetCompositionWindow(CFS_POINT)`;
   `WM_IME_NOTIFY` (candidate open/change) sets a `CFS_EXCLUDE` rect so the
   candidate list won't sit on top of the cell. All three return `null` to
-  fall through to `DefWindowProcW`.
+  fall through to `DefWindowProcW`. `WM_INPUTLANGCHANGE` records the new HKL
+  on both the active tab and the active pane; `onActiveChanged` reposts it as
+  `WM_INPUTLANGCHANGEREQUEST` when the activated tab/pane wants a layout the OS
+  is not already on. `smart-ime` selects which record wins (`tab`, `pane`, or
+  `false` for no restoration); recording continues in every mode so a reload
+  that changes the scope never restores a stale layout.
 
 - **Mouse** (`wnd/mouse.zig`): the largest module — 884 LoC. Drives a small
   state machine via `Window.mouse_capture`:

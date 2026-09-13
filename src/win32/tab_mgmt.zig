@@ -94,7 +94,12 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
     const gpa = global.gpa.allocator();
     const id = allocatePaneId(window) orelse return;
     const tab = gpa.create(state.Tab) catch util.oom(error.OutOfMemory);
-    tab.* = .{ .id = id, .window = window, .layout = state.SplitLayout.init(gpa, id) catch util.oom(error.OutOfMemory) };
+    tab.* = .{
+        .id = id,
+        .window = window,
+        .layout = state.SplitLayout.init(gpa, id) catch util.oom(error.OutOfMemory),
+        .input_layout = state.systemDefaultInputLayout(),
+    };
     if (createPane(window, tab, id, launcher) == null) {
         tab.layout.deinit();
         gpa.destroy(tab);

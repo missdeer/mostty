@@ -7,6 +7,8 @@ const cp_mod = @import("child_process.zig");
 const pty_ring_mod = @import("pty_ring.zig");
 const url_hover = @import("../terminal/url_hover.zig");
 const TerminalSession = @import("../terminal/session.zig");
+const Config = @import("../config.zig");
+const config_defaults: Config = .{};
 
 const TabId = types.TabId;
 const TabHit = types.TabHit;
@@ -21,6 +23,10 @@ pub const Tab = struct {
     window: *Window,
     layout: SplitLayout,
     closing: bool = false,
+    // Input method this tab should use under `smart-ime = tab`, seeded at
+    // creation with the system default and updated on WM_INPUTLANGCHANGE while
+    // any of its panes is active. (MOSTTY-44)
+    input_layout: ?win32.HKL = null,
 
     pub fn active(self: *Tab) *Pane {
         return self.window.findById(self.layout.active.?).?;
@@ -60,16 +66,18 @@ pub const Pane = struct {
     // `&tab.pty_ring`, which is stable because Tab is heap-allocated and
     // never moves.
     pty_ring: pty_ring_mod.PtyRing = undefined,
-    // Input method (keyboard layout / IME) this tab should use, remembered
-    // across tab switches (MOSTTY-44). Seeded at tab creation with the system
-    // default input language and updated on WM_INPUTLANGCHANGE while this tab is
-    // active; reapplied when the tab becomes active again. null only during
-    // teardown (no active tab) or if the OS query failed. Process-memory only.
+    // Input method this pane should use under `smart-ime = pane`, seeded at
+    // creation with the system default input language and updated on
+    // WM_INPUTLANGCHANGE while this pane is active. Kept current in every mode
+    // so switching `smart-ime` at runtime never restores a stale record. null
+    // if the OS query failed. Process-memory only. (MOSTTY-44)
     input_layout: ?win32.HKL = null,
 };
 
 pub const Window = struct {
     hwnd: win32.HWND,
+    // Mirrors `config.smart_ime`; refreshed on window creation and on reload.
+    smart_ime: Config.SmartIme = config_defaults.smart_ime,
     dwm_redirected: bool = false,
     bounds: ?WindowBounds = null,
     tabs: std.ArrayListUnmanaged(*Tab) = .empty,
@@ -302,20 +310,28 @@ pub const Window = struct {
         return null;
     }
 
-    // Remember the input method the user just switched to on the active tab
-    // so switching away and back restores it. No-op during teardown when no
+    // Remember the input method the user just switched to so switching away and
+    // back restores it. Both scopes are recorded regardless of the active mode,
+    // so flipping `smart-ime` at runtime restores the user's latest choice
+    // instead of a stale creation-time layout. No-op during teardown when no
     // tab is active. (MOSTTY-44)
     pub fn recordActiveInputLayout(self: *Window, hkl: ?win32.HKL) void {
         if (self.tabs.items.len == 0) return;
+        self.activeTab().input_layout = hkl;
         self.active().input_layout = hkl;
     }
 
-    // The input method to restore for the current tab: the layout it recorded
-    // (seeded at creation, updated on WM_INPUTLANGCHANGE). null only during
-    // teardown when no tab is active. (MOSTTY-44)
+    // The input method to restore for what just became active, per `smart-ime`:
+    // the record of the owning tab, of the pane itself, or none when the user
+    // disabled restoration. Also null during teardown when no tab is active.
+    // (MOSTTY-44)
     pub fn activeInputLayout(self: *Window) ?win32.HKL {
         if (self.tabs.items.len == 0) return null;
-        return self.active().input_layout;
+        return switch (self.smart_ime) {
+            .tab => self.activeTab().input_layout,
+            .pane => self.active().input_layout,
+            .off => null,
+        };
     }
 
     fn applyActiveInputLayout(self: *Window) void {
@@ -348,9 +364,9 @@ pub const Window = struct {
         // against the new tab.
         self.hovered_url = null;
         self.hover_cell = null;
-        // Switch to the input method this tab recorded (seeded at creation with
-        // the system default, updated as the user switches), unless the OS is
-        // already on it. (MOSTTY-44)
+        // Switch to the recorded input method (seeded at creation with the
+        // system default, updated as the user switches), unless the OS is
+        // already on it or `smart-ime` is off. (MOSTTY-44)
         self.applyActiveInputLayout();
         self.requestRender();
     }
@@ -411,6 +427,7 @@ fn testWindow() Window {
 fn addTestTab(window: *Window, tab: *Tab, pane: *Pane, id: TabId, hkl: win32.HKL) !void {
     const allocator = std.testing.allocator;
     tab.* = .{ .id = id, .window = window, .layout = try SplitLayout.init(allocator, id) };
+    tab.input_layout = hkl;
     pane.* = undefined;
     pane.id = id;
     pane.tab = tab;
@@ -457,6 +474,7 @@ test "panes retain independent input methods across pane and tab switches" {
     var pane_b: Pane = undefined;
     var pane_c: Pane = undefined;
     var window = testWindow();
+    window.smart_ime = .pane;
     defer deinitTestTabs(&window);
     try addTestTab(&window, &tab_a, &pane_a, 1, english);
     try addTestTab(&window, &tab_b, &pane_b, 2, english);
@@ -474,6 +492,48 @@ test "panes retain independent input methods across pane and tab switches" {
     window.active_index = 1;
     try std.testing.expectEqual(english, window.activeInputLayout());
     window.active_index = 0;
+    try std.testing.expectEqual(chinese, window.activeInputLayout());
+}
+
+test "tabs share input method across split panes in tab mode" {
+    const english: win32.HKL = @ptrFromInt(0x0409);
+    const chinese: win32.HKL = @ptrFromInt(0x0804);
+    var tab: Tab = undefined;
+    var pane: Pane = undefined;
+    var split: Pane = undefined;
+    var window = testWindow();
+    window.smart_ime = .tab;
+    defer deinitTestTabs(&window);
+    try addTestTab(&window, &tab, &pane, 1, english);
+    window.recordActiveInputLayout(chinese);
+    try tab.layout.setBounds(.{ .x = 0, .y = 0, .width = 100, .height = 100 }, .{ .width = 1, .height = 1 }, 1);
+    try tab.layout.split(1, 2, .columns);
+    split.id = 2;
+    split.tab = &tab;
+    split.input_layout = english;
+    try window.panes.append(std.testing.allocator, &split);
+    // The fresh split pane carries its own creation-time layout, but in tab
+    // mode every pane of the tab resolves to the tab's record.
+    try std.testing.expectEqual(english, window.active().input_layout);
+    try std.testing.expectEqual(chinese, window.activeInputLayout());
+}
+
+test "disabling smart-ime stops restoring but keeps recording" {
+    const english: win32.HKL = @ptrFromInt(0x0409);
+    const chinese: win32.HKL = @ptrFromInt(0x0804);
+    var tab: Tab = undefined;
+    var pane: Pane = undefined;
+    var window = testWindow();
+    window.smart_ime = .off;
+    defer deinitTestTabs(&window);
+    try addTestTab(&window, &tab, &pane, 1, english);
+    window.recordActiveInputLayout(chinese);
+    try std.testing.expectEqual(@as(?win32.HKL, null), window.activeInputLayout());
+    // Records stay current while off, so a config reload that re-enables the
+    // feature restores the user's latest choice, not the creation-time seed.
+    window.smart_ime = .tab;
+    try std.testing.expectEqual(chinese, window.activeInputLayout());
+    window.smart_ime = .pane;
     try std.testing.expectEqual(chinese, window.activeInputLayout());
 }
 
