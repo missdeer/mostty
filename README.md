@@ -94,7 +94,7 @@ Windows release archives bundle `conpty.dll` and `OpenConsole.exe` in the `conpt
 
 ### macOS
 
-A native SwiftUI/AppKit application using PTY sessions, CoreText text rendering, and Metal presentation on the same `libghostty-vt` terminal core. Requires macOS 13 or newer. Building requires Zig 0.16.0 and full Xcode 26 or newer for the Icon Composer asset compiler (`actool`). `zig build` on a macOS host assembles a launchable `Mostty.app` into `zig-out/`, and CI publishes an arm64 `.dmg` on tagged releases.
+A native Swift/AppKit application using PTY sessions, CoreText text rendering, and Metal presentation on the same `libghostty-vt` terminal core. Requires macOS 13 or newer. Building requires Zig 0.16.0 and full Xcode 26 or newer for the Icon Composer asset compiler (`actool`). `zig build` on a macOS host assembles a launchable `Mostty.app` into `zig-out/`, and CI publishes an arm64 `.dmg` on tagged releases.
 
 <img alt="macOSScreenshot" src="screenshot-macOS.png" />
 

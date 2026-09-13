@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run from the repository root in a macOS GUI session with Metal and permission
 # to post pointer events (Accessibility). The tab-bar test restores the pointer.
+# Window tests enter/exit fullscreen, exercise Dock reopening, and restore saved frame preferences.
 set -euo pipefail
 WORK="$PWD/tmp/macos-interaction-tests"
 mkdir -p "$WORK"

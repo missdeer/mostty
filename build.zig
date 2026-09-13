@@ -179,7 +179,7 @@ fn buildMacos(
     }
 }
 
-/// Compile the SwiftUI application with `swiftc`, link it against the Zig core
+/// Compile the Swift/AppKit application with `swiftc`, link it against the Zig core
 /// static library plus the terminal core's transitive C++ archives, and
 /// assemble a launchable `Mostty.app`. Only runs on a macOS host (swiftc and the
 /// Apple frameworks are required).

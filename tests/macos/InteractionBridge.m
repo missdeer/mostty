@@ -8,6 +8,7 @@ static size_t alerts;
 static bool safe_close_default;
 static const char *active_theme = "Dark";
 static NSString *config_path;
+static bool fullscreen;
 
 static NSModalResponse respondToAlert(id alert, SEL selector) {
     alerts++;
@@ -41,7 +42,8 @@ size_t mostty_config_path(uint8_t *buf, size_t cap) {
 }
 bool mostty_config_background_blur(void) { return false; }
 bool mostty_config_maximize(void) { return false; }
-bool mostty_config_fullscreen(void) { return false; }
+void interaction_test_fullscreen(bool enabled) { fullscreen = enabled; }
+bool mostty_config_fullscreen(void) { return fullscreen; }
 size_t mostty_config_launcher_count(void) { return 2; }
 static size_t text(const char *value, uint8_t *buf, size_t cap) {
     size_t count = strlen(value);

@@ -1,4 +1,3 @@
-import SwiftUI
 import AppKit
 
 final class PaneItem: Identifiable {
@@ -9,9 +8,10 @@ final class PaneItem: Identifiable {
     init(id: UInt32) { self.id = id }
 }
 
-final class TabItem: ObservableObject, Identifiable {
+final class TabItem: Identifiable {
     let id = UUID()
-    @Published var title = "Terminal"
+    var title = "Terminal" { didSet { model?.tabBar?.refresh() } }
+    weak var model: AppModel?
     let layout: OpaquePointer
     var panes: [PaneItem]
     lazy var host = PaneContainer(tab: self)
@@ -102,15 +102,22 @@ final class ConfigWatcher {
     }
 }
 
-final class AppModel: ObservableObject {
+final class AppModel {
     static let shared = AppModel()
 
-    @Published var tabs: [TabItem] = []
-    @Published var selectedID: UUID?
-    @Published var launchers: [TerminalLauncher] = []
-    @Published var themes: [String] = []
-    @Published var activeTheme = ""
-    @Published var tabbarFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    var tabs: [TabItem] = [] { didSet { tabBar?.refresh() } }
+    var selectedID: UUID? {
+        didSet {
+            container?.show(selectedTab?.host)
+            tabBar?.refresh()
+        }
+    }
+    var launchers: [TerminalLauncher] = []
+    var themes: [String] = []
+    var activeTheme = ""
+    var tabbarFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) {
+        didSet { tabBar?.refresh() }
+    }
     var tabbarHeight: CGFloat { max(28, ceil(tabbarFont.ascender - tabbarFont.descender + tabbarFont.leading) + 8) }
     private var confirmingClose = false
     private var lastPaneID: UInt32 = 0
@@ -120,6 +127,7 @@ final class AppModel: ObservableObject {
 
     /// The live terminal container, so a config reload can refresh the backdrop.
     weak var container: ContainerView?
+    weak var tabBar: TabBar?
     private var configWatcher: ConfigWatcher?
 
     init() {
@@ -147,10 +155,8 @@ final class AppModel: ObservableObject {
         container?.applyWindowAppearance()
     }
 
-    /// Applies `maximize` / `fullscreen` once the window exists. SwiftUI creates
-    /// it after `applicationDidFinishLaunching`, so this runs a turn later. Only
-    /// one-shot actions belong here; window *state* such as opacity is owned by
-    /// ContainerView, which re-asserts it after SwiftUI builds the scene.
+    /// Applies one-shot `maximize` / `fullscreen` after showing the main window.
+    /// ContainerView owns ongoing window state such as opacity.
     func applyInitialWindowState() {
         guard let window = terminalWindow() else { return }
         installWindowDelegate(window)
@@ -256,6 +262,7 @@ final class AppModel: ObservableObject {
             showError("Unable to Open Tab", detail: "The terminal layout could not be created.")
             return
         }
+        item.model = self
         configure(item.panes[0], in: item, launcher: launcher)
         tabs.append(item)
         selectedID = item.id
@@ -315,7 +322,6 @@ final class AppModel: ObservableObject {
             NSSound.beep()
             return
         }
-        objectWillChange.send()
         tab.host.arrange()
         focusActivePane()
     }
@@ -352,7 +358,6 @@ final class AppModel: ObservableObject {
         if tab.panes.count == 1 {
             close(tab.id, confirm: false)
         } else if mostty_layout_close(tab.layout, id) {
-            objectWillChange.send()
             tab.panes.remove(at: index)
             pane.view.removeFromSuperview()
             pane.view.shutdown()
@@ -413,7 +418,7 @@ final class AppModel: ObservableObject {
     }
 }
 
-/// Preserve SwiftUI's window delegate callbacks while intercepting close requests.
+/// Preserve existing AppKit window callbacks while intercepting close requests.
 final class TerminalWindowDelegate: NSObject, NSWindowDelegate {
     weak var original: NSWindowDelegate?
     weak var model: AppModel?
@@ -432,23 +437,7 @@ final class TerminalWindowDelegate: NSObject, NSWindowDelegate {
     override func forwardingTarget(for selector: Selector!) -> Any? { original }
 }
 
-/// Hosts the selected tab's persistent terminal view, swapping it on selection
-/// change and handing it first-responder status.
-struct TerminalHost: NSViewRepresentable {
-    @ObservedObject var model: AppModel
-
-    func makeNSView(context: Context) -> ContainerView {
-        let view = ContainerView(frame: .zero)
-        view.model = model
-        model.container = view
-        return view
-    }
-
-    func updateNSView(_ nsView: ContainerView, context: Context) {
-        nsView.show(model.selectedTab?.host)
-    }
-}
-
+/// Hosts the selected tab's persistent terminal view and restores its focus.
 final class ContainerView: NSView {
     weak var model: AppModel?
     private weak var current: NSView?
@@ -464,17 +453,11 @@ final class ContainerView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         applyWindowAppearance()
-        if let window = window {
-            DispatchQueue.main.async { AppModel.shared.installWindowDelegate(window) }
-        }
+        if let window = window { model?.installWindowDelegate(window) }
     }
 
     /// `background-opacity < 1` only shows through if the window itself stops
     /// painting an opaque background behind the Metal layer.
-    ///
-    /// This runs from `viewDidMoveToWindow` rather than at launch because
-    /// SwiftUI assigns the scene's own background while building the window,
-    /// which silently overwrites an assignment made any earlier.
     func applyWindowAppearance() {
         guard let window = window else { return }
         let translucent = mostty_config_background_opacity() < 1
@@ -674,65 +657,76 @@ final class LauncherMenuButton: TabSymbolButton {
     }
 }
 
-struct LauncherButton: NSViewRepresentable {
-    let model: AppModel
+final class TabBar: NSView {
+    private let model: AppModel
+    private var chips: [UUID: TabChipButton] = [:]
+    private let launcher = LauncherMenuButton(frame: .zero)
 
-    func makeNSView(context: Context) -> LauncherMenuButton {
-        LauncherMenuButton(frame: .zero)
+    init(model: AppModel) {
+        self.model = model
+        super.init(frame: .zero)
+        model.tabBar = self
+        launcher.configuredLaunchers = { [weak model] in model?.launchers ?? [] }
+        launcher.openTab = { [weak model] launcher in model?.newTab(launcher: launcher) }
+        addSubview(launcher)
+        refresh()
     }
 
-    func updateNSView(_ button: LauncherMenuButton, context: Context) {
-        button.configuredLaunchers = { [weak model] in model?.launchers ?? [] }
-        button.openTab = { [weak model] launcher in model?.newTab(launcher: launcher) }
-    }
-}
+    required init?(coder: NSCoder) { fatalError("unsupported") }
 
-struct TabBar: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 0) {
-                ForEach(model.tabs) { tab in
-                    TabChip(tab: tab, model: model)
-                        .frame(minWidth: 0, maxWidth: .infinity)
+    func refresh() {
+        let liveIDs = Set(model.tabs.map(\.id))
+        for id in Array(chips.keys) where !liveIDs.contains(id) {
+            chips.removeValue(forKey: id)?.removeFromSuperview()
+        }
+        for (index, tab) in model.tabs.enumerated() {
+            let button = chips[tab.id] ?? TabChipButton(frame: .zero)
+            if chips[tab.id] == nil {
+                chips[tab.id] = button
+                addSubview(button)
+                button.activateTab = { [weak model, weak tab] in
+                    guard let tab = tab else { return }
+                    model?.selectedID = tab.id
+                }
+                button.closeTab = { [weak model, weak tab] in
+                    guard let tab = tab else { return }
+                    model?.close(tab.id)
                 }
             }
-            .background(Color(nsColor: TabPalette.inactive), in: Capsule())
-            LauncherButton(model: model)
-                .frame(width: 28, height: 28)
+            button.title = tab.title
+            button.selected = model.selectedID == tab.id
+            button.number = index + 1
+            button.titleFont = model.tabbarFont
+            button.toolTip = tab.title
+            button.setAccessibilityLabel(tab.title)
+            button.setAccessibilityValue(button.selected ? 1 : 0)
+            button.closeButton.setAccessibilityLabel("Close \(tab.title)")
+            button.needsDisplay = true
         }
-        .frame(height: model.tabbarHeight)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(Color(nsColor: TabPalette.bar))
+        needsLayout = true
+        needsDisplay = true
+        superview?.needsLayout = true
     }
-}
 
-struct TabChip: NSViewRepresentable {
-    @ObservedObject var tab: TabItem
-    @ObservedObject var model: AppModel
+    private var track: NSRect {
+        NSRect(x: 10, y: 4, width: max(0, bounds.width - 54), height: model.tabbarHeight)
+    }
 
-    func makeNSView(context: Context) -> TabChipButton { TabChipButton(frame: .zero) }
-
-    func updateNSView(_ button: TabChipButton, context: Context) {
-        button.title = tab.title
-        button.selected = model.selectedID == tab.id
-        button.number = (model.tabs.firstIndex { $0.id == tab.id } ?? 0) + 1
-        button.titleFont = model.tabbarFont
-        button.activateTab = { [weak model, weak tab] in
-            guard let tab = tab else { return }
-            model?.selectedID = tab.id
+    override func layout() {
+        super.layout()
+        let width = track.width / CGFloat(max(1, model.tabs.count))
+        for (index, tab) in model.tabs.enumerated() {
+            chips[tab.id]?.frame = NSRect(x: track.minX + CGFloat(index) * width, y: track.minY,
+                                         width: width, height: track.height)
         }
-        button.closeTab = { [weak model, weak tab] in
-            guard let tab = tab else { return }
-            model?.close(tab.id)
-        }
-        button.toolTip = tab.title
-        button.setAccessibilityLabel(tab.title)
-        button.setAccessibilityValue(button.selected ? 1 : 0)
-        button.closeButton.setAccessibilityLabel("Close \(tab.title)")
-        button.needsDisplay = true
+        launcher.frame = NSRect(x: bounds.width - 38, y: track.midY - 14, width: 28, height: 28)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        TabPalette.bar.setFill()
+        bounds.fill()
+        TabPalette.inactive.setFill()
+        NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
     }
 }
 
@@ -853,19 +847,37 @@ final class TabChipButton: NSButton {
     }
 }
 
-struct ContentView: View {
-    @ObservedObject var model: AppModel
+final class ContentView: NSView {
+    private let model: AppModel
+    private let tabBar: TabBar
+    let terminal = ContainerView(frame: .zero)
 
-    var body: some View {
-        VStack(spacing: 0) {
-            TabBar(model: model)
-            TerminalHost(model: model)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+    init(model: AppModel, frame: NSRect) {
+        self.model = model
+        tabBar = TabBar(model: model)
+        super.init(frame: frame)
+        terminal.model = model
+        model.container = terminal
+        addSubview(tabBar)
+        addSubview(terminal)
+        layout()
+        terminal.show(model.selectedTab?.host)
+    }
+
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    override func layout() {
+        super.layout()
+        let height = model.tabbarHeight + 8
+        tabBar.frame = NSRect(x: 0, y: max(0, bounds.height - height), width: bounds.width, height: height)
+        terminal.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - height))
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
+    private var mainWindow: NSWindow?
+    private let themeMenu = NSMenu(title: "Theme")
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         AppModel.shared.confirmClose(AppModel.shared.tabs) ? .terminateNow : .terminateCancel
     }
@@ -873,96 +885,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { AppModel.shared.shutdownAll() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        installMenus()
+        let model = AppModel.shared
+        let frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        let window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.title = "Mostty"
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentMinSize = NSSize(width: 480, height: 300)
+        window.contentView = ContentView(model: model, frame: frame)
+        model.installWindowDelegate(window)
+        mainWindow = window
+        if !window.setFrameUsingName("main") { window.center() }
+        window.setFrameAutosaveName("main")
+        window.makeKeyAndOrderFront(nil)
+        model.focusActivePane()
         NSApp.activate(ignoringOtherApps: true)
-        // SwiftUI has not built the Window scene yet at this point.
-        DispatchQueue.main.async { AppModel.shared.applyInitialWindowState() }
+        model.applyInitialWindowState()
     }
-}
 
-#if !MOSTTY_APP_TESTS
-@main
-#endif
-struct MosttyApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model = AppModel.shared
-
-    var body: some Scene {
-        Window("Mostty", id: "main") {
-            ContentView(model: model)
-                .frame(minWidth: 480, minHeight: 300)
-                .preferredColorScheme(.dark)
+    func installMenus() {
+        let main = NSMenu()
+        func submenu(_ title: String) -> NSMenu {
+            let menu = NSMenu(title: title)
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = menu
+            main.addItem(item)
+            return menu
         }
-        .commands {
-            CommandGroup(after: .newItem) {
-                Button("New Tab") { model.newTab() }
-                    .keyboardShortcut("t", modifiers: .command)
-                Button("Close Tab") { model.closeSelected() }
-                    .keyboardShortcut("w", modifiers: [.command, .shift])
-                Button("Close Pane") { model.closeSelectedPane() }
-                    .keyboardShortcut("w", modifiers: .command)
-            }
-            CommandGroup(replacing: .appSettings) {
-                Button("Open Configuration File") { model.openConfig() }
-                    .keyboardShortcut(",", modifiers: .command)
-                Menu("Theme") {
-                    ForEach(Array(Set(model.themes.map { themeBucket($0) })).sorted(), id: \.self) { bucket in
-                        Menu(bucket) {
-                            ForEach(model.themes.filter { themeBucket($0) == bucket }, id: \.self) { name in
-                                Button { model.selectTheme(name) } label: {
-                                    if name == model.activeTheme { Label(name, systemImage: "checkmark") }
-                                    else { Text(name) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            CommandMenu("Tabs") {
-                Button("Previous Tab") { model.cycleTab(-1) }
-                    .keyboardShortcut("[", modifiers: [.command, .shift])
-                Button("Next Tab") { model.cycleTab(1) }
-                    .keyboardShortcut("]", modifiers: [.command, .shift])
-                Divider()
-                ForEach(1...9, id: \.self) { number in
-                    Button("Select Tab \(number)") { model.selectTab(at: number - 1) }
-                        .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
-                        .disabled(model.tabs.count < number)
-                }
-            }
-            CommandMenu("Panes") {
-                Button("Split Right") { model.splitSelected(0) }
-                    .keyboardShortcut("d", modifiers: .command)
-                Button("Split Down") { model.splitSelected(1) }
-                    .keyboardShortcut("d", modifiers: [.command, .shift])
-                Divider()
-                Button("Focus Left") { model.focusDirection(0) }
-                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
-                Button("Focus Right") { model.focusDirection(1) }
-                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
-                Button("Focus Up") { model.focusDirection(2) }
-                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
-                Button("Focus Down") { model.focusDirection(3) }
-                    .keyboardShortcut(.downArrow, modifiers: [.command, .option])
-                Divider()
-                Button("Maximize / Restore Pane") { model.togglePaneMaximize() }
-                    .keyboardShortcut(.return, modifiers: [.command, .shift])
-            }
-            CommandGroup(after: .windowSize) {
-                Button("Toggle Full Screen") { model.toggleFullscreen() }
-                    .keyboardShortcut("f", modifiers: [.command, .control])
-            }
-            CommandGroup(replacing: .pasteboard) {
-                Button("Copy") {
-                    NSApp.sendAction(#selector(MosttyTerminalView.copy(_:)), to: nil, from: nil)
-                }
-                .keyboardShortcut("c", modifiers: .command)
-                Button("Paste") {
-                    NSApp.sendAction(#selector(MosttyTerminalView.paste(_:)), to: nil, from: nil)
-                }
-                .keyboardShortcut("v", modifiers: .command)
+        let app = submenu("Mostty")
+        addItem(app, "About Mostty", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), target: NSApp)
+        app.addItem(.separator())
+        addItem(app, "Open Configuration File", #selector(openConfig(_:)), key: ",")
+        themeMenu.delegate = self
+        let theme = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        theme.submenu = themeMenu
+        app.addItem(theme)
+        app.addItem(.separator())
+        let services = NSMenu(title: "Services")
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        servicesItem.submenu = services
+        app.addItem(servicesItem)
+        NSApp.servicesMenu = services
+        app.addItem(.separator())
+        addItem(app, "Hide Mostty", #selector(NSApplication.hide(_:)), key: "h", target: NSApp)
+        addItem(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h",
+                modifiers: [.command, .option], target: NSApp)
+        addItem(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)), target: NSApp)
+        app.addItem(.separator())
+        addItem(app, "Quit Mostty", #selector(NSApplication.terminate(_:)), key: "q", target: NSApp)
+
+        let file = submenu("File")
+        addItem(file, "New Tab", #selector(newTab(_:)), key: "t")
+        addItem(file, "Close Tab", #selector(closeTab(_:)), key: "w", modifiers: [.command, .shift])
+        addItem(file, "Close Pane", #selector(closePane(_:)), key: "w")
+
+        let edit = submenu("Edit")
+        addItem(edit, "Undo", Selector(("undo:")), key: "z", responder: true)
+        addItem(edit, "Redo", Selector(("redo:")), key: "z", modifiers: [.command, .shift], responder: true)
+        edit.addItem(.separator())
+        addItem(edit, "Cut", #selector(NSText.cut(_:)), key: "x", responder: true)
+        addItem(edit, "Copy", #selector(MosttyTerminalView.copy(_:)), key: "c", responder: true)
+        addItem(edit, "Paste", #selector(MosttyTerminalView.paste(_:)), key: "v", responder: true)
+        addItem(edit, "Select All", #selector(NSText.selectAll(_:)), key: "a", responder: true)
+
+        let tabs = submenu("Tabs")
+        addItem(tabs, "Previous Tab", #selector(cycleTab(_:)), key: "{", modifiers: [.command, .shift], tag: -1)
+        addItem(tabs, "Next Tab", #selector(cycleTab(_:)), key: "}", modifiers: [.command, .shift], tag: 1)
+        tabs.addItem(.separator())
+        for number in 1...9 {
+            addItem(tabs, "Select Tab \(number)", #selector(selectTab(_:)), key: String(number), tag: number - 1)
+        }
+
+        let panes = submenu("Panes")
+        addItem(panes, "Split Right", #selector(splitPane(_:)), key: "d", tag: 0)
+        addItem(panes, "Split Down", #selector(splitPane(_:)), key: "d", modifiers: [.command, .shift], tag: 1)
+        panes.addItem(.separator())
+        for (index, entry) in [("Left", NSLeftArrowFunctionKey), ("Right", NSRightArrowFunctionKey),
+                               ("Up", NSUpArrowFunctionKey), ("Down", NSDownArrowFunctionKey)].enumerated() {
+            addItem(panes, "Focus \(entry.0)", #selector(focusPane(_:)), key: String(UnicodeScalar(entry.1)!),
+                    modifiers: [.command, .option], tag: index)
+        }
+        panes.addItem(.separator())
+        addItem(panes, "Maximize / Restore Pane", #selector(maximizePane(_:)), key: "\r", modifiers: [.command, .shift])
+
+        let window = submenu("Window")
+        addItem(window, "Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m", responder: true)
+        addItem(window, "Zoom", #selector(NSWindow.performZoom(_:)), responder: true)
+        addItem(window, "Toggle Full Screen", #selector(toggleFullscreen(_:)), key: "f", modifiers: [.command, .control])
+        window.addItem(.separator())
+        addItem(window, "Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), target: NSApp)
+        NSApp.windowsMenu = window
+        NSApp.mainMenu = main
+    }
+
+    private func addItem(_ menu: NSMenu, _ title: String, _ action: Selector, key: String = "",
+                         modifiers: NSEvent.ModifierFlags = .command, tag: Int = 0,
+                         target: AnyObject? = nil, responder: Bool = false) {
+        // AppKit matches the character produced with Shift held, including
+        // uppercase letters; lowercase equivalents can select the plain action.
+        let equivalent = modifiers.contains(.shift) ? key.uppercased() : key
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: equivalent)
+        item.keyEquivalentModifierMask = modifiers
+        item.tag = tag
+        item.target = responder ? nil : (target ?? self)
+        menu.addItem(item)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === themeMenu else { return }
+        menu.removeAllItems()
+        let model = AppModel.shared
+        for bucket in Set(model.themes.map { themeBucket($0) }).sorted() {
+            let group = NSMenu(title: bucket)
+            let item = NSMenuItem(title: bucket, action: nil, keyEquivalent: "")
+            item.submenu = group
+            menu.addItem(item)
+            for name in model.themes where themeBucket(name) == bucket {
+                let theme = NSMenuItem(title: name, action: #selector(selectTheme(_:)), keyEquivalent: "")
+                theme.target = self
+                theme.state = name == model.activeTheme ? .on : .off
+                group.addItem(theme)
             }
         }
     }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(selectTab(_:)) {
+            return AppModel.shared.tabs.indices.contains(menuItem.tag)
+        }
+        return true
+    }
+
+    @objc private func newTab(_ sender: NSMenuItem) { AppModel.shared.newTab() }
+    @objc private func closeTab(_ sender: NSMenuItem) { AppModel.shared.closeSelected() }
+    @objc private func closePane(_ sender: NSMenuItem) { AppModel.shared.closeSelectedPane() }
+    @objc private func openConfig(_ sender: NSMenuItem) { AppModel.shared.openConfig() }
+    @objc private func selectTheme(_ sender: NSMenuItem) { AppModel.shared.selectTheme(sender.title) }
+    @objc private func cycleTab(_ sender: NSMenuItem) { AppModel.shared.cycleTab(sender.tag) }
+    @objc private func selectTab(_ sender: NSMenuItem) { AppModel.shared.selectTab(at: sender.tag) }
+    @objc private func splitPane(_ sender: NSMenuItem) { AppModel.shared.splitSelected(UInt32(sender.tag)) }
+    @objc private func focusPane(_ sender: NSMenuItem) { AppModel.shared.focusDirection(UInt32(sender.tag)) }
+    @objc private func maximizePane(_ sender: NSMenuItem) { AppModel.shared.togglePaneMaximize() }
+    @objc private func toggleFullscreen(_ sender: NSMenuItem) { AppModel.shared.toggleFullscreen() }
 
     private func themeBucket(_ name: String) -> String {
         guard let first = name.uppercased().first else { return "#" }
@@ -971,3 +1039,15 @@ struct MosttyApp: App {
         return "#"
     }
 }
+
+#if !MOSTTY_APP_TESTS
+@main
+struct MosttyApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        withExtendedLifetime(delegate) { application.run() }
+    }
+}
+#endif

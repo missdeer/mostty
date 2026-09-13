@@ -63,7 +63,7 @@ Mostty is a terminal emulator that wraps `libghostty-vt` (the VT parser/state ma
 | Target  | Entry point             | Window/IO                           | Rendering                                     |
 | ------- | ----------------------- | ----------------------------------- | --------------------------------------------- |
 | Windows | `src/mosttywindows.zig` | Win32 message loop + ConPTY per tab | D3D11 (default), D3D12, OpenGL 4.6, or Vulkan |
-| macOS   | `src/mosttymacos.zig`   | SwiftUI/AppKit app + PTY per tab over a C-ABI boundary | CoreText rasterization + Metal presentation   |
+| macOS   | `src/mosttymacos.zig`   | Swift/AppKit app + PTY per tab over a C-ABI boundary | CoreText rasterization + Metal presentation   |
 
 The backend is picked per process by `--renderer` or `renderer =` in the config; the accepted values are `d3d11`, `d3d12`, `opengl`, `pure-opengl`, `vulkan`, and `native-vulkan` (`Config.RendererBackend`). Everything except D3D11 is an explicit research variant. All of them share one process-lifetime `FontService` (DirectWrite + Direct2D), so text layout and glyph rasterization are backend-independent, and `terminal.hlsl` is the single shader source compiled to DXBC / signed DXIL / SPIR-V.
 

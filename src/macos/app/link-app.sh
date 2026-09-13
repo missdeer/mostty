@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compile the SwiftUI app and link it against the Zig terminal core.
+# Compile the Swift/AppKit app and link it against the Zig terminal core.
 #
 # Invoked by build.zig. Zig's archiver packs archive members without the 8-byte
 # alignment Apple's linker requires, so instead of linking the .a files directly

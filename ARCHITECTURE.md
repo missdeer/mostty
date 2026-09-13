@@ -5,7 +5,7 @@ of every key path. Mostty's runnable application is currently a Windows terminal
 emulator that pairs Ghostty's VT state machine (`libghostty-vt`) with a hand-rolled
 Win32 / D3D11 / DirectWrite shell. The macOS target builds the platform-neutral
 terminal core, a native PTY/session layer, and a CoreText/Metal renderer, driven
-by a SwiftUI/AppKit application (`src/macos/app/`) through a C-ABI boundary
+by a Swift/AppKit application (`src/macos/app/`) through a C-ABI boundary
 (`src/macos/capi.zig`); every VT-touching call runs on the main thread, and only
 the background PTY reader runs off it.
 
@@ -429,7 +429,12 @@ needed to fit their VT cell spans, preserving color glyphs in the BGRA buffer.
 The renderer submits that buffer through
 `MetalBackend` to an offscreen Metal texture. Resize and backing-scale changes
 replace the font metrics, pixel buffer, and Metal textures together. The later
-SwiftUI shell owns presentation of that texture and all input/window lifecycle.
+AppKit shell owns presentation of that texture and all input/window lifecycle.
+`AppDelegate` creates the window and native menus; `ContentView` lays out the
+tab bar above the terminal container. Model property observers refresh native
+tab buttons and swap the selected pane host; theme menus rebuild on opening.
+The main window restores and autosaves its normal frame before applying the
+initial maximize/fullscreen configuration, and explicitly supports native fullscreen.
 Its blink timer passes the text phase separately from cursor visibility; SGR
 blink hides glyphs and decorations during the off phase, preserving backgrounds.
 The host takes ownership of a retained CoreText/NSFont for tab titles; config
@@ -919,7 +924,7 @@ shift monospace alignment.
   font service, imported through the keyed shared-texture bridge, and copied
   onto the top strip of the back buffer. Cells start *below* the band:
   `SV_Position.y - tab_bar_height` in the pixel shader.
-- **macOS tab bar** (`AppShell.swift`): SwiftUI allocates equal widths to
+- **macOS tab bar** (`AppShell.swift`): AppKit allocates equal widths to
   AppKit buttons that draw their own backgrounds, titles, ⌘1…9 hints and
   control glyphs. AppKit retains button actions, accessibility and the
   new-tab launcher's native context menu. Title observation invalidates the

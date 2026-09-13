@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
     let first = model.tabs[0]
@@ -7,7 +6,7 @@ private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
     model.newTab()
     model.tabs[1].title = ":/Users/missdeer"
     model.selectTab(at: 0)
-    let host = NSHostingView(rootView: TabBar(model: model))
+    let host = TabBar(model: model)
     let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1200, height: 36),
                           styleMask: [.borderless], backing: .buffered, defer: false)
     window.appearance = NSAppearance(named: .darkAqua)
@@ -145,6 +144,218 @@ private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
     first.title = "Terminal"
 }
 
+private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
+    let delegate = AppDelegate()
+    let originalMenu = NSApp.mainMenu
+    let originalWindowsMenu = NSApp.windowsMenu
+    let originalServicesMenu = NSApp.servicesMenu
+    let frameKey = "NSWindow Frame main"
+    let originalFrame = UserDefaults.standard.object(forKey: frameKey)
+    NSWindow.removeFrame(usingName: "main")
+    defer {
+        UserDefaults.standard.set(originalFrame, forKey: frameKey)
+    }
+    model.newTab()
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    guard let content = model.container?.superview as? ContentView, let window = content.window else {
+        expect(false, "AppKit launch creates the terminal content and its window")
+        model.shutdownAll()
+        return
+    }
+    defer {
+        window.orderOut(nil)
+        window.setFrameAutosaveName("")
+        model.shutdownAll()
+        window.contentView = nil
+        NSApp.mainMenu = originalMenu
+        NSApp.windowsMenu = originalWindowsMenu
+        NSApp.servicesMenu = originalServicesMenu
+        withExtendedLifetime(delegate) {}
+    }
+    func settle() {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        content.layoutSubtreeIfNeeded()
+    }
+    func shortcut(_ key: String, modifiers: NSEvent.ModifierFlags = .command) -> Bool {
+        let characters = modifiers.contains(.shift) ? key.uppercased() : key
+        let keyCodes: [String: UInt16] = ["t": 17, "1": 18, "d": 2, "w": 13, "f": 3, "\r": 36, "{": 33, "}": 30,
+                                         String(UnicodeScalar(NSLeftArrowFunctionKey)!): 123,
+                                         String(UnicodeScalar(NSRightArrowFunctionKey)!): 124,
+                                         String(UnicodeScalar(NSDownArrowFunctionKey)!): 125,
+                                         String(UnicodeScalar(NSUpArrowFunctionKey)!): 126]
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                                    timestamp: ProcessInfo.processInfo.systemUptime,
+                                    windowNumber: window.windowNumber, context: nil,
+                                    characters: characters, charactersIgnoringModifiers: characters,
+                                    isARepeat: false, keyCode: keyCodes[key]!)!
+        return NSApp.mainMenu!.performKeyEquivalent(with: event)
+    }
+    func waitUntil(_ condition: () -> Bool) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: 8)
+        while !condition() && Date() < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            while let event = NSApp.nextEvent(matching: .any, until: .distantPast, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        }
+        return condition()
+    }
+    settle()
+    let first = model.selectedTab!
+    expect(window.isVisible && window.firstResponder === first.view && first.view.hasActiveSession,
+           "AppKit launch displays a running terminal with keyboard focus")
+    expect(window.appearance?.name == .darkAqua && window.tabbingMode == .disallowed &&
+           window.contentMinSize.width >= 480 && window.contentMinSize.height >= 300,
+           "native window preserves dark chrome, custom tabs, and terminal minimum dimensions")
+    expect(window.collectionBehavior.contains(.fullScreenPrimary), "main window explicitly supports native fullscreen")
+    expect(shortcut("t") && model.tabs.count == 2, "native Command-T menu shortcut creates a tab")
+    settle()
+    let second = model.selectedTab!
+    expect(first.host.superview == nil && second.host.superview === content.terminal &&
+           window.firstResponder === second.view && first.view.hasActiveSession,
+           "tab selection swaps persistent hosts and restores focus without stopping the background session")
+    expect(shortcut("1") && model.selectedID == first.id, "native numbered shortcut selects the requested tab")
+    settle()
+    expect(window.firstResponder === first.view, "numbered tab selection restores the selected pane's first responder")
+    expect(shortcut("}", modifiers: [.command, .shift]) && model.selectedID == second.id,
+           "native Command-Shift-] selects the next tab")
+    expect(shortcut("{", modifiers: [.command, .shift]) && model.selectedID == first.id,
+           "native Command-Shift-[ selects the previous tab")
+    settle()
+    let tabsMenu = NSApp.mainMenu!.item(withTitle: "Tabs")!.submenu!
+    tabsMenu.update()
+    expect(tabsMenu.item(withTitle: "Select Tab 2")!.isEnabled &&
+           !tabsMenu.item(withTitle: "Select Tab 3")!.isEnabled,
+           "native menus disable numbered shortcuts for tabs that do not exist")
+
+    let left = first.activePane!
+    expect(shortcut("d") && first.panes.count == 2, "native Command-D splits the active pane to the right")
+    let right = first.activePane!
+    expect(right !== left && right.view.frame.minX > left.view.frame.minX,
+           "split-right shortcut creates and focuses a pane on the right")
+    expect(shortcut("d", modifiers: [.command, .shift]) && first.panes.count == 3,
+           "native Command-Shift-D splits the active pane downwards")
+    let bottom = first.activePane!
+    expect(bottom !== right && bottom.view.frame.minY > right.view.frame.minY,
+           "split-down shortcut creates and focuses a pane below its source")
+    for (key, target) in [(NSUpArrowFunctionKey, right), (NSDownArrowFunctionKey, bottom),
+                           (NSLeftArrowFunctionKey, left), (NSRightArrowFunctionKey, right)] {
+        expect(shortcut(String(UnicodeScalar(key)!), modifiers: [.command, .option]) &&
+               first.activePane === target && window.firstResponder === target.view,
+               "native directional shortcut focuses the adjacent pane and its input responder")
+    }
+    expect(shortcut("\r", modifiers: [.command, .shift]) && mostty_layout_panes(first.layout, nil, 0) == 1,
+           "native Command-Shift-Return maximizes the active pane")
+    expect(shortcut("\r", modifiers: [.command, .shift]) && mostty_layout_panes(first.layout, nil, 0) == 3,
+           "native Command-Shift-Return restores all split panes")
+    interaction_test_confirmation(false, false)
+    expect(shortcut("w") && first.panes.count == 2 && !right.view.hasActiveSession && second.view.hasActiveSession,
+           "native Command-W closes only the focused pane and preserves background tabs")
+
+    var enteredFullscreen = false
+    var exitedFullscreen = false
+    let entered = NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification,
+                                                          object: window, queue: nil) { _ in enteredFullscreen = true }
+    let exited = NotificationCenter.default.addObserver(forName: NSWindow.didExitFullScreenNotification,
+                                                         object: window, queue: nil) { _ in exitedFullscreen = true }
+    defer {
+        NotificationCenter.default.removeObserver(entered)
+        NotificationCenter.default.removeObserver(exited)
+    }
+    expect(shortcut("f", modifiers: [.command, .control]) && waitUntil { enteredFullscreen } &&
+           window.styleMask.contains(.fullScreen),
+           "native Control-Command-F completes the transition into a fullscreen Space")
+    if window.styleMask.contains(.fullScreen) {
+        expect(shortcut("f", modifiers: [.command, .control]) && waitUntil { exitedFullscreen } &&
+               !window.styleMask.contains(.fullScreen),
+               "native Control-Command-F completes the transition back to a normal window")
+    }
+
+    let font = model.tabbarFont
+    model.tabbarFont = NSFont.monospacedSystemFont(ofSize: 30, weight: .regular)
+    window.setContentSize(NSSize(width: 740, height: 520))
+    settle()
+    expect(abs(content.terminal.frame.maxY + model.tabbarHeight + 8 - content.bounds.height) < 1 &&
+           content.terminal.bounds.width == content.bounds.width && first.host.frame == content.terminal.bounds,
+           "window resizing and live tab fonts reserve the full chrome height above the terminal")
+    model.tabbarFont = font
+    model.reloadConfig()
+    let themeMenu = NSApp.mainMenu!.items[0].submenu!.item(withTitle: "Theme")!.submenu!
+    delegate.menuNeedsUpdate(themeMenu)
+    let light = themeMenu.item(withTitle: "L")!.submenu!
+    light.performActionForItem(at: 0)
+    expect(model.activeTheme == "Light", "native theme menu actions apply the selected theme")
+    model.selectTheme("Dark")
+    delegate.menuNeedsUpdate(themeMenu)
+    expect(themeMenu.item(withTitle: "D")!.submenu!.items[0].state == .on &&
+           themeMenu.item(withTitle: "L")!.submenu!.items[0].state == .off,
+           "reopening the native theme menu reflects the current theme after external model changes")
+    interaction_test_confirmation(false, false)
+    expect(shortcut("w", modifiers: [.command, .shift]) && model.tabs.count == 1 && !first.view.hasActiveSession,
+           "native Command-Shift-W closes the selected tab and stops its session")
+    settle()
+    expect(model.selectedID == second.id && window.firstResponder === second.view,
+           "closing the selected tab restores the surviving terminal's focus")
+
+    window.miniaturize(nil)
+    expect(waitUntil { window.isMiniaturized }, "terminal window can be minimized before a Dock reopen")
+    do {
+        // The Dock delivers kAEReopenApplication to the application itself.
+        let reopen = NSAppleEventDescriptor(eventClass: 0x61657674, eventID: 0x72617070,
+                                            targetDescriptor: .currentProcess(), returnID: -1, transactionID: 0)
+        try reopen.sendEvent(options: .noReply, timeout: 1)
+        expect(waitUntil { !window.isMiniaturized && window.isVisible },
+               "AppKit's default Dock reopen restores the minimized main window")
+    } catch {
+        expect(false, "Dock reopen event could not be delivered: \(error)")
+    }
+    if window.isMiniaturized { window.deminiaturize(nil) }
+    settle()
+
+    let screen = window.screen!.visibleFrame
+    window.setFrameOrigin(NSPoint(x: screen.minX + 40, y: screen.minY + 60))
+    settle()
+    let savedFrame = window.frame
+    expect(window.frameAutosaveName == "main" && UserDefaults.standard.string(forKey: frameKey) != nil,
+           "moving and resizing the main window automatically saves its normal frame")
+    window.orderOut(nil)
+    window.setFrameAutosaveName("")
+    window.contentView = nil
+    model.shutdownAll()
+    model.newTab()
+
+    let restoredDelegate = AppDelegate()
+    var startupEntered = false
+    var startupExited = false
+    let startupEntry = NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification,
+                                                              object: nil, queue: nil) { _ in startupEntered = true }
+    let startupExit = NotificationCenter.default.addObserver(forName: NSWindow.didExitFullScreenNotification,
+                                                             object: nil, queue: nil) { _ in startupExited = true }
+    interaction_test_fullscreen(true)
+    defer {
+        interaction_test_fullscreen(false)
+        NotificationCenter.default.removeObserver(startupEntry)
+        NotificationCenter.default.removeObserver(startupExit)
+        if let restored = model.container?.window {
+            restored.orderOut(nil)
+            restored.setFrameAutosaveName("")
+            restored.contentView = nil
+        }
+        withExtendedLifetime(restoredDelegate) {}
+    }
+    restoredDelegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    let restored = model.container!.window!
+    expect(waitUntil { startupEntered } && restored.styleMask.contains(.fullScreen),
+           "fullscreen configuration completes a native fullscreen transition during application launch")
+    if restored.styleMask.contains(.fullScreen) {
+        restored.toggleFullScreen(nil)
+        expect(waitUntil { startupExited }, "startup fullscreen can return to a normal window")
+    }
+    expect(abs(restored.frame.minX - savedFrame.minX) < 1 && abs(restored.frame.minY - savedFrame.minY) < 1 &&
+           abs(restored.frame.width - savedFrame.width) < 1 && abs(restored.frame.height - savedFrame.height) < 1,
+           "relaunch restores the saved position and size, including after leaving startup fullscreen")
+}
+
 private final class OriginalDelegate: NSObject, NSWindowDelegate {
     var closes = 0
     var allowsClose = false
@@ -159,6 +370,8 @@ private final class OriginalDelegate: NSObject, NSWindowDelegate {
 struct InteractionTests {
     static func main() {
         _ = NSApplication.shared
+        NSApp.setActivationPolicy(.regular)
+        NSApp.finishLaunching()
         var failures = 0
         func expect(_ condition: Bool, _ rule: String) {
             print("\(condition ? "PASS" : "FAIL"): \(rule)")
@@ -334,6 +547,7 @@ struct InteractionTests {
                "quitting after accepted window closure does not ask for a second confirmation")
         model.cycleTab(1)
         expect(model.tabs.isEmpty, "cycling an empty tab list is harmless")
+        testAppShell(model, expect: expect)
 
         let configURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("tmp/macos-interaction-tests/Config")
