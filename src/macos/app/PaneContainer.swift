@@ -7,6 +7,7 @@ final class PaneContainer: NSView {
     var backingScale: CGFloat = 2
     private var arranging = false
     private var drag: (id: UInt32, axis: UInt32, offset: CGFloat)?
+    private var cursorTrackingArea: NSTrackingArea?
 
     init(tab: TabItem) {
         self.tab = tab
@@ -24,6 +25,16 @@ final class PaneContainer: NSView {
         if let window = window { backingScale = window.backingScaleFactor }
         else { drag = nil }
         arrange()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area = cursorTrackingArea { removeTrackingArea(area) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        cursorTrackingArea = area
     }
 
     override func viewDidChangeBackingProperties() {
@@ -47,7 +58,7 @@ final class PaneContainer: NSView {
         }
         guard mostty_layout_bounds(tab.layout,
             MosttyLayoutRect(x: 0, y: 0, width: bounds.width, height: bounds.height),
-            MosttyLayoutSize(width: minimum.width, height: minimum.height), 5) else { return }
+            MosttyLayoutSize(width: minimum.width, height: minimum.height), 3) else { return }
         var visible = [MosttyLayoutPane](repeating: MosttyLayoutPane(), count: tab.panes.count)
         let count = mostty_layout_panes(tab.layout, &visible, visible.count)
         let snapshot = visible.prefix(count)
@@ -88,11 +99,40 @@ final class PaneContainer: NSView {
         }
     }
 
+    /// Divider under `point` (container coordinates), searching a small band
+    /// around it: pane views stop a few points short of each divider for the
+    /// border gap, which leaves too little room to reliably grab one. Single
+    /// source of truth for hit testing, the drag gesture and the cursor.
+    func divider(at point: NSPoint) -> MosttyLayoutDivider? {
+        guard let tab = tab, tab.panes.count > 1 else { return nil }
+        let offsets: [(CGFloat, CGFloat)] = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
+        for (dx, dy) in offsets {
+            var divider = MosttyLayoutDivider()
+            if mostty_layout_divider(tab.layout, point.x + dx, point.y + dy, &divider) {
+                return divider
+            }
+        }
+        return nil
+    }
+
+    static func cursor(for divider: MosttyLayoutDivider) -> NSCursor {
+        divider.axis == 0 ? .resizeLeftRight : .resizeUpDown
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // `point` arrives in superview coordinates, which are not flipped.
+        let local = superview.map { convert(point, from: $0) } ?? point
+        return divider(at: local) != nil ? self : super.hitTest(point)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        (divider(at: local).map(PaneContainer.cursor(for:)) ?? .arrow).set()
+    }
+
     override func mouseDown(with event: NSEvent) {
-        guard let tab = tab else { return }
         let point = convert(event.locationInWindow, from: nil)
-        var divider = MosttyLayoutDivider()
-        guard mostty_layout_divider(tab.layout, point.x, point.y, &divider) else { return }
+        guard let divider = divider(at: point) else { return }
         drag = (divider.id, divider.axis, divider.axis == 0 ? point.x - divider.rect.x : point.y - divider.rect.y)
     }
 

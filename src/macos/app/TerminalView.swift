@@ -535,9 +535,20 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         let cell = selecting || mostty_tab_mouse_enabled(t) ? nil : point.flatMap { viewportCell(at: $0) }
         let hit = mostty_tab_hover_url(t, cell != nil, cell?.col ?? 0, cell?.row ?? 0)
         if hit != hoveringURL { dirty = true }
-        if hit { NSCursor.pointingHand.set() }
-        else if hoveringURL { NSCursor.arrow.set() }
+        if let point = point { cursor(hoveringURL: hit, at: point).set() }
         hoveringURL = hit
+    }
+
+    /// The divider band overlaps the pane edges, so this view keeps receiving
+    /// mouse-moved events there and must agree with PaneContainer instead of
+    /// resetting the cursor behind its back. Set on every move, not just on
+    /// hover transitions, so leaving the band always restores the cursor.
+    private func cursor(hoveringURL hit: Bool, at point: NSPoint) -> NSCursor {
+        if let container = superview as? PaneContainer,
+           let divider = container.divider(at: convert(point, to: container)) {
+            return PaneContainer.cursor(for: divider)
+        }
+        return hit ? .pointingHand : .arrow
     }
 
     override func mouseMoved(with event: NSEvent) {
