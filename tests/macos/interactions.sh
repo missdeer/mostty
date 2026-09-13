@@ -11,7 +11,7 @@ clang -fobjc-arc -c tests/macos/ClipboardBridge.m -o "$WORK/clipboard.o"
 clang -fobjc-arc -c tests/macos/InteractionBridge.m -o "$WORK/interaction.o"
 swiftc -D MOSTTY_APP_TESTS -module-cache-path "$PWD/tmp/swift-module-cache" \
     -import-objc-header tests/macos/InteractionBridge.h \
-    src/macos/app/KeyInput.swift src/macos/app/TerminalView.swift src/macos/app/PaneContainer.swift src/macos/app/AppShell.swift \
+    src/macos/app/key_input.swift src/macos/app/terminal_view.swift src/macos/app/pane_container.swift src/macos/app/app_shell.swift \
     tests/macos/InteractionTests.swift "$WORK/clipboard.o" "$WORK/interaction.o" \
     "$WORK/input-core.o" \
     "$WORK/layout-core.o" \

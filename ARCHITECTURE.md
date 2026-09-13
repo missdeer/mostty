@@ -465,7 +465,7 @@ monitor pins a pressed gesture to its originating view until release, including
 across tab switches. `PtySession` supplies size replies using the current VT grid
 and pixel dimensions, synchronized when the bridge creates or resizes a surface.
 Each macOS tab owns one shared `SplitLayout` through `layout_capi.zig` and a
-registry of stable pane IDs. `PaneContainer.swift` applies top-left, point-unit
+registry of stable pane IDs. `pane_container.swift` applies top-left, point-unit
 snapshots to persistent `MosttyTerminalView` children, rounding backing-pixel
 edges. It writes divider drags back through split IDs, without duplicating the
 layout algorithm. Each pane owns its PTY, renderer, input and selection state.
@@ -924,7 +924,7 @@ shift monospace alignment.
   font service, imported through the keyed shared-texture bridge, and copied
   onto the top strip of the back buffer. Cells start *below* the band:
   `SV_Position.y - tab_bar_height` in the pixel shader.
-- **macOS tab bar** (`AppShell.swift`): AppKit allocates equal widths to
+- **macOS tab bar** (`app_shell.swift`): AppKit allocates equal widths to
   AppKit buttons that draw their own backgrounds, titles, ⌘1…9 hints and
   control glyphs. AppKit retains button actions, accessibility and the
   new-tab launcher's native context menu. Title observation invalidates the

@@ -234,7 +234,7 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     pane_link.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
     pane_link.addArg("--test");
     pane_link.addFileArg(b.path("tests/macos/PaneTests.swift"));
-    for ([_][]const u8{ "Bridge.h", "KeyInput.swift", "TerminalView.swift", "PaneContainer.swift", "AppShell.swift" }) |name| {
+    for ([_][]const u8{ "Bridge.h", "key_input.swift", "terminal_view.swift", "pane_container.swift", "app_shell.swift" }) |name| {
         pane_link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
     }
     const pane_run = b.addSystemCommand(&.{"/usr/bin/env"});
@@ -250,10 +250,10 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     // would not invalidate the cached link. Track the compiled sources and the
     // bridging header explicitly.
     link.addFileInput(b.path("src/macos/app/Bridge.h"));
-    link.addFileInput(b.path("src/macos/app/KeyInput.swift"));
-    link.addFileInput(b.path("src/macos/app/TerminalView.swift"));
-    link.addFileInput(b.path("src/macos/app/PaneContainer.swift"));
-    link.addFileInput(b.path("src/macos/app/AppShell.swift"));
+    link.addFileInput(b.path("src/macos/app/key_input.swift"));
+    link.addFileInput(b.path("src/macos/app/terminal_view.swift"));
+    link.addFileInput(b.path("src/macos/app/pane_container.swift"));
+    link.addFileInput(b.path("src/macos/app/app_shell.swift"));
 
     // The Zig core, then the terminal core's transitive C++ archives
     // (simdutf/highway), which a static library does not bundle itself.

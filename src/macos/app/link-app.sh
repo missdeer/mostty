@@ -46,10 +46,10 @@ swiftc -O -o "$OUT" \
     ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
     -target "$TARGET" \
     -import-objc-header "$SRCDIR/Bridge.h" \
-    "$SRCDIR/KeyInput.swift" \
-    "$SRCDIR/TerminalView.swift" \
-    "$SRCDIR/PaneContainer.swift" \
-    "$SRCDIR/AppShell.swift" \
+    "$SRCDIR/key_input.swift" \
+    "$SRCDIR/terminal_view.swift" \
+    "$SRCDIR/pane_container.swift" \
+    "$SRCDIR/app_shell.swift" \
     "$WORK"/a*/*.o \
     -lc++ \
     -framework Cocoa \
