@@ -13,9 +13,9 @@ Use the built-in file-editing tools; never edit files with external tools like `
 - ✅ `fd -e go -x rg TODO`
 
 ## Rule 1 — Think, ask, surface conflicts
-State assumptions before coding. If two interpretations are both plausible, present them and ask — don't pick silently. If two patterns in the codebase contradict, pick one (more recent / more tested), say why, flag the other for cleanup; never blend them. Use the model only for judgment work (classification, drafting, summarization, extraction); for routing / retries / deterministic transforms, write code — don't ask the model.
+State assumptions before coding. If ambiguity materially affects behavior or scope, ask; otherwise make the smallest reasonable assumption and state it. If two patterns in the codebase contradict, pick one (more recent / more tested), say why, flag the other for cleanup; never blend them. Use the model only for judgment work (classification, drafting, summarization, extraction); for routing / retries / deterministic transforms, write code — don't ask the model.
 - ❌ Picking interpretation A and producing 200 lines of code for it; or writing a retry loop by prompting the model.
-- ✅ "I see two readings: A or B. Going with A because X — confirm if you meant B." / Retries live in a `for` loop with explicit backoff.
+- ✅ "I see two readings: A or B. Going with A because X; mention it in the result." / Retries live in a `for` loop with explicit backoff.
 
 ## Rule 2 — Minimal, surgical, conformant changes
 Smallest diff that solves the stated problem. No speculative features, no abstractions for single-use code, no "improvements" to adjacent code / comments / formatting. Match the codebase's existing style even if you disagree — if you genuinely think a convention is harmful, surface it; don't fork silently. Senior-engineer test: would they call this overcomplicated or out-of-scope? If yes, simplify.
@@ -23,17 +23,19 @@ Smallest diff that solves the stated problem. No speculative features, no abstra
 - ✅ Smallest diff that fixes the bug; new abstraction only when ≥2 real call sites exist.
 
 ## Rule 3 — Read before you write
-Before adding code: read the relevant exports, immediate callers, shared utilities in `libs/`. "Looks orthogonal" is dangerous — structure usually exists for a reason. Confirm a new helper has a real call site before committing it; `unusedfunc` / `unusedparams` are blocking findings, not advisories.
+Before adding or changing code that may overlap existing behavior, inspect the relevant exports, immediate callers, and shared utilities in `libs/`. "Looks orthogonal" is dangerous — structure usually exists for a reason. Confirm a new helper has a real call site before committing it; `unusedfunc` / `unusedparams` are blocking findings, not advisories.
 - ❌ Writing `parseDate()` helper and trusting nothing similar exists.
 - ✅ `rg -i 'parseDate|ParseDate' libs/ tools/` first, then either reuse or add.
 
 ## Rule 4 — Goal-driven loop
-Define success criteria up front, then iterate until verified. Don't follow a fixed step list — strong criteria let you self-correct. For feature work, "compiles" and "`go vet` clean" are not "feature works" — exercise the actual behavior and cite the evidence (command run, output observed).
+Define the intended outcome up front, then iterate until it is met. Don't follow a fixed step list — strong criteria let you self-correct. For behavior changes, verify the affected behavior when practical and report the evidence; do not add extra test work when existing checks already provide sufficient coverage.
 - ❌ "Done — `go build ./...` passes."
 - ✅ "Criteria: import R41 into `dewu-burgeon-sales-daily` for week N. Ran `./bin/...`; row count matches source xlsx (1,234); spot-checked 3 rows against `usage.md` query."
 
+For trivial, documentation-only, or mechanically local changes, use proportionate verification.
+
 ## Rule 5 — Report honestly: checkpoint, fail loud, tests verify intent
-**Checkpoint** after each significant step — what's done, what's verified, what's left; if you lose track, stop and restate. **Fail loud** — "completed" is wrong if anything was skipped silently; "tests pass" is wrong if any were skipped or marked `t.Skip`; surface uncertainty, don't hide it. **Tests encode intent**, not just behavior — a test that can't fail when the business rule changes is broken; assert *why* the value matters (the rule), not just *what* it is right now.
+**Checkpoint** at meaningful milestones — what's done, what's verified, what's left; if blocked, state the blocker and continue any independent work. **Fail loud** — "completed" is wrong if anything was skipped silently; "tests pass" is wrong if any were skipped or marked `t.Skip`; surface uncertainty, don't hide it. **Tests encode intent**, not just behavior — when adding or changing a test, assert *why* the value matters (the rule), not just *what* it is right now. Add or change tests only when the change has a behavior rule that existing checks do not cover.
 - ❌ "All 3 subtasks done!" when subtask 2 silently fell through to a default, or a test that just re-encodes the current return value with no link to the business rule.
 - ✅ "2 of 3 done. Subtask 2 hit Y — need your call on Z before continuing." / `assert sale_price == cost * (1 + REQUIRED_MARGIN)` instead of `assert sale_price == 13.75`.
 
@@ -52,9 +54,9 @@ There is no separate lint step. The Windows build requires the MSVC ABI (`build.
 
 ## Build Command for Developer
 
-- Use `cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir D:\zig-cache"` to build the project.
+- For the Windows build, use `cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir D:\zig-cache"`.
 - Use `D:\zig-cache` as the build cache.
-- Don't always wrap commands by `cmd.exe /c`, run it directly except the **build command**.
+- Invoke non-build commands directly.
 
 # Architecture
 
