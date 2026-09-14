@@ -16,6 +16,7 @@ const types = @import("types.zig");
 const bg_image = @import("d3d11/background_image.zig");
 const cell_buffer = @import("d3d11/cell_buffer.zig");
 const glyph_mod = @import("d3d11/glyph.zig");
+const color = @import("d3d11/color.zig");
 const gpu = @import("d3d11/gpu.zig");
 const grid = @import("d3d11/grid.zig");
 const kitty_image_mod = @import("d3d11/kitty_images.zig");
@@ -648,6 +649,7 @@ fn prepareTabbar(self: *VulkanRenderer, prepared: PreparedFrame, tabbar: types.T
     }
     const sig = tabbar_paint.signature(tabbar, self.cache_gen, prepared.cs.x, prepared.client_w, prepared.tab_bar_h);
     if (self.tabbar_sig_rt == band.render_target and self.tabbar_sig == sig) return;
+    band.clear(color.encodedBackground(tabbar.background, tabbar.opacity));
     tabbar_paint.paint(
         band.render_target,
         band.brush,
@@ -922,12 +924,7 @@ fn recordTarget(
     if (self.chrome_rects) |rects| {
         const opacity = self.chrome_opacity;
         const background = self.chrome_background;
-        const fill = vk.VkClearAttachment{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = .{ .color = .{ .float32 = .{
-            std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
-            std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
-            std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
-            opacity,
-        } } } };
+        const fill = vk.VkClearAttachment{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = .{ .color = .{ .float32 = color.linearBackground(background, opacity) } } };
         const whole = vk.VkClearRect{ .rect = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent }, .baseArrayLayer = 0, .layerCount = 1 };
         core.dp.cmd_clear_attachments(command, 1, &fill, 1, &whole);
         const transparent = vk.VkClearAttachment{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = clear };
@@ -963,11 +960,17 @@ fn recordTarget(
         }
     }
     if (prepared.tab_bar_h != 0) {
+        // The band supplies its own background alpha, so source-over must
+        // start on transparent pixels rather than apply chrome opacity twice.
+        const transparent = vk.VkClearAttachment{ .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = clear };
+        const band_rect = vk.VkClearRect{ .rect = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = prepared.client_w, .height = @min(prepared.tab_bar_h, prepared.client_h) } }, .baseArrayLayer = 0, .layerCount = 1 };
+        core.dp.cmd_clear_attachments(command, 1, &transparent, 1, &band_rect);
         const config: kitty_image_mod.ImageConfig = .{
             .dest = .{ 0, 0, @floatFromInt(prepared.client_w), @floatFromInt(prepared.tab_bar_h) },
             .source = .{ 0, 0, @floatFromInt(prepared.client_w), @floatFromInt(prepared.tab_bar_h) },
             .image_size = .{ @floatFromInt(prepared.client_w), @floatFromInt(prepared.tab_bar_h) },
             .tab_bar_height = 0,
+            .encoded_premultiplied = 1,
         };
         try self.drawImage(command, &config, self.tabbar_image.view, prepared.client_w, prepared.client_h);
     }

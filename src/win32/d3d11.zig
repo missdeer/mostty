@@ -755,12 +755,7 @@ pub fn render(
 
 pub fn renderChrome(self: *D3d11Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
     const prepared = prepareFrame(self, hwnd, term, false) orelse return;
-    const rgba = [4]f32{
-        std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
-        std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
-        std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
-        opacity,
-    };
+    const rgba = color.linearBackground(background, opacity);
     self.context.ClearRenderTargetView(self.grid_rtv.?, &rgba[0]);
     // Child surfaces supply their own alpha. Leaving parent pixels underneath
     // would apply background opacity twice and make split panes more opaque.
@@ -1045,6 +1040,8 @@ fn paintChromeAndPresent(self: *D3d11Renderer, prepared: PreparedFrame, tabbar: 
         const reusable = self.tabbar_sig_tex == band.texture and self.tabbar_sig == sig;
         if (!reusable) {
             gpu.acquireFontWrite(band.mutex);
+            const background = color.encodedBackground(tabbar.background, tabbar.opacity);
+            self.font_service.context.ClearRenderTargetView(band.view, &background[0]);
             tabbar_paint.paint(
                 band.render_target,
                 band.brush,

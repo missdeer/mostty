@@ -51,7 +51,7 @@ pub const ImageConfig = extern struct {
     source: [4]f32,
     image_size: [2]f32,
     tab_bar_height: f32,
-    _pad: f32 = 0,
+    encoded_premultiplied: f32 = 0,
 };
 
 pub fn Cache(comptime Image: type) type {

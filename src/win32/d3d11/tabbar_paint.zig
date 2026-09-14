@@ -1,8 +1,15 @@
 //! Proportional tab-bar painter. Draws the tab-bar band into an offscreen D2D
-//! render target (opaque) using DirectWrite, so titles render with the tab-bar
-//! font's natural advances (not the terminal cell grid). The renderer copies
-//! the result onto the back buffer's top strip. Tab widths and the close/new
+//! render target using DirectWrite, so titles render with the tab-bar font's
+//! natural advances (not the terminal cell grid). The renderer copies the
+//! result onto the back buffer's top strip. Tab widths and the close/new
 //! buttons stay column-based; only the title text is proportional.
+//!
+//! The target carries premultiplied alpha so the band shares the terminal's
+//! translucent background. That costs ClearType: D2D only emits subpixel AA
+//! against an opaque destination and silently falls back to grayscale on an
+//! alpha-aware one. Grayscale is the correct trade here — subpixel fringes
+//! assume a known backdrop, and under DComp the band composites over whatever
+//! the desktop happens to be.
 
 const std = @import("std");
 const win32 = @import("win32").everything;
@@ -19,6 +26,69 @@ fn colorF(c: u24) win32.D2D_COLOR_F {
         .b = @as(f32, @floatFromInt(c & 0xFF)) / 255.0,
         .a = 1.0,
     };
+}
+
+// The palette is derived from the theme rather than fixed, so it has to work in
+// either polarity. Surfaces are nudged toward the foreground just far enough to
+// read as raised; text is pulled back toward the background to rank an inactive
+// tab below the active one without dropping it out of legibility.
+const active_surface_mix = 12;
+const hover_surface_mix = 7;
+const inactive_text_mix = 55;
+
+fn mix(background: u24, foreground: u24, percent: u32) u24 {
+    var result: u24 = 0;
+    inline for (.{ 0, 8, 16 }) |shift| {
+        const bg: u32 = (background >> shift) & 0xff;
+        const fg: u32 = (foreground >> shift) & 0xff;
+        result |= @as(u24, @intCast((bg * (100 - percent) + fg * percent + 50) / 100)) << shift;
+    }
+    return result;
+}
+
+// Luminance of an sRGB byte color, per WCAG's relative-luminance definition.
+fn luminance(c: u24) f32 {
+    var total: f32 = 0;
+    inline for (.{ .{ 16, 0.2126 }, .{ 8, 0.7152 }, .{ 0, 0.0722 } }) |pair| {
+        const channel = @as(f32, @floatFromInt((c >> pair[0]) & 0xff)) / 255;
+        const linear = if (channel <= 0.04045) channel / 12.92 else std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
+        total += linear * pair[1];
+    }
+    return total;
+}
+
+fn contrastRatio(a: u24, b: u24) f32 {
+    const la = luminance(a);
+    const lb = luminance(b);
+    return (@max(la, lb) + 0.05) / (@min(la, lb) + 0.05);
+}
+
+test "derived palette stays legible and correctly ranked in either polarity" {
+    // The three ratios are the whole palette, so assert what they must buy us
+    // rather than restating their arithmetic: pick one away and a test fails.
+    for ([_][2]u24{ .{ 0x1e1e2e, 0xcdd6f4 }, .{ 0xfafafa, 0x1c1c1c } }) |theme| {
+        const bg = theme[0];
+        const fg = theme[1];
+        const active = mix(bg, fg, active_surface_mix);
+        const hover = mix(bg, fg, hover_surface_mix);
+        const inactive_text = mix(bg, fg, inactive_text_mix);
+
+        // Raised surfaces must separate from the band enough to be seen, yet
+        // stay far closer to it than to the foreground — a pill, not a slab
+        // pasted over the terminal.
+        try std.testing.expect(contrastRatio(active, bg) >= 1.2);
+        try std.testing.expect(contrastRatio(active, bg) < contrastRatio(active, fg));
+        // The active tab has to outrank a merely hovered one.
+        try std.testing.expect(contrastRatio(active, bg) > contrastRatio(hover, bg));
+        try std.testing.expect(contrastRatio(hover, bg) > 1.0);
+        // An inactive title is deliberately demoted, but has to clear 3:1 —
+        // WCAG's floor for still-discernible UI text. The mix lands at 4.4:1 on
+        // a dark theme and 3.8:1 on a light one, so this catches a demotion
+        // pushed far enough to make background tabs unreadable without
+        // pretending the palette targets the 4.5:1 body-text bar.
+        try std.testing.expect(contrastRatio(inactive_text, bg) >= 3.0);
+        try std.testing.expect(contrastRatio(inactive_text, bg) < contrastRatio(fg, bg));
+    }
 }
 
 // Lenient UTF-8 -> UTF-16 into `buf`; invalid bytes become '?'. Returns the
@@ -71,6 +141,11 @@ pub fn signature(
     h.update(std.mem.asBytes(&cell_w));
     h.update(std.mem.asBytes(&band_w));
     h.update(std.mem.asBytes(&band_h));
+    const background: u32 = draw.background;
+    const foreground: u32 = draw.foreground;
+    h.update(std.mem.asBytes(&background));
+    h.update(std.mem.asBytes(&foreground));
+    h.update(std.mem.asBytes(&draw.opacity));
     for (draw.tabs) |t| {
         h.update(std.mem.asBytes(&t.col_start));
         h.update(std.mem.asBytes(&t.col_end));
@@ -98,6 +173,7 @@ pub fn signature(
 // field, forcing that decision instead of letting it default to "not hashed".
 test "band signature covers every paint input" {
     comptime std.debug.assert(std.meta.fields(types.TabDrawInfo).len == 8);
+    comptime std.debug.assert(std.meta.fields(types.TabBarDraw).len == 6);
 
     const base = types.TabDrawInfo{
         .col_start = 0,
@@ -134,6 +210,15 @@ test "band signature covers every paint input" {
     // glyph metrics or geometry without touching `TabBarDraw`.
     const tabs = [_]types.TabDrawInfo{base};
     const draw = types.TabBarDraw{ .tabs = &tabs, .new_tab_col = 21, .new_tab_hovered = false };
+    var themed = draw;
+    themed.background = 0xeeeeee;
+    try std.testing.expect(signature(themed, 3, 8, 640, 24) != baseline);
+    themed = draw;
+    themed.foreground = 0x222222;
+    try std.testing.expect(signature(themed, 3, 8, 640, 24) != baseline);
+    themed = draw;
+    themed.opacity = 0.5;
+    try std.testing.expect(signature(themed, 3, 8, 640, 24) != baseline);
     try std.testing.expect(signature(draw, 4, 8, 640, 24) != baseline);
     try std.testing.expect(signature(draw, 3, 9, 640, 24) != baseline);
     try std.testing.expect(signature(draw, 3, 8, 641, 24) != baseline);
@@ -224,7 +309,7 @@ fn drawButton(
     }
 }
 
-// Paints the whole tab-bar band into `rt` (assumed sized client_w x band_h).
+// Paints the tab controls over the caller's cleared background (client_w x band_h).
 // `cell_w` is the terminal cell width in pixels (tab columns are cell_w wide).
 pub fn paint(
     rt: *win32.ID2D1RenderTarget,
@@ -249,30 +334,18 @@ pub fn paint(
     };
 
     rt.BeginDraw();
-    rt.Clear(&colorF(types.tab_bar_bg));
 
-    if (draw.tabs.len > 0) {
-        const track = win32.D2D1_ROUNDED_RECT{
-            .rect = .{
-                .left = @as(f32, @floatFromInt(draw.tabs[0].col_start * cell_w)) + inset,
-                .top = inset,
-                .right = @as(f32, @floatFromInt(draw.tabs[draw.tabs.len - 1].col_end * cell_w)) - inset,
-                .bottom = bh - inset,
-            },
-            .radiusX = (bh - inset * 2) / 2,
-            .radiusY = (bh - inset * 2) / 2,
-        };
-        brush.SetColor(&colorF(types.tab_inactive_bg));
-        rt.FillRoundedRectangle(&track, &brush.ID2D1Brush);
-    }
+    const active_bg = mix(draw.background, draw.foreground, active_surface_mix);
+    const hover_bg = mix(draw.background, draw.foreground, hover_surface_mix);
+    const inactive_fg = mix(draw.background, draw.foreground, inactive_text_mix);
     for (draw.tabs) |t| {
         const x0: f32 = @floatFromInt(t.col_start * cell_w);
         const x1: f32 = @floatFromInt(t.col_end * cell_w);
         const hovered = t.hovered or t.close_hovered;
-        const bg: u24 = if (t.active) types.tab_active_bg else if (hovered) types.tab_hover_bg else types.tab_inactive_bg;
-        const fg: u24 = if (t.active) types.tab_active_fg else types.tab_bar_fg;
+        const bg: u24 = if (t.active) active_bg else hover_bg;
+        const fg: u24 = if (t.active) draw.foreground else inactive_fg;
 
-        // A continuous rounded track, with a separate inset selected pill.
+        // Only the selected or hovered tab has a raised surface.
         const pill = win32.D2D1_ROUNDED_RECT{
             .rect = .{ .left = x0 + inset, .top = inset, .right = x1 - inset, .bottom = bh - inset },
             .radiusX = (bh - inset * 2) / 2,
@@ -280,10 +353,6 @@ pub fn paint(
         };
         brush.SetColor(&colorF(bg));
         if (t.active or hovered) rt.FillRoundedRectangle(&pill, &brush.ID2D1Brush);
-        if (t.active) {
-            brush.SetColor(&colorF(types.tab_active_border));
-            rt.DrawRoundedRectangle(&pill, &brush.ID2D1Brush, @max(1, bh / 36), null);
-        }
 
         // Symmetric reservations keep the title centered even with controls.
         const show_shortcut = t.tab_number <= 9 and x1 - x0 >= cw * 16;
@@ -319,24 +388,23 @@ pub fn paint(
                 _ = layout.SetFontSize(@max(font.fontSizeDips(dpi, 1), format.GetFontSize() - font.fontSizeDips(dpi, 2)), .{ .startPosition = 0, .length = hint.len });
                 _ = layout.IDWriteTextFormat.SetTextAlignment(win32.DWRITE_TEXT_ALIGNMENT_LEADING);
                 _ = layout.IDWriteTextFormat.SetParagraphAlignment(win32.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                brush.SetColor(&colorF(if (t.active) fg else types.tab_bar_fg));
+                brush.SetColor(&colorF(fg));
                 rt.DrawTextLayout(.{ .x = x0 + cw, .y = 0 }, layout, &brush.ID2D1Brush, win32.D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         }
         if (hovered) {
-            const close_fg: u24 = if (t.close_hovered) types.close_hover_fg else fg;
+            const close_fg: u24 = if (t.close_hovered) draw.foreground else fg;
             drawButton(rt, brush, false, (@as(f32, @floatFromInt(t.close_col)) + 0.5) * cw, bh, close_fg);
         }
     }
 
     if (draw.new_tab_col) |c| {
-        const fg: u24 = if (draw.new_tab_hovered) types.new_tab_hover_fg else types.new_tab_button_fg;
+        const fg: u24 = if (draw.new_tab_hovered) draw.foreground else inactive_fg;
         const x = (@as(f32, @floatFromInt(c)) + 0.5) * cw;
         const radius = @min((bh - inset * 2) / 2, cw * 1.5);
         const circle = win32.D2D1_ELLIPSE{ .point = .{ .x = x, .y = bh / 2 }, .radiusX = radius, .radiusY = radius };
-        brush.SetColor(&colorF(if (draw.new_tab_hovered) types.tab_hover_bg else types.tab_bar_bg));
-        rt.FillEllipse(&circle, &brush.ID2D1Brush);
-        brush.SetColor(&colorF(types.tab_hover_bg));
+        brush.SetColor(&colorF(hover_bg));
+        if (draw.new_tab_hovered) rt.FillEllipse(&circle, &brush.ID2D1Brush);
         rt.DrawEllipse(&circle, &brush.ID2D1Brush, @max(1, bh / 36), null);
         drawButton(rt, brush, true, x, bh, fg);
     }

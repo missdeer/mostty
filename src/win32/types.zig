@@ -106,17 +106,6 @@ test "normally redirected windows retain app-window identity" {
     try std.testing.expectEqual(@as(u1, 1), direct_composition.NOREDIRECTIONBITMAP);
 }
 
-pub const tab_bar_bg: u24 = 0x272a32;
-pub const tab_bar_fg: u24 = 0xa4a5aa;
-pub const tab_inactive_bg: u24 = 0x30333b;
-pub const tab_active_bg: u24 = 0x4b4e55;
-pub const tab_active_border: u24 = 0x666970;
-pub const tab_active_fg: u24 = 0xf2f2f3;
-pub const tab_hover_bg: u24 = 0x3a3d45;
-pub const new_tab_button_fg: u24 = 0xbfc1c6;
-pub const close_hover_fg: u24 = 0xffffff;
-pub const new_tab_hover_fg: u24 = 0xffffff;
-
 // One tab's drawing description for the proportional tab-bar painter. Column
 // fields are grid columns (tab widths/buttons stay column-based); the painter
 // multiplies by the cell width to get pixels. `title` borrows the tab's title
@@ -136,6 +125,9 @@ pub const TabBarDraw = struct {
     tabs: []const TabDrawInfo,
     new_tab_col: ?u32,
     new_tab_hovered: bool,
+    background: u24 = 0,
+    foreground: u24 = 0xffffff,
+    opacity: f32 = 1,
 };
 
 // Hovered URL highlight range. Inclusive viewport coordinates spanning one or

@@ -20,6 +20,7 @@ const types = @import("types.zig");
 const bg_image = @import("d3d11/background_image.zig");
 const cell_buffer = @import("d3d11/cell_buffer.zig");
 const glyph_mod = @import("d3d11/glyph.zig");
+const color = @import("d3d11/color.zig");
 const gpu = @import("d3d11/gpu.zig");
 const grid = @import("d3d11/grid.zig");
 const kitty_image_mod = @import("d3d11/kitty_images.zig");
@@ -1255,12 +1256,8 @@ pub fn renderChrome(self: *Gl46Renderer, hwnd: win32.HWND, term: *vt.Terminal, t
     const prepared = self.prepareFrame(hwnd, term, false) orelse return;
     const path = self.beginPresentation(hwnd, prepared.client_w, prepared.client_h) orelse return;
     gl.Disable(gl.SCISSOR_TEST);
-    gl.ClearColor(
-        std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
-        std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
-        std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
-        opacity,
-    );
+    const chrome = color.linearBackground(background, opacity);
+    gl.ClearColor(chrome[0], chrome[1], chrome[2], chrome[3]);
     gl.Clear(gl.COLOR_BUFFER_BIT);
     gl.Enable(gl.SCISSOR_TEST);
     gl.ClearColor(0, 0, 0, 0);
@@ -1471,6 +1468,7 @@ fn drawTabBar(self: *Gl46Renderer, prepared: PreparedFrame, tabbar: types.TabBar
         self.ensureTabbarTexture(prepared.client_w, prepared.tab_bar_h);
         const sig = tabbar_paint.signature(tabbar, self.cache_gen, prepared.cs.x, prepared.client_w, prepared.tab_bar_h);
         if (self.tabbar_sig_rt != band.render_target or self.tabbar_sig != sig) {
+            band.clear(color.encodedBackground(tabbar.background, tabbar.opacity));
             tabbar_paint.paint(
                 band.render_target,
                 band.brush,
@@ -1502,8 +1500,14 @@ fn drawTabBar(self: *Gl46Renderer, prepared: PreparedFrame, tabbar: types.TabBar
             .source = .{ 0, 0, @floatFromInt(prepared.client_w), @floatFromInt(prepared.tab_bar_h) },
             .image_size = .{ @floatFromInt(prepared.client_w), @floatFromInt(prepared.tab_bar_h) },
             .tab_bar_height = 0,
+            .encoded_premultiplied = 1,
         };
+        // The band already carries the background's alpha, so it replaces the
+        // chrome underneath instead of compositing over it — same result as the
+        // D3D copy. Hand the pass's blend policy back afterwards.
+        gl.Disable(gl.BLEND);
         self.drawImageConfig(config_index, &config, self.tabbar_texture);
+        RenderPass.overlay.begin();
     }
 }
 

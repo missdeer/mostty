@@ -1,6 +1,7 @@
 const win32 = @import("win32").everything;
 const std = @import("std");
 
+const color = @import("d3d11/color.zig");
 const global_mod = @import("global.zig");
 const Renderer = @import("renderer.zig");
 const mouse = @import("wnd/mouse.zig");
@@ -25,8 +26,17 @@ pub fn renderWindow(window: *Window) void {
     const cs = global.renderer.common.cell_size;
     const total_cols: usize = @intCast(@divTrunc(@max(0, win32.getClientSize(window.hwnd).cx), cs.cx));
     var tab_buf: [types.MAX_TABS]types.TabDrawInfo = undefined;
-    const tabbar = tab_bar.buildTabBarDraw(window, total_cols, &tab_buf);
+    var tabbar = tab_bar.buildTabBarDraw(window, total_cols, &tab_buf);
     const theme = &global.config.theme;
+    // The band butts straight against the active pane's grid with no divider,
+    // and the chrome fills whatever that grid doesn't cover, so both have to
+    // track the terminal's live default colors — not the configured theme,
+    // which OSC 10/11 and DECSCNM leave behind the moment a program retargets
+    // them.
+    const surface = color.effectiveColors(window.active().term);
+    tabbar.background = surface.bg;
+    tabbar.foreground = surface.fg;
+    tabbar.opacity = global.config.background_opacity;
     // Only forward the URL highlight if it belongs to the active tab — a tab
     // switch keeps Window.hovered_url around until the next mouse move clears
     // or refreshes it, and we don't want one tab's hover to underline cells
@@ -54,7 +64,7 @@ pub fn renderWindow(window: *Window) void {
             pane_rects[pane_rect_count] = .{ .left = @intFromFloat(@round(r.x)), .top = @intFromFloat(@round(r.y)), .right = @intFromFloat(@round(r.x + r.width)), .bottom = @intFromFloat(@round(r.y + r.height)) };
             pane_rect_count += 1;
         }
-        global.renderer.renderChrome(window.hwnd, window.active().term, tabbar, theme.background, global.config.background_opacity, window.remote_session, pane_rects[0..pane_rect_count]);
+        global.renderer.renderChrome(window.hwnd, window.active().term, tabbar, surface.bg, global.config.background_opacity, window.remote_session, pane_rects[0..pane_rect_count]);
         if (global.renderer.paneRuntimeFailure()) |failure| {
             handlePaneFailure(window, failure);
             return;

@@ -477,8 +477,12 @@ pub const StagingTexture = struct {
 
 // Offscreen target for the tab-bar band. The band is drawn with DirectWrite/D2D
 // at proportional positions (independent of the terminal cell grid) and copied
-// onto the back buffer's top strip via CopySubresourceRegion. Opaque (IGNORE)
-// alpha so ClearType behaves and the strip composites solidly under DComp.
+// onto the back buffer's top strip via CopySubresourceRegion. Premultiplied
+// alpha so the strip shares the terminal's translucent background under DComp;
+// that costs ClearType on the band's text, which is the intended trade (see
+// tabbar_paint.zig). The caller clears this surface through the D3D view rather
+// than D2D, because D2D's Clear premultiplies a straight color and so cannot
+// express the bright translucent pixels the grid stores.
 // Pinned to 96 DPI + PIXELS unit mode like StagingTexture, so the tab-bar text
 // format's already-DPI-scaled font size maps 1:1 to physical pixels.
 pub const BandTexture = struct {
@@ -486,6 +490,7 @@ pub const BandTexture = struct {
         width: u32,
         height: u32,
         texture: *win32.ID3D11Texture2D,
+        view: *win32.ID3D11RenderTargetView,
         mutex: *win32.IDXGIKeyedMutex,
         render_target: *win32.ID2D1RenderTarget,
         brush: *win32.ID2D1SolidColorBrush,
@@ -522,6 +527,10 @@ pub const BandTexture = struct {
             if (hr < 0) com.fatalHr("CreateBandTexture", hr);
         }
 
+        var view: *win32.ID3D11RenderTargetView = undefined;
+        const view_hr = device.CreateRenderTargetView(&texture.ID3D11Resource, null, &view);
+        if (view_hr < 0) com.fatalHr("CreateBandRenderTargetView", view_hr);
+
         const dxgi_surface = com.queryInterface(texture, win32.IDXGISurface);
         defer _ = dxgi_surface.IUnknown.Release();
         const mutex = com.queryInterface(texture, win32.IDXGIKeyedMutex);
@@ -530,7 +539,7 @@ pub const BandTexture = struct {
         {
             const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
                 .type = .DEFAULT,
-                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
+                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .PREMULTIPLIED },
                 .dpiX = 96.0,
                 .dpiY = 96.0,
                 .usage = .{},
@@ -558,6 +567,7 @@ pub const BandTexture = struct {
             .width = width,
             .height = height,
             .texture = texture,
+            .view = view,
             .mutex = mutex,
             .render_target = render_target,
             .brush = brush,
@@ -573,6 +583,7 @@ pub const BandTexture = struct {
         if (cached.*) |*c| {
             _ = c.brush.IUnknown.Release();
             _ = c.render_target.IUnknown.Release();
+            _ = c.view.IUnknown.Release();
             _ = c.mutex.IUnknown.Release();
             _ = c.texture.IUnknown.Release();
             cached.* = null;
@@ -601,7 +612,7 @@ pub const KittyImage = struct {
 
 // CPU-addressable twin of `BandTexture`, for a backend that cannot open the
 // font service's shared surfaces. Same D2D target properties (B8G8R8A8_UNORM,
-// IGNORE alpha, 96 DPI, pixel unit mode) so the tab-bar band rasterizes
+// premultiplied alpha, 96 DPI, pixel unit mode) so the tab-bar band rasterizes
 // identically; only the destination differs — a WIC bitmap instead of a
 // DXGI surface — and the caller copies the bytes out itself.
 //
@@ -622,6 +633,32 @@ pub const CpuBandTexture = struct {
             return self.width * 4;
         }
 
+        pub fn clear(self: *Cached, rgba: [4]f32) void {
+            var lock_ptr: ?*win32.IWICBitmapLock = null;
+            const rect = win32.WICRect{ .X = 0, .Y = 0, .Width = @intCast(self.width), .Height = @intCast(self.height) };
+            const hr = self.bitmap.Lock(&rect, @intFromEnum(win32.WICBitmapLockWrite), &lock_ptr);
+            if (hr < 0) com.fatalHr("Lock(cpu band)", hr);
+            const lock = lock_ptr.?;
+            defer _ = lock.IUnknown.Release();
+            var pitch: u32 = undefined;
+            var size: u32 = undefined;
+            var bytes: [*]u8 = undefined;
+            const stride_hr = lock.GetStride(&pitch);
+            if (stride_hr < 0) com.fatalHr("GetStride(cpu band)", stride_hr);
+            const data_hr = lock.GetDataPointer(&size, @ptrCast(&bytes));
+            if (data_hr < 0) com.fatalHr("GetDataPointer(cpu band)", data_hr);
+            const pixel = [4]u8{
+                @intFromFloat(@round(rgba[2] * 255)),
+                @intFromFloat(@round(rgba[1] * 255)),
+                @intFromFloat(@round(rgba[0] * 255)),
+                @intFromFloat(@round(rgba[3] * 255)),
+            };
+            const first_row = bytes[0 .. self.width * 4];
+            var x: usize = 0;
+            while (x < first_row.len) : (x += 4) @memcpy(first_row[x..][0..4], &pixel);
+            for (1..self.height) |y| @memcpy(bytes[y * pitch ..][0..first_row.len], first_row);
+        }
+
         /// Pull the freshly drawn band out of the WIC bitmap. Call after the
         /// D2D EndDraw that produced it.
         pub fn readPixels(self: *Cached) []const u8 {
@@ -634,13 +671,6 @@ pub const CpuBandTexture = struct {
             );
             if (hr < 0) com.fatalHr("CopyPixels(cpu band)", hr);
 
-            // The pixel format's fourth byte is padding, not alpha, and its
-            // contents are undefined. These bytes go on to be presented
-            // through a premultiplied-alpha surface, where undefined padding
-            // reads as transparency — so state the band's opacity explicitly
-            // rather than inheriting whatever the imaging layer left behind.
-            var i: usize = 3;
-            while (i < self.pixels.len) : (i += 4) self.pixels[i] = 0xFF;
             return self.pixels;
         }
     };
@@ -660,9 +690,7 @@ pub const CpuBandTexture = struct {
 
         var bitmap: *win32.IWICBitmap = undefined;
         {
-            // 32bppBGR + IGNORE is the pairing D2D accepts for an opaque
-            // ClearType target; 32bppBGRA + IGNORE is rejected outright.
-            var fmt: win32.Guid = win32.GUID_WICPixelFormat32bppBGR;
+            var fmt: win32.Guid = win32.GUID_WICPixelFormat32bppPBGRA;
             const hr = wic_factory.CreateBitmap(
                 width,
                 height,
@@ -677,7 +705,7 @@ pub const CpuBandTexture = struct {
         {
             const props = win32.D2D1_RENDER_TARGET_PROPERTIES{
                 .type = .DEFAULT,
-                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .IGNORE },
+                .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .PREMULTIPLIED },
                 .dpiX = 96.0,
                 .dpiY = 96.0,
                 .usage = .{},

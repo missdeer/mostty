@@ -29,6 +29,7 @@ const bg_image = @import("../d3d11/background_image.zig");
 const cell_buffer = @import("../d3d11/cell_buffer.zig");
 const com = @import("../d3d11/com.zig");
 const glyph_mod = @import("../d3d11/glyph.zig");
+const color = @import("../d3d11/color.zig");
 const gpu = @import("../d3d11/gpu.zig");
 const grid = @import("../d3d11/grid.zig");
 const kitty_image_mod = @import("../d3d11/kitty_images.zig");
@@ -935,12 +936,7 @@ pub fn syncSurface(self: *D3d12Renderer, parent: *D3d12Renderer) void {
 pub fn renderChrome(self: *D3d12Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
     const prepared = self.prepareFrame(hwnd, term, false) orelse return;
     self.grid_target.moveTo(self.command_list, win32.D3D12_RESOURCE_STATE_RENDER_TARGET);
-    const rgba = [4]f32{
-        std.math.pow(f32, @as(f32, @floatFromInt((background >> 16) & 0xff)) / 255, 2.2) * opacity,
-        std.math.pow(f32, @as(f32, @floatFromInt((background >> 8) & 0xff)) / 255, 2.2) * opacity,
-        std.math.pow(f32, @as(f32, @floatFromInt(background & 0xff)) / 255, 2.2) * opacity,
-        opacity,
-    };
+    const rgba = color.linearBackground(background, opacity);
     self.command_list.ClearRenderTargetView(self.render_targets.cpu(), &rgba[0], 0, &.{});
     const transparent = [4]f32{ 0, 0, 0, 0 };
     if (pane_rects.len > 0) self.command_list.ClearRenderTargetView(self.render_targets.cpu(), &transparent[0], @intCast(pane_rects.len), pane_rects.ptr);
@@ -1410,6 +1406,7 @@ fn copyTabBarBand(self: *D3d12Renderer, prepared: PreparedFrame, tabbar: types.T
     const band = self.font_service.cpuBand(prepared.client_w, prepared.tab_bar_h);
     const sig = tabbar_paint.signature(tabbar, self.cache_gen, prepared.cs.x, prepared.client_w, prepared.tab_bar_h);
     if (self.tabbar_sig_rt != band.render_target or self.tabbar_sig != sig) {
+        band.clear(color.encodedBackground(tabbar.background, tabbar.opacity));
         tabbar_paint.paint(
             band.render_target,
             band.brush,

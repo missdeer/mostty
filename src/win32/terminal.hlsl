@@ -49,7 +49,7 @@ VK_BINDING(0) cbuffer ImageConfig : register(b0)
     float4 image_source;
     float2 image_size;
     float image_tab_bar_height;
-    float image_pad;
+    float image_encoded_premultiplied;
 }
 
 float4 VertexMain(uint id : SV_VERTEXID) : SV_POSITION
@@ -251,6 +251,13 @@ float4 ImagePixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
     uv = uv / image_size;
     float4 img = inline_image.SampleLevel(bg_sampler, uv, 0);
     float alpha = saturate(img.a);
+    // Tab bands already contain encoded, premultiplied back-buffer bytes.
+    // Undo only the sRGB encoding for the sRGB target; do not apply alpha again.
+    if (image_encoded_premultiplied != 0) {
+        float3 low = img.rgb / 12.92;
+        float3 high = pow(max((img.rgb + 0.055) / 1.055, 0.0), 2.4);
+        return float4(lerp(high, low, step(img.rgb, 0.04045)), alpha);
+    }
     return float4(to_linear(img.rgb) * alpha, alpha);
 }
 

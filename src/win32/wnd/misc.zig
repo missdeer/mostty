@@ -119,6 +119,7 @@ fn reloadConfig(hwnd: win32.HWND) void {
     // Must be computed before the move below, otherwise global.config == new_cfg.
     const theme_changed = !std.meta.eql(global.config.theme, new_cfg.theme);
     const blur_changed = global.config.background_blur != new_cfg.background_blur;
+    const opacity_changed = global.config.background_opacity != new_cfg.background_opacity;
     const ligatures_changed = global.config.font_ligatures != new_cfg.font_ligatures;
     const image_changed = !std.mem.eql(u8, global.config.background_image, new_cfg.background_image) or
         global.config.background_image_opacity != new_cfg.background_image_opacity or
@@ -205,11 +206,11 @@ fn reloadConfig(hwnd: win32.HWND) void {
         }
     }
 
-    if (blur_changed) {
-        if (global.window) |*window| {
-            util.applyBlurBehind(hwnd, global.config.background_blur, window.dwm_redirected);
-            window.requestRender();
-        }
+    if (global.window) |*window| {
+        if (blur_changed) util.applyBlurBehind(hwnd, global.config.background_blur, window.dwm_redirected);
+        // Opacity feeds both the grid's per-cell alpha and the band's clear, and
+        // neither is republished until something asks for a frame.
+        if (blur_changed or opacity_changed) window.requestRender();
     }
 
     if (ligatures_changed) {

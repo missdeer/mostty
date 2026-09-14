@@ -103,16 +103,9 @@ pub fn buildAndUpload(
     const glyph_cache = atlas.cache;
     const blank_glyph = glyph_mod.generateGlyph(self, glyph_cache, tex_cell_count, ' ', &.{}, .single, .regular);
 
-    // Effective default fg/bg come from the terminal's dynamic colors
-    // (seeded from the theme at tab creation, overridable live by OSC
-    // 10/11), falling back to the module constants only if somehow unset.
-    var eff_fg: u24 = if (term.colors.foreground.get()) |c| color.rgbToU24(c) else gpu.fallback_fg;
-    var eff_bg: u24 = if (term.colors.background.get()) |c| color.rgbToU24(c) else gpu.fallback_bg;
-    if (term.modes.get(.reverse_colors)) {
-        const tmp = eff_fg;
-        eff_fg = eff_bg;
-        eff_bg = tmp;
-    }
+    const effective = color.effectiveColors(term);
+    const eff_fg = effective.fg;
+    const eff_bg = effective.bg;
     const opacity_byte: u8 = @intFromFloat(@round(std.math.clamp(background_opacity, 0.0, 1.0) * 255.0));
     const bg_rgba: Rgba8 = .{
         .r = @intCast((eff_bg >> 16) & 0xFF),
