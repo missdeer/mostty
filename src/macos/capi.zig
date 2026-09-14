@@ -246,6 +246,16 @@ export fn mostty_config_background_opacity() f32 {
     return std.math.clamp(config().background_opacity, 0, 1);
 }
 
+/// Resolved theme colors as 0xRRGGBB, so the host can paint window chrome with
+/// the same two colors the renderer gives an unstyled cell.
+export fn mostty_config_background_color() u32 {
+    return config().theme.background;
+}
+
+export fn mostty_config_foreground_color() u32 {
+    return config().theme.foreground;
+}
+
 /// Returns a retained CTFont/NSFont. The host owns and releases it.
 export fn mostty_config_copy_tabbar_font() ?*anyopaque {
     return @ptrCast(CoreTextRenderer.createTabbarFont(config()) catch |err| {
@@ -1156,6 +1166,20 @@ test "config colors decide the rendered defaults and palette entries" {
         GridModel.Rgba.fromRgb(0xff, 0x88, 0x00),
         frameCell(frame, 1, 0).style.foreground,
     );
+
+    // The window chrome paints itself from these exports, so they must agree
+    // with what an unstyled cell actually renders — otherwise the tab bar and
+    // the terminal show a seam. Compared against the rendered cell rather than
+    // the config literal so the two cannot drift apart.
+    const previous = loaded_config;
+    loaded_config = cfg;
+    defer loaded_config = previous;
+    try std.testing.expectEqual(rgbOf(plain.style.background), mostty_config_background_color());
+    try std.testing.expectEqual(rgbOf(plain.style.foreground), mostty_config_foreground_color());
+}
+
+fn rgbOf(c: GridModel.Rgba) u32 {
+    return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
 }
 
 fn frameCell(frame: GridModel.Frame, col: u16, row: u16) GridModel.Cell {

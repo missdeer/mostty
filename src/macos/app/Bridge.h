@@ -41,6 +41,9 @@ void mostty_tab_destroy(MosttyTab *tab);
 bool mostty_config_reload(void);
 size_t mostty_config_path(uint8_t *buf, size_t cap);
 float mostty_config_background_opacity(void);
+/* Resolved theme colors as 0xRRGGBB, for painting window chrome to match cells. */
+uint32_t mostty_config_background_color(void);
+uint32_t mostty_config_foreground_color(void);
 // Retained CTFont/NSFont; caller releases it.
 void *mostty_config_copy_tabbar_font(void);
 bool mostty_config_background_blur(void);

@@ -204,10 +204,38 @@ private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
     let first = model.selectedTab!
     expect(window.isVisible && window.firstResponder === first.view && first.view.hasActiveSession,
            "AppKit launch displays a running terminal with keyboard focus")
-    expect(window.appearance?.name == .darkAqua && window.tabbingMode == .disallowed &&
+    expect(window.tabbingMode == .disallowed &&
            window.contentMinSize.width >= 480 && window.contentMinSize.height >= 300,
-           "native window preserves dark chrome, custom tabs, and terminal minimum dimensions")
+           "native window preserves custom tabs and terminal minimum dimensions")
+    expect((window.appearance?.name == .aqua) == TabPalette.backgroundIsLight,
+           "window controls and title follow the theme background's lightness, not a fixed dark chrome")
     expect(window.collectionBehavior.contains(.fullScreenPrimary), "main window explicitly supports native fullscreen")
+
+    // The title bar, the tab strip and an unstyled cell must read as one
+    // surface. Asserted against the config exports the renderer also uses, so a
+    // theme change cannot leave the chrome behind on a stale colour.
+    func sameColor(_ a: CGColor?, _ b: NSColor) -> Bool {
+        guard let a = a, let want = b.usingColorSpace(.sRGB),
+              let got = NSColor(cgColor: a)?.usingColorSpace(.sRGB) else { return false }
+        return abs(got.redComponent - want.redComponent) < 0.004
+            && abs(got.greenComponent - want.greenComponent) < 0.004
+            && abs(got.blueComponent - want.blueComponent) < 0.004
+            && abs(got.alphaComponent - want.alphaComponent) < 0.004
+    }
+    expect(sameColor(content.chromeFill.layer?.backgroundColor, TabPalette.current.bar) &&
+           sameColor(content.titlebarTint.layer?.backgroundColor, TabPalette.current.bar) &&
+           TabPalette.current.bar.alphaComponent == CGFloat(mostty_config_background_opacity()),
+           "title bar and tab strip paint the theme background at the configured opacity")
+    expect(window.titlebarAppearsTransparent && window.titlebarSeparatorStyle == .none,
+           "the window contributes no title-bar background or separator to break the surface")
+    // Regression: painting the chrome *over* the title bar buries the traffic
+    // lights, which the content view composites above.
+    let closeButton = window.standardWindowButton(.closeButton)
+    expect(closeButton?.isHidden == false &&
+           content.titlebarTint.superview === closeButton?.superview?.superview,
+           "the title-bar tint is parented beneath the window controls rather than over them")
+    expect(first.panes.count == 1 && first.activePane?.view.frame == first.host.bounds,
+           "a lone pane fills its container, leaving no gap to show through as a seam")
     expect(shortcut("t") && model.tabs.count == 2, "native Command-T menu shortcut creates a tab")
     settle()
     let second = model.selectedTab!

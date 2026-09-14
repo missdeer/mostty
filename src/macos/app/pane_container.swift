@@ -52,9 +52,14 @@ final class PaneContainer: NSView {
         guard !arranging, let tab = tab else { return }
         arranging = true
         defer { arranging = false }
+        // Room for the divider borders `draw` strokes between panes. A lone pane
+        // has no borders, and the gap would expose untinted backdrop as a seam
+        // between the tab strip and the terminal.
+        let gap: CGFloat = tab.panes.count > 1 ? 2 : 0
         let minimum = tab.panes.reduce(NSSize(width: 1, height: 1)) { result, pane in
             let size = pane.view.minimumPaneSize
-            return NSSize(width: max(result.width, size.width + 4), height: max(result.height, size.height + 4))
+            return NSSize(width: max(result.width, size.width + gap * 2),
+                          height: max(result.height, size.height + gap * 2))
         }
         guard mostty_layout_bounds(tab.layout,
             MosttyLayoutRect(x: 0, y: 0, width: bounds.width, height: bounds.height),
@@ -71,8 +76,8 @@ final class PaneContainer: NSView {
                 let y = (r.y * backingScale).rounded() / backingScale
                 let right = ((r.x + r.width) * backingScale).rounded() / backingScale
                 let bottom = ((r.y + r.height) * backingScale).rounded() / backingScale
-                pane.view.frame = NSRect(x: x + 2, y: y + 2,
-                                         width: max(0, right - x - 4), height: max(0, bottom - y - 4))
+                pane.view.frame = NSRect(x: x + gap, y: y + gap,
+                                         width: max(0, right - x - gap * 2), height: max(0, bottom - y - gap * 2))
                 if pane.view.superview !== self { addSubview(pane.view) }
             } else {
                 // Detaching suppresses rendering, not PTY output processing.

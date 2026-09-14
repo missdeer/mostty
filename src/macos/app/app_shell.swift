@@ -127,6 +127,8 @@ final class AppModel {
 
     /// The live terminal container, so a config reload can refresh the backdrop.
     weak var container: ContainerView?
+    /// The merged chrome surface, which owns the backdrop and the window's look.
+    weak var chrome: ContentView?
     weak var tabBar: TabBar?
     private var configWatcher: ConfigWatcher?
 
@@ -151,8 +153,13 @@ final class AppModel {
             for pane in tab.panes { pane.view.applyConfig() }
             tab.host.arrange()
         }
-        container?.applyBackdrop()
-        container?.applyWindowAppearance()
+        // The chrome is mixed from the theme, so a theme switch has to rebuild
+        // the palette before anything repaints with it.
+        TabPalette.reload()
+        chrome?.applyBackdrop()
+        chrome?.applyChromeColor()
+        chrome?.applyWindowAppearance()
+        tabBar?.refresh()
     }
 
     /// Applies one-shot `maximize` / `fullscreen` after showing the main window.
@@ -441,50 +448,10 @@ final class TerminalWindowDelegate: NSObject, NSWindowDelegate {
 final class ContainerView: NSView {
     weak var model: AppModel?
     private weak var current: NSView?
-    private var backdrop: NSVisualEffectView?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        applyBackdrop()
-    }
-
-    required init?(coder: NSCoder) { fatalError("unsupported") }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        applyWindowAppearance()
         if let window = window { model?.installWindowDelegate(window) }
-    }
-
-    /// `background-opacity < 1` only shows through if the window itself stops
-    /// painting an opaque background behind the Metal layer.
-    func applyWindowAppearance() {
-        guard let window = window else { return }
-        let translucent = mostty_config_background_opacity() < 1
-        window.isOpaque = !translucent
-        window.backgroundColor = translucent ? .clear : .windowBackgroundColor
-    }
-
-    /// `background-blur` puts a vibrancy backdrop behind the terminal so
-    /// translucent cells composite against the desktop instead of black. It is
-    /// meaningless at full opacity, where nothing shows through.
-    func applyBackdrop() {
-        let wanted = mostty_config_background_blur() && mostty_config_background_opacity() < 1
-        if wanted, backdrop == nil {
-            let view = NSVisualEffectView(frame: bounds)
-            view.autoresizingMask = [.width, .height]
-            view.blendingMode = .behindWindow
-            // `.hudWindow` is the one material that stays genuinely see-through
-            // in dark mode; the window-background materials render as a nearly
-            // opaque panel and would hide the desktop instead of blurring it.
-            view.material = .hudWindow
-            view.state = .active
-            addSubview(view, positioned: .below, relativeTo: nil)
-            backdrop = view
-        } else if !wanted, let view = backdrop {
-            view.removeFromSuperview()
-            backdrop = nil
-        }
     }
 
     func show(_ view: NSView?) {
@@ -504,7 +471,6 @@ final class ContainerView: NSView {
 
     override func layout() {
         super.layout()
-        backdrop?.frame = bounds
         current?.frame = bounds
         if let model = model {
             for tab in model.tabs {
@@ -541,13 +507,50 @@ enum SSHLaunchers {
     }
 }
 
-private enum TabPalette {
-    static let bar = NSColor(srgbRed: 0x27 / 255.0, green: 0x2a / 255.0, blue: 0x32 / 255.0, alpha: 1)
-    static let inactive = NSColor(srgbRed: 0x30 / 255.0, green: 0x33 / 255.0, blue: 0x3b / 255.0, alpha: 1)
-    static let selected = NSColor(srgbRed: 0x4b / 255.0, green: 0x4e / 255.0, blue: 0x55 / 255.0, alpha: 1)
-    static let border = NSColor(srgbRed: 0x66 / 255.0, green: 0x69 / 255.0, blue: 0x70 / 255.0, alpha: 1)
-    static let hover = NSColor(srgbRed: 0x3a / 255.0, green: 0x3d / 255.0, blue: 0x45 / 255.0, alpha: 1)
-    static let text = NSColor(srgbRed: 0xa4 / 255.0, green: 0xa5 / 255.0, blue: 0xaa / 255.0, alpha: 1)
+/// Window-chrome colors, mixed from the terminal's own theme so the title-bar
+/// strip, the tab strip and the cells read as one surface. Fixed colors cannot
+/// work here: the moment the chrome adopts the theme background, a light theme
+/// would render a fixed light-gray label illegible.
+///
+/// `bar` carries the background opacity because it stands in for an unstyled
+/// cell. Everything drawn on top of it is opaque, matching the renderer's rule
+/// that only default backgrounds are translucent.
+struct TabPalette {
+    static private(set) var current = TabPalette()
+
+    let bar: NSColor
+    let raised: NSColor
+    let hover: NSColor
+    let activeText: NSColor
+    let text: NSColor
+
+    init() {
+        let bg = TabPalette.rgb(mostty_config_background_color())
+        let fg = TabPalette.rgb(mostty_config_foreground_color())
+        func mix(_ t: CGFloat, _ alpha: CGFloat) -> NSColor {
+            NSColor(srgbRed: bg.0 + (fg.0 - bg.0) * t,
+                    green: bg.1 + (fg.1 - bg.1) * t,
+                    blue: bg.2 + (fg.2 - bg.2) * t, alpha: alpha)
+        }
+        bar = mix(0, CGFloat(mostty_config_background_opacity()))
+        raised = mix(0.12, 1)
+        hover = mix(0.07, 1)
+        activeText = mix(1, 1)
+        text = mix(0.55, 1)
+    }
+
+    static func reload() { current = TabPalette() }
+
+    /// Perceived lightness of the theme background, for deciding whether the
+    /// window's own controls and title need light or dark treatment.
+    static var backgroundIsLight: Bool {
+        let c = rgb(mostty_config_background_color())
+        return 0.2126 * c.0 + 0.7152 * c.1 + 0.0722 * c.2 > 0.5
+    }
+
+    private static func rgb(_ value: UInt32) -> (CGFloat, CGFloat, CGFloat) {
+        (CGFloat((value >> 16) & 0xff) / 255, CGFloat((value >> 8) & 0xff) / 255, CGFloat(value & 0xff) / 255)
+    }
 }
 
 /// AppKit retains button actions and accessibility; all chrome is drawn here.
@@ -585,13 +588,14 @@ class TabSymbolButton: NSButton {
 
     override func draw(_ dirtyRect: NSRect) {
         guard showsSymbol else { return }
+        let palette = TabPalette.current
         let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
-        if !isClose || hovered || isHighlighted {
-            (hovered || isHighlighted ? TabPalette.hover : TabPalette.bar).setFill()
+        if hovered || isHighlighted {
+            palette.hover.setFill()
             circle.fill()
         }
         if !isClose {
-            TabPalette.hover.setStroke()
+            palette.hover.setStroke()
             circle.lineWidth = 1
             circle.stroke()
         }
@@ -609,7 +613,7 @@ class TabSymbolButton: NSButton {
             glyph.move(to: NSPoint(x: x, y: y - radius))
             glyph.line(to: NSPoint(x: x, y: y + radius))
         }
-        (hovered || isHighlighted ? NSColor.white : TabPalette.text).setStroke()
+        (hovered || isHighlighted ? palette.activeText : palette.text).setStroke()
         glyph.lineWidth = 1.4
         glyph.lineCapStyle = .round
         glyph.stroke()
@@ -702,7 +706,11 @@ final class TabBar: NSView {
             button.setAccessibilityValue(button.selected ? 1 : 0)
             button.closeButton.setAccessibilityLabel("Close \(tab.title)")
             button.needsDisplay = true
+            // Separate views that read the palette; a theme switch would leave
+            // them holding the previous theme's colors.
+            button.closeButton.needsDisplay = true
         }
+        launcher.needsDisplay = true
         needsLayout = true
         needsDisplay = true
         superview?.needsLayout = true
@@ -720,13 +728,6 @@ final class TabBar: NSView {
                                          width: width, height: track.height)
         }
         launcher.frame = NSRect(x: bounds.width - 38, y: track.midY - 14, width: 28, height: 28)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        TabPalette.bar.setFill()
-        bounds.fill()
-        TabPalette.inactive.setFill()
-        NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
     }
 }
 
@@ -811,16 +812,12 @@ final class TabChipButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let palette = TabPalette.current
         if selected || hovered || isHighlighted {
             let pill = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                     xRadius: bounds.height / 2, yRadius: bounds.height / 2)
-            (selected ? TabPalette.selected : TabPalette.hover).setFill()
+            (selected ? palette.raised : palette.hover).setFill()
             pill.fill()
-            if selected {
-                TabPalette.border.setStroke()
-                pill.lineWidth = 1
-                pill.stroke()
-            }
         }
         let shortcut = number <= 9 && bounds.width >= 120 ? "⌘\(number)" : ""
         let side: CGFloat = shortcut.isEmpty ? 28 : 42
@@ -831,7 +828,7 @@ final class TabChipButton: NSButton {
         let textHeight = ceil(font.ascender - font.descender + font.leading)
         let rect = NSRect(x: side, y: (bounds.height - textHeight) / 2,
                           width: max(0, bounds.width - side * 2), height: textHeight)
-        let foreground = selected ? NSColor(white: 0.95, alpha: 1) : TabPalette.text
+        let foreground = selected ? palette.activeText : palette.text
         if rect.width > 0 {
             (title as NSString).draw(in: rect, withAttributes: [
                 .font: font, .foregroundColor: foreground, .paragraphStyle: paragraph])
@@ -852,25 +849,120 @@ final class ContentView: NSView {
     private let tabBar: TabBar
     let terminal = ContainerView(frame: .zero)
 
+    /// Paints the chrome background behind the tab strip. It is a sibling above
+    /// `backdrop` rather than a fill in `draw`, because subviews draw after their
+    /// parent and a parent fill would land under the blur.
+    let chromeFill = NSView(frame: .zero)
+    private var backdrop: NSVisualEffectView?
+    /// Chrome colour and blur for the title bar, parented under the traffic
+    /// lights rather than over them.
+    let titlebarTint = NSView(frame: .zero)
+    private var titlebarBackdrop: NSVisualEffectView?
+
     init(model: AppModel, frame: NSRect) {
         self.model = model
         tabBar = TabBar(model: model)
         super.init(frame: frame)
         terminal.model = model
         model.container = terminal
-        addSubview(tabBar)
+        model.chrome = self
+        chromeFill.wantsLayer = true
+        addSubview(chromeFill)
         addSubview(terminal)
+        addSubview(tabBar)
+        applyBackdrop()
+        applyChromeColor()
         layout()
         terminal.show(model.selectedTab?.host)
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyWindowAppearance()
+        // The title-bar half of the chrome can only be reached through the
+        // window, so it has to wait for one.
+        applyChromeColor()
+    }
+
+    /// The view AppKit parents the traffic lights and the title to. Tinting from
+    /// inside it keeps the chrome colour underneath the controls. Extending the
+    /// content view over the title bar instead buries them: once the window is
+    /// layer-backed for the terminal's Metal layer, content composites above the
+    /// controls rather than below.
+    private var titlebarContainer: NSView? {
+        window?.standardWindowButton(.closeButton)?.superview?.superview
+    }
+
+    /// `background-opacity < 1` only shows through if the window itself stops
+    /// painting an opaque background behind the Metal layer.
+    func applyWindowAppearance() {
+        guard let window = window else { return }
+        let translucent = mostty_config_background_opacity() < 1
+        window.isOpaque = !translucent
+        window.backgroundColor = translucent ? .clear : TabPalette.current.bar
+        window.appearance = NSAppearance(named: TabPalette.backgroundIsLight ? .aqua : .darkAqua)
+    }
+
+    /// Repaints the tab strip and the title bar with the same colour. The title
+    /// bar gets its own blur layer because the window's backdrop lives in the
+    /// content view, which stops below it.
+    func applyChromeColor() {
+        chromeFill.layer?.backgroundColor = TabPalette.current.bar.cgColor
+        guard let container = titlebarContainer else { return }
+        if titlebarTint.superview !== container {
+            titlebarTint.wantsLayer = true
+            titlebarTint.frame = container.bounds
+            titlebarTint.autoresizingMask = [.width, .height]
+            container.addSubview(titlebarTint, positioned: .below, relativeTo: nil)
+        }
+        titlebarTint.layer?.backgroundColor = TabPalette.current.bar.cgColor
+
+        let wantsBlur = mostty_config_background_blur() && mostty_config_background_opacity() < 1
+        if wantsBlur, titlebarBackdrop == nil {
+            let view = NSVisualEffectView(frame: container.bounds)
+            view.autoresizingMask = [.width, .height]
+            view.blendingMode = .behindWindow
+            view.material = .hudWindow
+            view.state = .active
+            container.addSubview(view, positioned: .below, relativeTo: titlebarTint)
+            titlebarBackdrop = view
+        } else if !wantsBlur, let view = titlebarBackdrop {
+            view.removeFromSuperview()
+            titlebarBackdrop = nil
+        }
+    }
+
+    /// `background-blur` puts a vibrancy backdrop behind the whole window so
+    /// translucent cells and chrome composite against the desktop instead of
+    /// black. It is meaningless at full opacity, where nothing shows through.
+    func applyBackdrop() {
+        let wanted = mostty_config_background_blur() && mostty_config_background_opacity() < 1
+        if wanted, backdrop == nil {
+            let view = NSVisualEffectView(frame: bounds)
+            view.autoresizingMask = [.width, .height]
+            view.blendingMode = .behindWindow
+            // `.hudWindow` is the one material that stays genuinely see-through
+            // in dark mode; the window-background materials render as a nearly
+            // opaque panel and would hide the desktop instead of blurring it.
+            view.material = .hudWindow
+            view.state = .active
+            addSubview(view, positioned: .below, relativeTo: nil)
+            backdrop = view
+        } else if !wanted, let view = backdrop {
+            view.removeFromSuperview()
+            backdrop = nil
+        }
+    }
+
     override func layout() {
         super.layout()
-        let height = model.tabbarHeight + 8
-        tabBar.frame = NSRect(x: 0, y: max(0, bounds.height - height), width: bounds.width, height: height)
-        terminal.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - height))
+        backdrop?.frame = bounds
+        let strip = min(bounds.height, model.tabbarHeight + 8)
+        chromeFill.frame = NSRect(x: 0, y: bounds.height - strip, width: bounds.width, height: strip)
+        tabBar.frame = chromeFill.frame
+        terminal.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - strip)
     }
 }
 
@@ -894,7 +986,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.collectionBehavior.insert(.fullScreenPrimary)
-        window.appearance = NSAppearance(named: .darkAqua)
+        // The title bar is repainted in the terminal's own colors, so it must
+        // contribute neither a background of its own nor a hairline.
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.contentMinSize = NSSize(width: 480, height: 300)
         window.contentView = ContentView(model: model, frame: frame)
         model.installWindowDelegate(window)

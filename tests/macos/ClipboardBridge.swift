@@ -93,6 +93,11 @@ func clipboard_test_write_tab() -> OpaquePointer? { writeTab }
 func stubDestroy(_ tab: OpaquePointer?) {}
 @_cdecl("mostty_config_background_opacity")
 func stubBackgroundOpacity() -> Float { 1 }
+// Config's own theme defaults, so chrome assertions track the real palette.
+@_cdecl("mostty_config_background_color")
+func stubBackgroundColor() -> UInt32 { 0x2a_2a_2a }
+@_cdecl("mostty_config_foreground_color")
+func stubForegroundColor() -> UInt32 { 0xc8_c4_d0 }
 @_cdecl("mostty_config_copy_tabbar_font")
 func stubCopyTabbarFont() -> UnsafeMutableRawPointer? {
     Unmanaged.passRetained(NSFont(name: "Menlo", size: 13)!).toOpaque()
