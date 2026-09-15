@@ -612,6 +612,8 @@ pub fn deinit(self: *D3d11Renderer) void {
     // chain), gated on swap_chain being non-null so a renderer that never
     // rendered doesn't touch undefined memory.
     if (self.swap_chain) |sc| {
+        _ = self.dcomp_target.SetRoot(null);
+        _ = self.dcomp_device.Commit();
         _ = self.dcomp_visual.IUnknown.Release();
         _ = self.dcomp_target.IUnknown.Release();
         _ = self.dcomp_device.IUnknown.Release();
@@ -1275,4 +1277,53 @@ test "pane surfaces share GPU infrastructure and own separate drawing resources"
     try std.testing.expect(pane.glyph_texture.obj != parent.glyph_texture.obj);
     try std.testing.expectEqual(@as(i32, 0), pane.common.tab_bar_height);
     try std.testing.expect(parent.common.tab_bar_height > 0);
+}
+
+test "surviving pane restores draw topology after sibling teardown clears shared context" {
+    var common: RendererCommon = undefined;
+    var fonts = FontService.init(&common, 96, .{}, true, null);
+    defer fonts.deinit();
+    var parent = try D3d11Renderer.init(&common, &fonts, null);
+    defer parent.deinit();
+    var survivor_common = common;
+    survivor_common.surface_id = 1;
+    var survivor = D3d11Renderer.initSurface(&parent, &survivor_common);
+    defer survivor.deinit();
+    grid.ensureTexture(&survivor, 16, 16);
+    _ = grid.ensureScissorRasterizerState(&survivor);
+    var mapped: win32.D3D11_MAPPED_SUBRESOURCE = undefined;
+    const hr = survivor.context.Map(&survivor.const_buf.ID3D11Resource, 0, .WRITE_DISCARD, 0, &mapped);
+    try std.testing.expect(hr >= 0);
+    const config: *shader.GridConfig = @ptrCast(@alignCast(mapped.pData));
+    config.* = std.mem.zeroes(shader.GridConfig);
+    config.cell_size = .{ 8, 16 };
+    survivor.context.Unmap(&survivor.const_buf.ID3D11Resource, 0);
+
+    survivor.context.IASetPrimitiveTopology(._PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    var sibling_common = common;
+    sibling_common.surface_id = 2;
+    var sibling = D3d11Renderer.initSurface(&parent, &sibling_common);
+    sibling.deinit();
+    var topology: win32.D3D_PRIMITIVE_TOPOLOGY = undefined;
+    survivor.context.IAGetPrimitiveTopology(&topology);
+    try std.testing.expectEqual(win32.D3D_PRIMITIVE_TOPOLOGY._PRIMITIVE_TOPOLOGY_UNDEFINED, topology);
+
+    // No swap-chain or back-buffer recreation: an unaffected pane must repair
+    // shared pipeline state as part of its own draw, including after resize.
+    grid.drawAndCopy(&survivor, .{
+        .client_w = 16,
+        .client_h = 16,
+        .tab_bar_h = 0,
+        .term_pixel_h = 16,
+        .cell_w = 8,
+        .cell_h = 16,
+        .term_shader_row = 1,
+        .cell_count = 0,
+        .dirty_min_row = null,
+        .dirty_max_row = null,
+        .resizing = false,
+        .kitty_images_present = false,
+    });
+    survivor.context.IAGetPrimitiveTopology(&topology);
+    try std.testing.expectEqual(win32.D3D_PRIMITIVE_TOPOLOGY._PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, topology);
 }

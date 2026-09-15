@@ -223,8 +223,4 @@ pub fn acquireBackBufferTexture(self: *D3d11Renderer, swap_chain: *win32.IDXGISw
         if (hr < 0) com.fatalHr("GetBuffer", hr);
     }
     self.back_buffer_tex = back_buffer;
-
-    // ClearState during swap-chain resize resets IA state; restore the
-    // full-screen triangle topology when reacquiring the back buffer.
-    self.context.IASetPrimitiveTopology(._PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 }

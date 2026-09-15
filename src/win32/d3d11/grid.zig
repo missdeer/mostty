@@ -237,6 +237,9 @@ pub fn drawAndCopy(self: *D3d11Renderer, in: DrawInputs) void {
         }
         self.context.VSSetShader(self.vertex_shader, null, 0);
         self.context.PSSetShader(self.pixel_shader, null, 0);
+        // Pane teardown and resize ClearState on the shared context. A retained
+        // back buffer does not imply that its triangle topology is still bound.
+        self.context.IASetPrimitiveTopology(._PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         // ClearRenderTargetView is intentionally NOT called here: the
         // cell shader writes every pixel inside the scissor rect
         // (background color even for blank cells). Outside the scissor
