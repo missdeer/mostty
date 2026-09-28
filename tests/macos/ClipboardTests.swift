@@ -260,6 +260,22 @@ struct ClipboardTests {
         expect(openedURL() == "http://changed.test/b", "double-click dispatches the current URL to the default browser API")
         expect(pasteboard.string(forType: .string) == "sentinel", "opening a URL does not copy a stale selection")
 
+        let mixedURLs = [
+            ("https://example.test/\u{6587}\u{4ef6}?\u{540d}\u{79f0}=\u{6d4b}\u{8bd5}&token=%2F%3D#fragment",
+             "https://example.test/%E6%96%87%E4%BB%B6?%E5%90%8D%E7%A7%B0=%E6%B5%8B%E8%AF%95&token=%2F%3D#fragment"),
+            ("https://example.test/a{b}|c^d\\e?token=%2F%3D#fragment",
+             "https://example.test/a%7Bb%7D%7Cc%5Ed%5Ce?token=%2F%3D#fragment"),
+            ("https://[2001:db8::1]:8443/path(a)/?redirect=https%3A%2F%2Fexample.test%2F&state=a+b#fragment",
+             "https://[2001:db8::1]:8443/path(a)/?redirect=https%3A%2F%2Fexample.test%2F&state=a+b#fragment"),
+        ]
+        for (text, expected) in mixedURLs {
+            clipboard_test_url(text, true)
+            view.mouseDown(with: mouse(.leftMouseDown, 12, clicks: 2))
+            view.mouseUp(with: mouse(.leftMouseUp, 12, clicks: 2))
+            expect(openedURL() == expected,
+                   "browser dispatch encodes mixed characters without changing existing escapes, query separators or fragments")
+        }
+
         clipboard_test_url("https://example.test/a", true)
         view.mouseDown(with: mouse(.leftMouseDown, 12, clicks: 2, flags: .shift))
         view.mouseUp(with: mouse(.leftMouseUp, 12, clicks: 2, flags: .shift))

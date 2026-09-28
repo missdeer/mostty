@@ -7,7 +7,7 @@
 //! explicit LF (e.g. `bat` defaulting to character wrap) lands with wrap=false
 //! even though the URL is visually one continuous string. Gating crossing on
 //! wrap would miss those cases; we rely on the per-cell URL-char check to
-//! terminate the walk on unrelated content (whitespace, CJK, empty cells with
+//! terminate the walk on unrelated content (whitespace, delimiters, empty cells with
 //! codepoint=0). The walk is bounded to visible rows; if the URL extends into
 //! scrollback or below the viewport we stop at the visible edge — the
 //! underline only highlights what the user sees anyway, and the click-target
@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const vt = @import("vt");
+const word_selection = @import("word_selection.zig");
 
 // Cap chosen to comfortably cover modern OAuth2 / JWT / deep-link query URLs,
 // which routinely run past 1 KB. Stack frame is ~40 KiB at this size (single
@@ -65,17 +66,39 @@ pub const Hit = struct {
 };
 
 fn isUrlChar(cp: u21) bool {
-    // RFC 3986 unreserved + reserved + percent. URL chars are ASCII-only; any
-    // CJK / whitespace / wide-cell content terminates the run.
-    if (cp > 127) return false;
+    // Preserve Unicode and browser-escaped punctuation instead of opening a
+    // shortened address. Whitespace and surrounding prose delimit the token.
+    if (cp > 127) return switch (cp) {
+        0x80...0x9f, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0xfeff => false,
+        else => std.mem.indexOfScalar(u21, &word_selection.WORD_BOUNDARIES, cp) == null,
+    };
     return switch (@as(u8, @intCast(cp))) {
         'a'...'z', 'A'...'Z', '0'...'9' => true,
         ':', '/', '?', '#', '[', ']', '@' => true,
         '!', '$', '&', '\'', '(', ')', '*' => true,
         '+', ',', ';', '=' => true,
         '-', '.', '_', '~', '%' => true,
+        '{', '}', '|', '^', '\\' => true,
         else => false,
     };
+}
+
+fn cellUtf8(page: *const vt.Page, cell: *const vt.Cell, buf: []u8) error{NoSpace}!?[]const u8 {
+    const cp = cellCodepoint(cell.*) orelse return null;
+    if (!isUrlChar(cp)) return null;
+    var len: usize = 0;
+    const grapheme = if (cell.hasGrapheme()) page.lookupGrapheme(cell) orelse &.{} else &.{};
+    for ([_][]const u21{ &.{cp}, grapheme }) |codepoints| {
+        for (codepoints) |codepoint| {
+            if (!isUrlChar(codepoint)) return null;
+            var encoded: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(codepoint, &encoded) catch unreachable;
+            if (n > buf.len - len) return error.NoSpace;
+            @memcpy(buf[len..][0..n], encoded[0..n]);
+            len += n;
+        }
+    }
+    return buf[0..len];
 }
 
 fn cellCodepoint(cell: vt.Cell) ?u21 {
@@ -86,21 +109,12 @@ fn cellCodepoint(cell: vt.Cell) ?u21 {
     };
 }
 
-fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len == 0 or haystack.len < needle.len) return null;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return i;
-    }
-    return null;
-}
-
-fn viewRowCells(screen: anytype, vrow: u16, cols: u16) ?[]vt.Cell {
+fn viewRowCells(screen: anytype, vrow: u16, cols: u16) ?struct { page: *const vt.Page, cells: []vt.Cell } {
     const pin = screen.pages.pin(.{ .viewport = .{ .x = 0, .y = vrow } }) orelse return null;
     const rac = pin.rowAndCell();
     const all_cells = pin.node.page().getCells(rac.row);
     if (all_cells.len < cols) return null;
-    return all_cells[0..cols];
+    return .{ .page = pin.node.page(), .cells = all_cells[0..cols] };
 }
 
 /// Returns the URL hit covering `viewport_col` on `viewport_row`, or null.
@@ -114,8 +128,12 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     // Cheap reject: clicked cell must yield a URL-char codepoint. Done once,
     // result reused by the right-walk's first iteration.
     const start_cells = viewRowCells(screen, viewport_row, cols) orelse return null;
-    const click_cp = cellCodepoint(start_cells[viewport_col]) orelse return null;
-    if (click_cp == 0 or click_cp > 127 or !isUrlChar(click_cp)) return null;
+    const click_col = if (start_cells.cells[viewport_col].wide == .spacer_tail and viewport_col > 0)
+        viewport_col - 1
+    else
+        viewport_col;
+    var encoded_cell: [MAX_URL_LEN]u8 = undefined;
+    const click_text = (cellUtf8(start_cells.page, &start_cells.cells[click_col], &encoded_cell) catch return null) orelse return null;
 
     // Single buffer with a fixed center index: the right walk grows toward
     // higher indices, the left walk grows toward lower indices. SLAB on each
@@ -128,9 +146,12 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     const CENTER: usize = SLAB;
 
     // Seed with the clicked cell at CENTER.
-    bytes[CENTER] = @intCast(click_cp);
-    pos[CENTER] = .{ .row = viewport_row, .col = viewport_col };
-    var right_end: usize = CENTER + 1; // exclusive
+    @memcpy(bytes[CENTER..][0..click_text.len], click_text);
+    @memset(pos[CENTER..][0..click_text.len], .{
+        .row = viewport_row,
+        .col = click_col + @as(u16, if (start_cells.cells[click_col].wide == .wide) 1 else 0),
+    });
+    var right_end: usize = CENTER + click_text.len; // exclusive
     var left_start: usize = CENTER; // inclusive
 
     // Walk RIGHT from the cell after the click. At a row boundary, cross to
@@ -150,8 +171,8 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     var right_truncated = false;
     {
         var r: u16 = viewport_row;
-        var c: u16 = viewport_col + 1;
-        var cells: []vt.Cell = start_cells;
+        var c: u16 = click_col + 1;
+        var cells = start_cells;
         right: while (true) {
             if (c >= cols) {
                 if (r + 1 >= rows) break :right;
@@ -161,15 +182,19 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
             }
             // Single codepoint lookup per cell — no redundant cellIsUrlChar
             // call, since the work is the same.
-            const cp = cellCodepoint(cells[c]) orelse break :right;
-            if (cp == 0 or cp > 127 or !isUrlChar(cp)) break :right;
-            if (right_end >= bytes.len) {
+            const cell = &cells.cells[c];
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head) {
+                c += 1;
+                continue;
+            }
+            const text = (cellUtf8(cells.page, cell, &encoded_cell) catch return null) orelse break :right;
+            if (text.len > bytes.len - right_end) {
                 right_truncated = true;
                 break :right;
             }
-            bytes[right_end] = @intCast(cp);
-            pos[right_end] = .{ .row = r, .col = c };
-            right_end += 1;
+            @memcpy(bytes[right_end..][0..text.len], text);
+            @memset(pos[right_end..][0..text.len], .{ .row = r, .col = c + @as(u16, if (cell.wide == .wide) 1 else 0) });
+            right_end += text.len;
             c += 1;
         }
     }
@@ -183,8 +208,8 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     // scrollback would do thousands of page-list traversals per detectAt call.
     {
         var r: u16 = viewport_row;
-        var c: u16 = viewport_col;
-        var cells: []vt.Cell = start_cells;
+        var c: u16 = click_col;
+        var cells = start_cells;
         left: while (true) {
             if (c > 0) {
                 c -= 1;
@@ -194,12 +219,13 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
                 c = cols - 1;
                 cells = viewRowCells(screen, r, cols) orelse break :left;
             }
-            const cp = cellCodepoint(cells[c]) orelse break :left;
-            if (cp == 0 or cp > 127 or !isUrlChar(cp)) break :left;
-            if (left_start == 0) break :left;
-            left_start -= 1;
-            bytes[left_start] = @intCast(cp);
-            pos[left_start] = .{ .row = r, .col = c };
+            const cell = &cells.cells[c];
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+            const text = (cellUtf8(cells.page, cell, &encoded_cell) catch return null) orelse break :left;
+            if (text.len > left_start) break :left;
+            left_start -= text.len;
+            @memcpy(bytes[left_start..][0..text.len], text);
+            @memset(pos[left_start..][0..text.len], .{ .row = r, .col = c + @as(u16, if (cell.wide == .wide) 1 else 0) });
         }
     }
 
@@ -207,18 +233,15 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     const clicked_idx: usize = CENTER - left_start;
     if (run.len < "http://".len) return null;
 
-    // Locate the LAST scheme occurrence (across http:// and https://) at or
-    // before the clicked position. Comparing absolute positions across both
-    // schemes prevents a later http:// from masking an earlier https:// (or
-    // vice versa) — e.g. `http://a=https://b` clicked inside the https URL.
+    // Prefer the nearest scheme until a query or fragment begins: embedded
+    // redirect addresses are part of the outer URL, even on a later row.
     var scheme_at: ?usize = null;
-    for ([_][]const u8{ "https://", "http://" }) |scheme| {
-        var search_start: usize = 0;
-        while (indexOfIgnoreCase(run[search_start..], scheme)) |rel| {
-            const abs = search_start + rel;
-            if (abs > clicked_idx) break;
-            if (scheme_at == null or abs > scheme_at.?) scheme_at = abs;
-            search_start = abs + 1;
+    for (run[0 .. clicked_idx + 1], 0..) |byte, i| {
+        if (scheme_at != null and (byte == '?' or byte == '#')) break;
+        if (std.ascii.startsWithIgnoreCase(run[i..], "https://") or
+            std.ascii.startsWithIgnoreCase(run[i..], "http://"))
+        {
+            scheme_at = i;
         }
     }
     const url_start = scheme_at orelse return null;
@@ -233,9 +256,13 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     }
     while (url_end > url_start) {
         const last = run[url_end - 1];
-        if (last != ')' and last != ']') break;
+        if (last != ')' and last != ']' and last != '}') break;
         const slice = run[url_start..url_end];
-        const open: u8 = if (last == ')') '(' else '[';
+        const open: u8 = switch (last) {
+            ')' => '(',
+            ']' => '[',
+            else => '{',
+        };
         const opens = std.mem.count(u8, slice, &[_]u8{open});
         const closes = std.mem.count(u8, slice, &[_]u8{last});
         if (closes <= opens) break;

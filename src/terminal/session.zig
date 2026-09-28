@@ -221,6 +221,80 @@ test "session resize rejects a zero grid without changing terminal state" {
     try std.testing.expectEqual(@as(u32, 72), session.term.height_px);
 }
 
+test "every wrapped URL cell resolves the full mixed-character address" {
+    const url_hover = @import("url_hover.zig");
+    const suffix = "a-b_C%2F+9=" ** 8;
+    const urls = [_][]const u8{
+        "https://example.test/login?redirect_uri=https%3A%2F%2Fexample.test%2Fcallback&state=" ++ suffix ++ "#fragment",
+        "https://example.test/login?redirect_uri=http://redirect.test/finish?state=" ++ suffix,
+        "http://example.test/login#next=https://redirect.test/finish?state=" ++ suffix,
+        "https://[2001:db8::1]:8443/path(a)/@user!$&'()*+,;=:-._~%20?key=" ++ suffix,
+        "https://example.test/path?state=abc{def}|ghi^jkl\\mno&token=" ++ suffix,
+        "https://example.test/\u{6587}\u{4ef6}/\u{62a5}\u{544a}?\u{540d}\u{79f0}=\u{6d4b}\u{8bd5}&token=" ++ suffix,
+        "https://example.test/cafe\u{301}/\u{1f469}\u{200d}\u{1f4bb}?token=" ++ suffix,
+    };
+    for ([_]u16{ 11, 32 }) |cols| {
+        for (urls) |url| {
+            var context: u8 = 0;
+            var session: Session = undefined;
+            try session.init(.{
+                .io = std.testing.io,
+                .terminal_allocator = std.testing.allocator,
+                .stream_allocator = std.testing.allocator,
+                .cols = cols,
+                .rows = 64,
+                .hooks = .{ .context = &context },
+            });
+            defer session.deinit();
+            session.feed(url);
+            for (0..session.term.rows) |row| {
+                const pin = session.term.screens.active.pages.pin(.{ .viewport = .{ .x = 0, .y = @intCast(row) } }).?;
+                const cells = pin.node.page().getCells(pin.rowAndCell().row);
+                for (cells[0..cols], 0..) |cell, col| {
+                    if (cell.wide == .spacer_head or (!cell.hasText() and cell.wide != .spacer_tail)) continue;
+                    const hit = url_hover.detectAt(session.term, @intCast(col), @intCast(row));
+                    try std.testing.expect(hit != null);
+                    // A wrap or a multibyte glyph must never change the browser target.
+                    try std.testing.expectEqualStrings(url, hit.?.url());
+                    try std.testing.expect(hit.?.contains(@intCast(row), @intCast(col), cols - 1));
+                }
+            }
+        }
+    }
+}
+
+test "URL detection keeps prose boundaries and enforces the UTF-8 byte limit" {
+    const url_hover = @import("url_hover.zig");
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 80,
+        .rows = 64,
+        .hooks = .{ .context = &context },
+    });
+    defer session.deinit();
+    const url = "https://example.test/\u{4e2d}?value={a|b}";
+    for ([_][]const u8{ " more", "\u{a0}more", "\u{3000}more", "\u{ff0c}more", "} more" }) |boundary| {
+        session.feed("\x1b[2J\x1b[H");
+        session.feed(url);
+        session.feed(boundary);
+        const hit = url_hover.detectAt(session.term, 0, 0).?;
+        // Adjacent prose and an unmatched closing brace are not part of the address.
+        try std.testing.expectEqualStrings(url, hit.url());
+    }
+    const limit_url = "https://x/" ++ ("\u{4e2d}" ** 1362);
+    try std.testing.expectEqual(url_hover.MAX_URL_LEN, limit_url.len);
+    session.feed("\x1b[2J\x1b[H" ++ limit_url);
+    const hit = url_hover.detectAt(session.term, 0, 0).?;
+    try std.testing.expectEqualStrings(limit_url, hit.url());
+    session.feed("a");
+    // Oversized UTF-8 addresses must not open a silently shortened prefix.
+    try std.testing.expect(url_hover.detectAt(session.term, 0, 0) == null);
+}
+
 test "default scrollback preserves early normal output" {
     var context: u8 = 0;
     var session: Session = undefined;

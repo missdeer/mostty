@@ -542,6 +542,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         let hit = mostty_tab_hover_url(t, cell != nil, cell?.col ?? 0, cell?.row ?? 0)
         if hit != hoveringURL { dirty = true }
         if let point = point { cursor(hoveringURL: hit, at: point).set() }
+        else if hoveringURL { NSCursor.arrow.set() }
         hoveringURL = hit
     }
 
@@ -571,7 +572,12 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard let t = tab, let cell = viewportCell(at: point) else { return false }
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = mostty_tab_url_at(t, cell.col, cell.row, &buf, buf.count)
-        guard n > 0, let url = URL(string: String(decoding: buf[0..<n], as: UTF8.self)) else { return false }
+        // Encode invalid characters before URL parsing so existing escapes survive.
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.insert(charactersIn: "%#[]")
+        guard n > 0,
+              let escaped = String(decoding: buf[0..<n], as: UTF8.self).addingPercentEncoding(withAllowedCharacters: allowed),
+              let url = URL(string: escaped) else { return false }
         return NSWorkspace.shared.open(url)
     }
 
