@@ -6,9 +6,9 @@
 //! (Terminal.printWrap), so output that hard-wraps at the producer side via
 //! explicit LF (e.g. `bat` defaulting to character wrap) lands with wrap=false
 //! even though the URL is visually one continuous string. Gating crossing on
-//! wrap would miss those cases; we rely on the per-cell URL-char check to
-//! terminate the walk on unrelated content (whitespace, delimiters, empty cells with
-//! codepoint=0). The walk is bounded to visible rows; if the URL extends into
+//! wrap would miss those cases; a short margin of spaces can also separate
+//! TUI-rendered URL fragments. Other whitespace and delimiters end the run.
+//! The walk is bounded to visible rows; if the URL extends into
 //! scrollback or below the viewport we stop at the visible edge — the
 //! underline only highlights what the user sees anyway, and the click-target
 //! stays consistent with the highlight.
@@ -43,6 +43,8 @@ pub const Hit = struct {
     end_col: u16,
     url_len: u16,
     url_buf: [MAX_URL_LEN]u8,
+    position_count: u16 = 0,
+    positions: [MAX_URL_LEN]Pos = undefined,
 
     pub fn url(self: *const Hit) []const u8 {
         return self.url_buf[0..self.url_len];
@@ -53,11 +55,23 @@ pub const Hit = struct {
             a.start_col == b.start_col and
             a.end_row == b.end_row and
             a.end_col == b.end_col and
+            a.position_count == b.position_count and
+            std.mem.eql(Pos, a.positions[0..a.position_count], b.positions[0..b.position_count]) and
             a.url_len == b.url_len and
             std.mem.eql(u8, a.url_buf[0..a.url_len], b.url_buf[0..b.url_len]);
     }
 
     pub fn contains(self: *const Hit, row: u16, col: u16, last_col: u16) bool {
+        if (self.position_count > 0) {
+            var lo: usize = 0;
+            var hi: usize = self.position_count;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                const p = self.positions[mid];
+                if (p.row < row or (p.row == row and p.col < col)) lo = mid + 1 else hi = mid;
+            }
+            return lo < self.position_count and self.positions[lo].row == row and self.positions[lo].col == col;
+        }
         if (row < self.start_row or row > self.end_row) return false;
         const lo: u16 = if (row == self.start_row) self.start_col else 0;
         const hi: u16 = if (row == self.end_row) self.end_col else last_col;
@@ -109,6 +123,29 @@ fn cellCodepoint(cell: vt.Cell) ?u21 {
     };
 }
 
+fn isMarginSpace(cell: vt.Cell) bool {
+    const cp = cellCodepoint(cell) orelse return true;
+    return cp == 0 or cp == ' ' or cp == '\t';
+}
+
+fn isUnderlined(page: *const vt.Page, cell: *const vt.Cell) bool {
+    return cell.style_id != 0 and page.styles.get(page.memory, cell.style_id).flags.underline != .none;
+}
+
+fn linksTo(page: *const vt.Page, cell: *const vt.Cell, uri: []const u8) bool {
+    if (!cell.hyperlink) return false;
+    const id = page.lookupHyperlink(cell) orelse return false;
+    return std.mem.eql(u8, uri, page.hyperlink_set.get(page.memory, id).uri.slice(page.memory));
+}
+
+fn rowLinksTo(screen: *vt.Screen, row: u16, cols: u16, uri: []const u8) bool {
+    const cells = viewRowCells(screen, row, cols) orelse return false;
+    for (cells.cells) |*cell| {
+        if (linksTo(cells.page, cell, uri)) return true;
+    }
+    return false;
+}
+
 fn viewRowCells(screen: anytype, vrow: u16, cols: u16) ?struct { page: *const vt.Page, cells: []vt.Cell } {
     const pin = screen.pages.pin(.{ .viewport = .{ .x = 0, .y = vrow } }) orelse return null;
     const rac = pin.rowAndCell();
@@ -133,6 +170,63 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
     else
         viewport_col;
     var encoded_cell: [MAX_URL_LEN]u8 = undefined;
+    const underlined = isUnderlined(start_cells.page, &start_cells.cells[click_col]);
+    // OSC8 carries the complete target even when the TUI hard-wraps its label.
+    if (start_cells.cells[click_col].hyperlink) osc8: {
+        const page = start_cells.page;
+        const id = page.lookupHyperlink(&start_cells.cells[click_col]) orelse break :osc8;
+        const uri = page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
+        const scheme_len: usize = if (std.ascii.startsWithIgnoreCase(uri, "https://"))
+            "https://".len
+        else if (std.ascii.startsWithIgnoreCase(uri, "http://"))
+            "http://".len
+        else
+            0;
+        if (scheme_len == 0 or uri.len <= scheme_len or uri.len > MAX_URL_LEN) break :osc8;
+        var lo = click_col;
+        var hi = click_col;
+        while (lo > 0) {
+            const prev = &start_cells.cells[lo - 1];
+            if (!prev.hyperlink or page.lookupHyperlink(prev) != id) break;
+            lo -= 1;
+        }
+        while (hi + 1 < cols) {
+            const next = &start_cells.cells[hi + 1];
+            if (!next.hyperlink or page.lookupHyperlink(next) != id) break;
+            hi += 1;
+        }
+        var hit: Hit = .{
+            .start_row = viewport_row,
+            .start_col = lo,
+            .end_row = viewport_row,
+            .end_col = hi,
+            .url_len = @intCast(uri.len),
+            .url_buf = undefined,
+        };
+        @memcpy(hit.url_buf[0..uri.len], uri);
+        var first_row = viewport_row;
+        var last_row = viewport_row;
+        while (first_row > 0 and rowLinksTo(screen, first_row - 1, cols, uri)) : (first_row -= 1) {}
+        while (last_row + 1 < rows and rowLinksTo(screen, last_row + 1, cols, uri)) : (last_row += 1) {}
+        var row = first_row;
+        while (row <= last_row) : (row += 1) {
+            const row_cells = viewRowCells(screen, row, cols) orelse return null;
+            for (row_cells.cells, 0..) |*cell, col| {
+                if (!linksTo(row_cells.page, cell, uri)) continue;
+                if (hit.position_count == MAX_URL_LEN) return null;
+                hit.positions[hit.position_count] = .{ .row = row, .col = @intCast(col) };
+                hit.position_count += 1;
+            }
+        }
+        if (hit.position_count == 0) return null;
+        const first = hit.positions[0];
+        const last = hit.positions[hit.position_count - 1];
+        hit.start_row = first.row;
+        hit.start_col = first.col;
+        hit.end_row = last.row;
+        hit.end_col = last.col;
+        return hit;
+    }
     const click_text = (cellUtf8(start_cells.page, &start_cells.cells[click_col], &encoded_cell) catch return null) orelse return null;
 
     // Single buffer with a fixed center index: the right walk grows toward
@@ -151,18 +245,12 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
         .row = viewport_row,
         .col = click_col + @as(u16, if (start_cells.cells[click_col].wide == .wide) 1 else 0),
     });
+    pos[CENTER].col = click_col;
     var right_end: usize = CENTER + click_text.len; // exclusive
     var left_start: usize = CENTER; // inclusive
 
-    // Walk RIGHT from the cell after the click. At a row boundary, cross to
-    // the next viewport row unconditionally — i.e. we do NOT gate on the
-    // row.wrap soft-wrap flag. Tools that print long URLs may emit hard
-    // newlines at the terminal width (e.g. `bat` defaults to character-wrap),
-    // and some PTY bridges don't propagate the soft-wrap signal at all. Both
-    // produce visually-wrapped URLs with wrap=false. The URL-char check at
-    // the first cell of the next row naturally terminates the walk on
-    // unrelated content, so crossing eagerly costs little while covering
-    // both soft- and hard-wrapped URLs.
+    // Walk RIGHT across VT wraps and hard newlines. A TUI can leave a few
+    // padding cells at both row edges; cross those only near the row boundary.
     //
     // right_truncated is set when the run was still in URL chars at the
     // moment we ran out of buffer — used downstream to reject silent
@@ -179,6 +267,9 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
                 r += 1;
                 c = 0;
                 cells = viewRowCells(screen, r, cols) orelse break :right;
+                while (c < cols and isMarginSpace(cells.cells[c])) : (c += 1) {}
+                if (c >= cols) break :right;
+                if (underlined and !isUnderlined(cells.page, &cells.cells[c])) break :right;
             }
             // Single codepoint lookup per cell — no redundant cellIsUrlChar
             // call, since the work is the same.
@@ -187,13 +278,22 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
                 c += 1;
                 continue;
             }
-            const text = (cellUtf8(cells.page, cell, &encoded_cell) catch return null) orelse break :right;
+            const text = (cellUtf8(cells.page, cell, &encoded_cell) catch return null) orelse {
+                // A largely empty unstyled row is a text boundary, not padding.
+                if ((!underlined and cols - c > c / 2) or r + 1 >= rows) break :right;
+                for (cells.cells[c..cols]) |margin| {
+                    if (!isMarginSpace(margin)) break :right;
+                }
+                c = cols;
+                continue :right;
+            };
             if (text.len > bytes.len - right_end) {
                 right_truncated = true;
                 break :right;
             }
             @memcpy(bytes[right_end..][0..text.len], text);
             @memset(pos[right_end..][0..text.len], .{ .row = r, .col = c + @as(u16, if (cell.wide == .wide) 1 else 0) });
+            pos[right_end].col = c;
             right_end += text.len;
             c += 1;
         }
@@ -216,16 +316,29 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
             } else {
                 if (r == 0) break :left;
                 r -= 1;
-                c = cols - 1;
                 cells = viewRowCells(screen, r, cols) orelse break :left;
+                c = cols;
+                while (c > 0 and isMarginSpace(cells.cells[c - 1])) : (c -= 1) {}
+                if (c == 0) break :left;
+                if (!underlined and cols - c > c / 2) break :left;
+                if (underlined and !isUnderlined(cells.page, &cells.cells[c - 1])) break :left;
+                continue :left;
             }
             const cell = &cells.cells[c];
             if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
-            const text = (cellUtf8(cells.page, cell, &encoded_cell) catch return null) orelse break :left;
+            const text = (cellUtf8(cells.page, cell, &encoded_cell) catch return null) orelse {
+                if (r == 0) break :left;
+                for (cells.cells[0 .. c + 1]) |margin| {
+                    if (!isMarginSpace(margin)) break :left;
+                }
+                c = 0;
+                continue :left;
+            };
             if (text.len > left_start) break :left;
             left_start -= text.len;
             @memcpy(bytes[left_start..][0..text.len], text);
             @memset(pos[left_start..][0..text.len], .{ .row = r, .col = c + @as(u16, if (cell.wide == .wide) 1 else 0) });
+            pos[left_start].col = c;
         }
     }
 
@@ -306,5 +419,7 @@ pub fn detectAt(term: *vt.Terminal, viewport_col: u16, viewport_row: u16) ?Hit {
         .url_buf = undefined,
     };
     @memcpy(hit.url_buf[0..url_len], run[url_start..url_end]);
+    hit.position_count = @intCast(url_len);
+    @memcpy(hit.positions[0..url_len], pos[left_start + url_start .. left_start + url_end]);
     return hit;
 }

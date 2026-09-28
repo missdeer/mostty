@@ -17,6 +17,7 @@ const GridModel = @import("grid_model.zig");
 const Config = @import("../config.zig");
 const title_mod = @import("../terminal/title.zig");
 const word_selection = @import("../terminal/word_selection.zig");
+const selection_copy = @import("../terminal/selection_copy.zig");
 const url_hover = @import("../terminal/url_hover.zig");
 const mouse_report = @import("../terminal/mouse_report.zig");
 const key_encode = @import("../terminal/key_encode.zig");
@@ -745,10 +746,12 @@ export fn mostty_tab_selection_text(tab_opt: ?*Tab, buf: [*]u8, cap: usize) usiz
     const sel = screen.selection orelse return 0;
     const text = screen.selectionString(allocator, .{ .sel = sel }) catch return 0;
     defer allocator.free(text);
-    if (cap == 0) return text.len;
-    if (text.len > cap) return 0;
-    @memcpy(buf[0..text.len], text);
-    return text.len;
+    const copied = selection_copy.copyText(tab.pty.terminal.term, sel, text, allocator);
+    defer copied.deinit(allocator);
+    if (cap == 0) return copied.text.len;
+    if (copied.text.len > cap) return 0;
+    @memcpy(buf[0..copied.text.len], copied.text);
+    return copied.text.len;
 }
 
 comptime {
@@ -1064,6 +1067,22 @@ test "URL bridge detects wrapped URLs and refreshes the click target" {
     tab.pty.terminal.feed("\x1b[2J\x1b[Hplain text");
     try std.testing.expectEqual(@as(usize, 0), mostty_tab_url_at(tab, 3, 0, &out, out.len));
     try std.testing.expect(!mostty_tab_hover_url(tab, true, 3, 0));
+}
+
+test "hard-wrapped OSC8 URL opens and copies its complete target" {
+    const tab = mostty_tab_create(320, 96, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(tab);
+    try tab.pty.terminal.resize(64, 4);
+    const url = "https://example.test/oauth?client_id=abc&state=def";
+    tab.pty.terminal.feed("\x1b]8;;" ++ url ++ "\x1b\\https://example.test/oauth?client_id=abc\r\n&state=def\x1b]8;;\x1b\\");
+    var out: [128]u8 = undefined;
+    const first = mostty_tab_url_at(tab, 10, 0, &out, out.len);
+    try std.testing.expectEqualStrings(url, out[0..first]);
+    const second = mostty_tab_url_at(tab, 2, 1, &out, out.len);
+    try std.testing.expectEqualStrings(url, out[0..second]);
+    mostty_tab_set_selection(tab, true, 0, 0, 9, 1);
+    const selected = mostty_tab_selection_text(tab, &out, out.len);
+    try std.testing.expectEqualStrings(url, out[0..selected]);
 }
 
 test "URL hover changes rendered underline pixels and clears them on leave" {

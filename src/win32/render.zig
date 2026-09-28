@@ -49,6 +49,7 @@ pub fn renderWindow(window: *Window) void {
             .start_col = h.hit.start_col,
             .end_row = h.hit.end_row,
             .end_col = h.hit.end_col,
+            .hit = &window.hovered_url.?.hit,
         };
     };
     if (@import("pane_native.zig").supported()) {
@@ -75,7 +76,7 @@ pub fn renderWindow(window: *Window) void {
             @import("pane_native.zig").syncSurface(pane);
             const highlight: ?types.UrlHighlight = if (window.hovered_url) |h| blk: {
                 if (h.tab_id != pane.id) break :blk null;
-                break :blk .{ .start_row = h.hit.start_row, .start_col = h.hit.start_col, .end_row = h.hit.end_row, .end_col = h.hit.end_col };
+                break :blk .{ .start_row = h.hit.start_row, .start_col = h.hit.start_col, .end_row = h.hit.end_row, .end_col = h.hit.end_col, .hit = &window.hovered_url.?.hit };
             } else null;
             pane.renderer.?.render(pane.hwnd.?, pane.id, pane.term, window.resizing, window.mouse_in_scrollbar and window.hover_pane_id == pane.id, theme.cursor_text, theme.selection_background, theme.selection_foreground, global.config.background_opacity, window.remote_session, highlight);
             if (pane.renderer.?.runtimeFailure()) |failure| {

@@ -6,5 +6,6 @@ test {
     _ = @import("renderer/image_geometry.zig");
     _ = @import("terminal/key_encode.zig");
     _ = @import("terminal/paste.zig");
+    _ = @import("terminal/selection_copy.zig");
     _ = @import("ssh_config.zig");
 }

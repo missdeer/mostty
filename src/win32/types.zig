@@ -138,4 +138,5 @@ pub const UrlHighlight = struct {
     start_col: u16,
     end_row: u16,
     end_col: u16,
+    hit: ?*const @import("../terminal/url_hover.zig").Hit = null,
 };

@@ -6,6 +6,7 @@ const Renderer = @import("../renderer.zig");
 const global_mod = @import("../global.zig");
 const launcher = @import("../launcher.zig");
 const mouse_report = @import("../../terminal/mouse_report.zig");
+const selection_copy = @import("../../terminal/selection_copy.zig");
 const paste = @import("../paste.zig");
 const state = @import("../state.zig");
 const tab_bar = @import("../tab_bar.zig");
@@ -486,7 +487,9 @@ pub fn onLButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
                 const text = screen.selectionString(alloc, .{ .sel = sel }) catch util.oom(error.OutOfMemory);
                 defer alloc.free(text);
                 if (text.len > 0) {
-                    paste.copyToClipboard(hwnd, text);
+                    const copied = selection_copy.copyText(global_mod.inputPane(hwnd).term, sel, text, alloc);
+                    defer copied.deinit(alloc);
+                    paste.copyToClipboard(hwnd, copied.text);
                 }
             }
         },

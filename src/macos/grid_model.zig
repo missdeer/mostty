@@ -429,6 +429,36 @@ test "URL hover underlines only detected cells across a soft wrap" {
     try std.testing.expect(url_hover.detectAt(session.term, 0, 0) == null);
 }
 
+test "wrapped URL hover excludes margins and spans OSC8 rows" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try testSession(&session, &context, 32, 4);
+    defer session.deinit();
+    const url = "https://example.test/abcdef";
+    session.feed("\x1b]8;;" ++ url ++ "\x1b\\https://example.test/abc\x1b]8;;\x1b\\  \r\n  \x1b]8;;" ++ url ++ "\x1b\\def\x1b]8;;\x1b\\");
+    const hit = url_hover.detectAt(session.term, 3, 1) orelse return error.MissingUrl;
+    try std.testing.expectEqualStrings(url, hit.url());
+    try std.testing.expect(hit.contains(0, 0, 31));
+    try std.testing.expect(hit.contains(1, 2, 31));
+    try std.testing.expect(!hit.contains(1, 0, 31));
+    try std.testing.expect(!hit.contains(0, 25, 31));
+    var frame = try build(std.testing.allocator, session.term, .{
+        .metrics = .{ .cell_width = 9, .cell_height = 18 },
+        .pixel_width = 288,
+        .pixel_height = 72,
+        .hovered_url = &hit,
+    });
+    defer frame.deinit();
+    try std.testing.expectEqual(@as(u8, 1), findCell(frame, 0, 0).style.underline);
+    try std.testing.expectEqual(@as(u8, 1), findCell(frame, 2, 1).style.underline);
+    try std.testing.expectEqual(@as(u8, 0), findCell(frame, 0, 1).style.underline);
+    session.feed("\x1b[2J\x1b[Hhttps://example.test/abc  \r\n      def");
+    const plain = url_hover.detectAt(session.term, 7, 1) orelse return error.MissingUrl;
+    try std.testing.expectEqualStrings(url, plain.url());
+    try std.testing.expect(!plain.contains(1, 0, 31));
+    try std.testing.expect(plain.contains(1, 6, 31));
+}
+
 test "unset terminal colors use Config defaults in the rendered grid" {
     const defaults: Config = .{};
     var session: TerminalSession = undefined;

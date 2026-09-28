@@ -316,6 +316,180 @@ struct PaneTests {
         selected.view.mouseUp(with: mouse(.leftMouseUp, x: endPoint.x, y: endPoint.y))
         expect(pasteboard.string(forType: .string)?.contains("three") == true,
                "pane-local selection copies the selected session's output")
+        let linkTab = sessions[0]!
+        let fullURL = "https://example.test/?a=abc&state=def"
+        let wrappedLink = "\u{1b}[2J\u{1b}[H\u{1b}]8;;\(fullURL)\u{1b}\\https://example.test/?a=\r\nabc&state=def\u{1b}]8;;\u{1b}\\"
+        let linkBytes = Array(wrappedLink.utf8)
+        linkBytes.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, linkBytes.count) }
+        var linkBuffer = [UInt8](repeating: 0, count: 128)
+        let firstLength = mostty_tab_url_at(linkTab, 10, 0, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(firstLength), as: UTF8.self) == fullURL,
+               "hard-wrapped OSC8 URL opens its complete target from the first row")
+        let secondLength = mostty_tab_url_at(linkTab, 2, 1, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(secondLength), as: UTF8.self) == fullURL,
+               "hard-wrapped OSC8 URL opens its complete target from a continuation row")
+        mostty_tab_set_selection(linkTab, true, 0, 0, 12, 1)
+        let copyLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        let copiedURL = String(decoding: linkBuffer.prefix(copyLength), as: UTF8.self)
+        if copiedURL != fullURL { print("COPY: \(String(reflecting: copiedURL))") }
+        expect(copiedURL == fullURL,
+               "copying a selected hard-wrapped hyperlink removes its display newline")
+        mostty_tab_set_selection(linkTab, true, 12, 1, 0, 0)
+        let reverseLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(reverseLength), as: UTF8.self) == fullURL,
+               "reverse selection also copies the complete hyperlink target")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let paddedLink = "\u{1b}[2J\u{1b}[H  \u{1b}]8;;\(fullURL)\u{1b}\\https://example.test/?a=\u{1b}]8;;\u{1b}\\  \r\n  \u{1b}]8;;\(fullURL)\u{1b}\\abc&state=def\u{1b}]8;;\u{1b}\\  "
+        let paddedBytes = Array(paddedLink.utf8)
+        paddedBytes.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, paddedBytes.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 16, 1)
+        let paddedLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        let paddedCopy = String(decoding: linkBuffer.prefix(paddedLength), as: UTF8.self)
+        if paddedCopy != fullURL { print("PADDED COPY: \(String(reflecting: paddedCopy))") }
+        expect(paddedCopy == fullURL,
+               "copying a hard-wrapped link omits selected TUI margin spaces")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let leadingBlank = Array("\u{1b}[2J\u{1b}[H\r\n\u{1b}]8;;\(fullURL)\u{1b}\\https://example.test/?a=\r\nabc&state=def\u{1b}]8;;\u{1b}\\".utf8)
+        leadingBlank.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, leadingBlank.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 12, 2)
+        let leadingBlankLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(leadingBlankLength), as: UTF8.self) == fullURL,
+               "copying a wrapped OSC8 URL finds metadata after a selected blank row")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let leadingPrompt = Array("\u{1b}[2J\u{1b}[Hprompt\r\n\u{1b}]8;;\(fullURL)\u{1b}\\https://example.test/?a=\r\nabc&state=def\u{1b}]8;;\u{1b}\\".utf8)
+        leadingPrompt.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, leadingPrompt.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 12, 2)
+        let leadingPromptLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(leadingPromptLength), as: UTF8.self).hasPrefix("prompt\n"),
+               "copying a prompt with a hyperlink preserves the selected prompt")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        var urlCols: UInt32 = 0, urlRows: UInt32 = 0
+        _ = mostty_tab_render(linkTab, false, true, &urlCols, &urlRows)
+        let plainPrefix = "https://e.test/"
+        let plainFirst = plainPrefix + String(repeating: "a", count: max(1, Int(urlCols) - plainPrefix.count - 4))
+        let plainSecond = String(repeating: "b", count: max(1, Int(urlCols) - 4))
+        let plainThird = "cdef"
+        let plainURL = plainFirst + plainSecond + plainThird
+        let plainWrapped = Array("\u{1b}[2J\u{1b}[H  \u{1b}[4m\(plainFirst)\u{1b}[24m  \r\n  \u{1b}[4m\(plainSecond)\u{1b}[24m  \r\n  \u{1b}[4m\(plainThird)\u{1b}[24m".utf8)
+        plainWrapped.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, plainWrapped.count) }
+        var plainBuffer = [UInt8](repeating: 0, count: Int(urlCols) * 3 + 64)
+        let plainHitLength = mostty_tab_url_at(linkTab, 10, 0, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(plainHitLength), as: UTF8.self) == plainURL,
+               "hovering a padded plain URL finds its complete target")
+        let middleHitLength = mostty_tab_url_at(linkTab, 10, 1, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(middleHitLength), as: UTF8.self) == plainURL,
+               "hovering a middle URL row finds its complete target")
+        let lastHitLength = mostty_tab_url_at(linkTab, 3, 2, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(lastHitLength), as: UTF8.self) == plainURL,
+               "hovering the last URL row finds its complete target")
+        mostty_tab_set_selection(linkTab, true, 0, 0, UInt32(plainThird.count + 2), 2)
+        let plainURLLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(plainURLLength), as: UTF8.self) == plainURL,
+               "copying a padded plain URL joins full-width TUI lines")
+        mostty_tab_set_selection(linkTab, true, 2, 0, UInt32(plainThird.count + 1), 2)
+        let exactLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(exactLength), as: UTF8.self) == plainURL,
+               "copying only the URL glyphs joins underlined TUI lines")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let unstyledWrapped = Array("\u{1b}[2J\u{1b}[H  \(plainFirst)  \r\n  \(plainSecond)  \r\n  \(plainThird)".utf8)
+        unstyledWrapped.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, unstyledWrapped.count) }
+        mostty_tab_set_selection(linkTab, true, 2, 0, UInt32(plainThird.count + 1), 2)
+        let unstyledLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(unstyledLength), as: UTF8.self) == plainURL,
+               "copying a long unstyled TUI URL joins its selected lines")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let twoLineURL = plainFirst + plainThird
+        let twoLine = Array("\u{1b}[2J\u{1b}[H  \(plainFirst)  \r\n  \(plainThird)".utf8)
+        twoLine.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, twoLine.count) }
+        mostty_tab_set_selection(linkTab, true, 2, 0, UInt32(plainThird.count + 1), 1)
+        let twoLineLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(twoLineLength), as: UTF8.self) == twoLineURL,
+               "copying a two-line unstyled URL matches the hover target")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let shortFirst = plainPrefix + String(repeating: "a", count: Int(urlCols) - plainPrefix.count - 12)
+        let prefixedURL = shortFirst + plainSecond + plainThird
+        let prefixed = Array("\u{1b}[2J\u{1b}[HCommit:   \(shortFirst)  \r\n  \(plainSecond)  \r\n  \(plainThird)".utf8)
+        prefixed.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, prefixed.count) }
+        mostty_tab_set_selection(linkTab, true, 10, 0, UInt32(plainThird.count + 1), 2)
+        let prefixedLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(prefixedLength), as: UTF8.self) == prefixedURL,
+               "copying an unstyled URL after a prefix accepts unequal fragment lengths")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let deepFirst = plainPrefix + String(repeating: "a", count: max(1, Int(urlCols) - plainPrefix.count - 14))
+        let deepURL = deepFirst + plainThird
+        let deep = Array("\u{1b}[2J\u{1b}[H            \(deepFirst)  \r\n            \(plainThird)".utf8)
+        deep.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, deep.count) }
+        let deepHit = mostty_tab_url_at(linkTab, 13, 1, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(deepHit), as: UTF8.self) == deepURL,
+               "unstyled URL hover crosses twelve-cell margins")
+        mostty_tab_set_selection(linkTab, true, 12, 0, UInt32(plainThird.count + 11), 1)
+        let deepLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(deepLength), as: UTF8.self) == deepURL,
+               "copying a deeply indented unstyled URL matches the hover target")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let fullFirst = plainPrefix + String(repeating: "a", count: Int(urlCols) - plainPrefix.count)
+        let asymmetricURL = fullFirst + "bcdef"
+        let asymmetric = Array("\u{1b}[2J\u{1b}[H\u{1b}[4m\(fullFirst)\u{1b}[24m\r\n      \u{1b}[4mbcdef\u{1b}[24m".utf8)
+        asymmetric.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, asymmetric.count) }
+        let asymmetricFirst = mostty_tab_url_at(linkTab, 10, 0, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(asymmetricFirst), as: UTF8.self) == asymmetricURL,
+               "full-width URL row crosses an indented continuation")
+        let asymmetricLast = mostty_tab_url_at(linkTab, 8, 1, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(asymmetricLast), as: UTF8.self) == asymmetricURL,
+               "indented continuation crosses back to a full-width URL row")
+        let trailingFirst = plainPrefix + String(repeating: "a", count: Int(urlCols) - plainPrefix.count - 6)
+        let trailingURL = trailingFirst + "bcdef"
+        let trailing = Array("\u{1b}[2J\u{1b}[H\u{1b}[4m\(trailingFirst)\u{1b}[24m      \r\n\u{1b}[4mbcdef\u{1b}[24m".utf8)
+        trailing.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, trailing.count) }
+        let trailingFirstHit = mostty_tab_url_at(linkTab, 10, 0, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(trailingFirstHit), as: UTF8.self) == trailingURL,
+               "URL row with trailing padding crosses a zero-indent continuation")
+        let trailingLastHit = mostty_tab_url_at(linkTab, 2, 1, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(trailingLastHit), as: UTF8.self) == trailingURL,
+               "zero-indent continuation crosses back over trailing padding")
+        let unstyledIndented = Array("\u{1b}[2J\u{1b}[H\(trailingFirst)      \r\n      bcdef".utf8)
+        unstyledIndented.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, unstyledIndented.count) }
+        let unstyledFirstHit = mostty_tab_url_at(linkTab, 10, 0, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(unstyledFirstHit), as: UTF8.self) == trailingURL,
+               "unstyled URL hover crosses six-cell TUI margins")
+        let unstyledLastHit = mostty_tab_url_at(linkTab, 8, 1, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(unstyledLastHit), as: UTF8.self) == trailingURL,
+               "unstyled URL continuation crosses back over six-cell margins")
+        let narrowURL = "https://e.test/abcdef"
+        let narrow = Array("\u{1b}[2J\u{1b}[H  \u{1b}[4mhttps://e.test/abc\u{1b}[24m  \r\n  \u{1b}[4mdef\u{1b}[24m".utf8)
+        narrow.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, narrow.count) }
+        mostty_tab_set_selection(linkTab, true, 2, 0, 4, 1)
+        let narrowLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(narrowLength), as: UTF8.self) == narrowURL,
+               "copying an underlined URL in a narrow TUI region joins its lines")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let adjacentLines = Array("\u{1b}[2J\u{1b}[H  \u{1b}[4m\(plainFirst)\u{1b}[24m  \r\ndeploy_script".utf8)
+        adjacentLines.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, adjacentLines.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 12, 1)
+        let adjacentLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(adjacentLength), as: UTF8.self).contains("\n"),
+               "copying an adjacent identifier keeps the hard newline")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let twoURLs = Array("\u{1b}[2J\u{1b}[H\u{1b}[4m\(fullFirst)\u{1b}[24m\r\n\u{1b}[4mhttps://other.test\u{1b}[24m".utf8)
+        twoURLs.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, twoURLs.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 17, 1)
+        let twoURLLength = mostty_tab_selection_text(linkTab, &plainBuffer, plainBuffer.count)
+        expect(String(decoding: plainBuffer.prefix(twoURLLength), as: UTF8.self).contains("\n"),
+               "copying adjacent independent URLs keeps the hard newline")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
+        let plainLines = Array("\u{1b}[2J\u{1b}[Hplain\r\ntext".utf8)
+        plainLines.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, plainLines.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 3, 1)
+        let plainLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(plainLength), as: UTF8.self) == "plain\ntext",
+               "copying ordinary multiline text retains its newline")
+        let shortURLLines = Array("\u{1b}[2J\u{1b}[Hhttps://e.test/a\r\nb".utf8)
+        shortURLLines.withUnsafeBufferPointer { mostty_tab_feed(linkTab, $0.baseAddress, shortURLLines.count) }
+        mostty_tab_set_selection(linkTab, true, 0, 0, 0, 1)
+        let shortURLLength = mostty_tab_selection_text(linkTab, &linkBuffer, linkBuffer.count)
+        expect(String(decoding: linkBuffer.prefix(shortURLLength), as: UTF8.self) == "https://e.test/a\nb",
+               "copying a short URL and the next line preserves the hard newline")
+        mostty_tab_set_selection(linkTab, false, 0, 0, 0, 0)
         let previousScroll = mostty_tab_scrollbar(panes[1].view.testSession!)
         let wheel = PaneScrollEvent()
         wheel.point = selected.view.convert(NSPoint(x: 20, y: 20), to: nil)

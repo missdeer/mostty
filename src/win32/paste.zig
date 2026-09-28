@@ -9,7 +9,7 @@ const Window = state.Window;
 
 const paste_core = @import("../terminal/paste.zig");
 
-pub fn copyToClipboard(hwnd: win32.HWND, utf8: [:0]const u8) void {
+pub fn copyToClipboard(hwnd: win32.HWND, utf8: []const u8) void {
     if (win32.OpenClipboard(hwnd) == 0) {
         std.log.err("copy: OpenClipboard failed, error={f}", .{win32.GetLastError()});
         return;

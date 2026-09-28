@@ -51,7 +51,12 @@ const VisualCell = struct {
     shape_candidate: bool,
 };
 
-const HighlightRange = struct { sx: u32, ex: u32 };
+const HighlightRange = struct {
+    sx: u32,
+    ex: u32,
+    row: u16,
+    hit: ?*const @import("../../terminal/url_hover.zig").Hit,
+};
 const SelRange = struct { sx: usize, ex: usize };
 
 pub const BuildResult = struct {
@@ -179,7 +184,7 @@ pub fn buildAndUpload(
             if (screen_row < u.start_row or screen_row > u.end_row) break :blk_u null;
             const sx: u32 = if (screen_row == u.start_row) u.start_col else 0;
             const ex: u32 = if (screen_row == u.end_row) u.end_col else (shader_col - 1);
-            break :blk_u HighlightRange{ .sx = sx, .ex = ex };
+            break :blk_u HighlightRange{ .sx = sx, .ex = ex, .row = @intCast(screen_row), .hit = u.hit };
         } else null;
 
         // Per-row x-range of the selection. `null` when the row is outside
@@ -420,7 +425,8 @@ fn visualFromCell(
     if (invisible) attrs |= gpu.cell_attr_invisible;
 
     if (url_row_range) |r| {
-        if (col >= r.sx and col <= r.ex and (attrs & gpu.cell_attr_underline_mask) == 0) {
+        const inside = if (r.hit) |hit| hit.contains(r.row, @intCast(col), @intCast(r.ex)) else col >= r.sx and col <= r.ex;
+        if (inside and (attrs & gpu.cell_attr_underline_mask) == 0) {
             attrs |= 1;
         }
     }
