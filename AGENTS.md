@@ -63,8 +63,8 @@ When migrating an existing test written in another language, preserve its covera
 
 ## Build Command for Developer
 
-- For the Windows build, use `cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir D:\zig-cache"`.
-- Use `D:\zig-cache` as the build cache.
+- For the Windows build, use `cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir .\.zig-cache"`.
+- Use `./.zig-cache` as the build cache.
 - Invoke non-build commands directly.
 
 # Architecture
