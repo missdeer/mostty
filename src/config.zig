@@ -139,7 +139,9 @@ pub const ThemeColors = struct {
         term.colors.foreground = .init(u24ToRgb(self.foreground));
         term.colors.background = .init(u24ToRgb(self.background));
         if (self.cursor_color) |c| term.colors.cursor = .init(u24ToRgb(c));
-        term.colors.palette = .init(self.palette);
+        term.colors.palette.changeDefault(term.gpa(), self.palette) catch |err| {
+            std.log.warn("theme palette: {t}; keeping previous palette", .{err});
+        };
     }
 
     // Re-baseline an existing terminal's colors on hot-reload, preserving any
@@ -148,7 +150,9 @@ pub const ThemeColors = struct {
         rebaseDynamicRGB(&term.colors.foreground, u24ToRgb(self.foreground));
         rebaseDynamicRGB(&term.colors.background, u24ToRgb(self.background));
         rebaseDynamicRGB(&term.colors.cursor, if (self.cursor_color) |c| u24ToRgb(c) else null);
-        term.colors.palette.changeDefault(self.palette);
+        term.colors.palette.changeDefault(term.gpa(), self.palette) catch |err| {
+            std.log.warn("theme palette reload: {t}; keeping previous palette", .{err});
+        };
     }
 };
 
@@ -1424,6 +1428,31 @@ test "resolveThemeName picks variant by mode, leaves plain paths alone" {
     // Only one variant given: fall back to it.
     try std.testing.expectEqualStrings("OnlyLight", resolveThemeName("light:OnlyLight", true));
     try std.testing.expectEqualStrings("OnlyDark", resolveThemeName("dark:OnlyDark", false));
+}
+
+test "theme palette is terminal-owned and reload preserves OSC overrides" {
+    const alloc = std.testing.allocator;
+    var term = try vt.Terminal.init(std.testing.io, alloc, .{ .cols = 4, .rows = 2 });
+    defer term.deinit(alloc);
+
+    var theme: ThemeColors = .{};
+    theme.palette[1] = u24ToRgb(0x112233);
+    theme.applyToNewTerminal(&term);
+    // Reapplying a fresh theme must reuse the owning palette without leaking it.
+    theme.applyToNewTerminal(&term);
+    theme.palette[1] = u24ToRgb(0x445566);
+    try std.testing.expectEqual(u24ToRgb(0x112233), term.colors.palette.current[1]);
+    try std.testing.expectEqual(u24ToRgb(0x112233), term.colors.palette.original[1]);
+
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]4;2;#abcdef\x07");
+    theme.rebaseTerminal(&term);
+    try std.testing.expectEqual(theme.palette[1], term.colors.palette.current[1]);
+    try std.testing.expectEqual(u24ToRgb(0xabcdef), term.colors.palette.current[2]);
+    // OSC reset must now restore the reloaded theme, including the overridden slot.
+    stream.nextSlice("\x1b]104\x07");
+    try std.testing.expectEqualSlices(vt.color.RGB, &theme.palette, &term.colors.palette.current);
 }
 
 test "parse reads color keys into theme" {

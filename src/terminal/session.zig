@@ -6,12 +6,47 @@ const InlineImages = @import("inline_images.zig");
 
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
 
+const SessionStream = vt.Stream(StreamHandler);
+const Terminal = vt.Terminal;
+const VtHandler = vt.TerminalStream.Handler;
+const StreamAction = vt.StreamAction;
+
+const StreamHandler = struct {
+    terminal: *Terminal,
+    inner: VtHandler,
+
+    pub fn deinit(self: *StreamHandler) void {
+        self.inner.deinit();
+    }
+
+    pub fn vt(self: *StreamHandler, comptime action: StreamAction.Tag, value: StreamAction.Value(action)) void {
+        if (action == .erase_display_scrollback) {
+            // ED3 relocates erased history pins without marking them garbage.
+            // Retire image anchors first so they cannot reappear at the top.
+            const screen = self.terminal.screens.active;
+            var changed = false;
+            var placements = screen.kitty_images.placements.valueIterator();
+            while (placements.next()) |placement| {
+                const pin = switch (placement.location) {
+                    .pin => |pin| pin,
+                    .virtual, .relative => continue,
+                };
+                if (pin.garbage or screen.pages.pointFromPin(.active, pin.*) != null) continue;
+                pin.garbage = true;
+                changed = true;
+            }
+            if (changed) screen.kitty_images.markMutated(self.terminal.io());
+        }
+        self.inner.vt(action, value);
+    }
+};
+
 pub const SizeResponse = effectReturnType("size");
 
 pub const Hooks = struct {
     context: *anyopaque,
     title_changed: ?*const fn (*anyopaque, *vt.Terminal) void = null,
-    write_pty: ?*const fn (*anyopaque, [:0]const u8) void = null,
+    write_pty: ?*const fn (*anyopaque, []const u8) void = null,
     size: ?*const fn (*anyopaque, *vt.Terminal) SizeResponse = null,
 };
 
@@ -28,7 +63,7 @@ pub const Options = struct {
 terminal_allocator: std.mem.Allocator,
 terminal_arena: std.heap.ArenaAllocator,
 term: *vt.Terminal,
-stream: vt.TerminalStream,
+stream: SessionStream,
 hooks: Hooks,
 images: InlineImages,
 
@@ -61,7 +96,7 @@ pub fn init(self: *Session, options: Options) !void {
 
     self.stream = .init(.{
         .allocator = options.stream_allocator,
-        .handler = handler,
+        .handler = .{ .terminal = self.term, .inner = handler },
     });
 }
 
@@ -111,7 +146,8 @@ fn terminalInitOptions(cols: u16, rows: u16) vt.Terminal.Options {
 }
 
 fn sessionFromEffectHandler(handler: *vt.TerminalStream.Handler) *Session {
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", handler);
+    const wrapper: *StreamHandler = @fieldParentPtr("inner", handler);
+    const stream: *SessionStream = @fieldParentPtr("handler", wrapper);
     return @fieldParentPtr("stream", stream);
 }
 
@@ -121,7 +157,7 @@ fn onTitleChanged(handler: *vt.TerminalStream.Handler) void {
     callback(self.hooks.context, self.term);
 }
 
-fn onWritePty(handler: *vt.TerminalStream.Handler, data: [:0]const u8) void {
+fn onWritePty(handler: *vt.TerminalStream.Handler, data: []const u8) void {
     const self = sessionFromEffectHandler(handler);
     const callback = self.hooks.write_pty orelse return;
     callback(self.hooks.context, data);
@@ -159,7 +195,7 @@ test "session owns VT state and routes terminal effects" {
         title: [64]u8 = undefined,
         title_len: usize = 0,
 
-        fn writePty(context: *anyopaque, data: [:0]const u8) void {
+        fn writePty(context: *anyopaque, data: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.response_len = @min(data.len, self.response.len);
             @memcpy(self.response[0..self.response_len], data[0..self.response_len]);
@@ -343,11 +379,43 @@ test "Sixel survives every chunk boundary and advances below its anchored image"
     }
 }
 
+test "fragmented ED3 retires history images and preserves active image anchors" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 10, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.syncPixelSize(8, 6);
+    const image = "\x1bPq#1;2;100;0;0~\x1b\\";
+    session.feed(image);
+    const screen = session.term.screens.active;
+    var placements = screen.kitty_images.placements.valueIterator();
+    const history_pin = placements.next().?.location.pin;
+    for (0..session.term.rows + 1) |_| session.feed("\r\n");
+    try std.testing.expect(screen.pages.pointFromPin(.active, history_pin.*) == null);
+    session.feed(image);
+    placements = screen.kitty_images.placements.valueIterator();
+    var active_pin: ?*vt.Pin = null;
+    while (placements.next()) |placement| {
+        if (placement.location.pin != history_pin) active_pin = placement.location.pin;
+    }
+    try std.testing.expect(active_pin != null);
+    screen.kitty_images.dirty = false;
+    const generation = screen.kitty_images.generation;
+    for ("\x1b[3J") |byte| session.feed(&.{byte});
+    // Removed history must never be rendered at a relocated pin's new position.
+    try std.testing.expect(history_pin.garbage);
+    try std.testing.expect(!active_pin.?.garbage);
+    try std.testing.expect(screen.pages.pointFromPin(.active, active_pin.?.*) != null);
+    // Windows also needs a mutation signal to repaint the disappearing image.
+    try std.testing.expect(screen.kitty_images.dirty);
+    try std.testing.expect(screen.kitty_images.generation != generation);
+}
+
 test "image disable suppresses all protocols and Sixel capability, including alternate screens" {
     const Capture = struct {
         response: [64]u8 = undefined,
         len: usize = 0,
-        fn write(context: *anyopaque, bytes: [:0]const u8) void {
+        fn write(context: *anyopaque, bytes: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.len = bytes.len;
             @memcpy(self.response[0..bytes.len], bytes);

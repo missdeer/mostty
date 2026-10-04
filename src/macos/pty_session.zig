@@ -233,7 +233,7 @@ fn onTitleChanged(context: *anyopaque, _: *vt.Terminal) void {
     callback(hooks.context, &self.terminal);
 }
 
-fn onWritePty(context: *anyopaque, bytes: [:0]const u8) void {
+fn onWritePty(context: *anyopaque, bytes: []const u8) void {
     const self: *PtySession = @ptrCast(@alignCast(context));
     self.write(bytes) catch {
         self.write_failed = true;

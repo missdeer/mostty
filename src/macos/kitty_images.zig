@@ -71,6 +71,8 @@ pub fn sync(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal
         const p = entry.value_ptr;
         const pin = switch (p.location) {
             .pin => |pin| pin,
+            // Relative placements require a parent-chain renderer path.
+            .relative => continue,
             .virtual => {
                 virtual = true;
                 continue;

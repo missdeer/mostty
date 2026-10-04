@@ -10,8 +10,8 @@
             .lazy = true,
         },
         .ghostty = .{
-            .url = "git+https://github.com/ghostty-org/ghostty#ec58fbc6a2da89f6d17381d56ef316f29dbf789b",
-            .hash = "ghostty-1.3.2-dev-5UdBCygNPQW5SGmaRu3_276Q9ETcqcts2wVjiUet3jbN",
+            .url = "git+https://github.com/ghostty-org/ghostty#5dc28bb8eebaf57a6c793a406bfea8c632d4fa94",
+            .hash = "ghostty-1.3.2-dev-5UdBC1TZeAVqaxNT2HwRRz7Zvl2JywwJ-XYOAa5yKQ7j",
         },
         // Pure-Zig 2D vector graphics; backs ghostty's sprite Canvas. We vendor
         // the sprite-drawing source under src/vendor/ghostty-sprite and need

@@ -45,7 +45,7 @@ fn onTitleChanged(context: *anyopaque, term: *vt.Terminal) void {
 // stdin. Reached only via TerminalSession.feed on the UI thread; replies
 // are small (a few bytes) and go through the same path as user keystrokes
 // (see writeToActivePty), so synchronous writeAll is fine in practice.
-fn onWritePty(context: *anyopaque, data: [:0]const u8) void {
+fn onWritePty(context: *anyopaque, data: []const u8) void {
     const tab: *Tab = @ptrCast(@alignCast(context));
     if (tab.closing) return;
     const pty = tab.child_process.pty orelse return;
@@ -465,7 +465,7 @@ test "upstream stream handles Kitty graphics APC and emits ACK" {
 
     const S = struct {
         var written: ?[]const u8 = null;
-        fn writePty(_: *vt.TerminalStream.Handler, data: [:0]const u8) void {
+        fn writePty(_: *vt.TerminalStream.Handler, data: []const u8) void {
             if (written) |old| std.testing.allocator.free(old);
             written = std.testing.allocator.dupe(u8, data) catch @panic("OOM");
         }
@@ -494,7 +494,7 @@ test "upstream stream creates Kitty transmit-and-display placement" {
 
     const S = struct {
         var written: ?[]const u8 = null;
-        fn writePty(_: *vt.TerminalStream.Handler, data: [:0]const u8) void {
+        fn writePty(_: *vt.TerminalStream.Handler, data: []const u8) void {
             if (written) |old| std.testing.allocator.free(old);
             written = std.testing.allocator.dupe(u8, data) catch @panic("OOM");
         }

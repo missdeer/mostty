@@ -26,7 +26,7 @@ const Fixture = struct {
         self.session.deinit();
     }
 
-    fn write(context: *anyopaque, data: [:0]const u8) void {
+    fn write(context: *anyopaque, data: []const u8) void {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.response_len = @min(data.len, self.response.len);
         @memcpy(self.response[0..self.response_len], data[0..self.response_len]);

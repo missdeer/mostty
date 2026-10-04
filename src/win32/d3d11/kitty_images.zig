@@ -123,6 +123,8 @@ pub fn Cache(comptime Image: type) type {
                 const placement = kv.value_ptr;
                 switch (placement.location) {
                     .pin => {},
+                    // Relative placements require a parent-chain renderer path.
+                    .relative => continue,
                     .virtual => {
                         virtual_seen = true;
                         continue;

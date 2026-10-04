@@ -23,7 +23,7 @@ pub fn deinit(self: *InlineImages) void {
     self.transfer.deinit(self.allocator);
 }
 
-pub fn feed(self: *InlineImages, stream: *vt.TerminalStream, bytes: []const u8) void {
+pub fn feed(self: *InlineImages, stream: anytype, bytes: []const u8) void {
     var i: usize = 0;
     while (i < bytes.len) {
         if (self.state == .normal and stream.parser.state != .escape) {
@@ -38,7 +38,7 @@ pub fn feed(self: *InlineImages, stream: *vt.TerminalStream, bytes: []const u8) 
     }
 }
 
-fn next(self: *InlineImages, stream: *vt.TerminalStream, ch: u8) void {
+fn next(self: *InlineImages, stream: anytype, ch: u8) void {
     switch (self.state) {
         .normal => {
             if (stream.parser.state == .escape and (ch == 'P' or ch == ']')) {
@@ -127,7 +127,7 @@ fn next(self: *InlineImages, stream: *vt.TerminalStream, ch: u8) void {
     }
 }
 
-fn forwardPrefix(self: *InlineImages, stream: *vt.TerminalStream, ch: u8) void {
+fn forwardPrefix(self: *InlineImages, stream: anytype, ch: u8) void {
     stream.nextSlice(self.prefix[0..self.prefix_len]);
     stream.nextSlice(&.{ch});
     self.state = .normal;
