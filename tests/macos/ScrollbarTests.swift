@@ -13,12 +13,16 @@ private final class ScrollWheelEvent: NSEvent {
 @main
 struct ScrollbarTests {
     static func main() {
+        exit(run())
+    }
+
+    private static func run() -> Int32 {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.regular)
         NSApp.finishLaunching()
         guard CGPreflightPostEventAccess() else {
             print("blocked: native scrollbar tracking requires pointer injection permission")
-            exit(77)
+            return 77
         }
         let originalMouse = CGEvent(source: nil)?.location
         defer {
@@ -155,6 +159,6 @@ struct ScrollbarTests {
         refresh(20, 0, 20)
         expect(!scroller.isEnabled && scroller.knobProportion == 1,
                "switching to a screen without history disables the existing control")
-        if failures > 0 { exit(1) }
+        return failures > 0 ? 1 : 0
     }
 }
