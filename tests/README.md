@@ -17,7 +17,7 @@ skipped counts (for example the macOS-only config-path test on other hosts).
 | Pane configuration reload | `zig build test-macos-pane-config` | Same; temporarily changes and restores user config |
 | Clipboard | `bash tests/macos/clipboard.sh` | macOS desktop; restores clipboard |
 | Interactions | `bash tests/macos/interactions.sh` | macOS desktop + pointer injection permission |
-| Scrollbar | `bash tests/macos/scrollbar.sh` | macOS desktop + Metal |
+| Scrollbar | `bash tests/macos/scrollbar.sh` | macOS desktop + Metal + existing pointer injection permission; exercises native tracking with real system events |
 | Shader scalar contracts | `pwsh -File tools/shader-contract-tests.ps1` | Windows inventory; also runnable with PowerShell on Linux; offline math, not GPU execution |
 | Acceptance summary contract | `pwsh -File tools/pane-matrix-summary-test.ps1` | Windows inventory; requires jq; also runnable on Linux |
 | Vulkan report/recovery contract | `pwsh -File tools/vulkan-acceptance.ps1 self-test` | Windows inventory |

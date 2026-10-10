@@ -34,11 +34,13 @@ if tmp/ci-macos/preflight; then
     run_suite panes zig build test-macos-panes --global-cache-dir .zig-cache --summary all
     run_suite pane-config zig build test-macos-pane-config --global-cache-dir .zig-cache --summary all
     run_suite clipboard bash tests/macos/clipboard.sh
-    run_suite scrollbar bash tests/macos/scrollbar.sh
     if tmp/ci-macos/preflight pointer; then
+        run_suite scrollbar bash tests/macos/scrollbar.sh
         run_suite interactions bash tests/macos/interactions.sh
     else
+        printf 'scrollbar\tblocked\tpointer permission unavailable\n' >> "$summary"
         printf 'interactions\tblocked\tpointer permission unavailable\n' >> "$summary"
+        run_suite scrollbar-compile bash tests/macos/scrollbar.sh --compile-only
         run_suite interactions-compile bash tests/macos/interactions.sh --compile-only
     fi
 else
