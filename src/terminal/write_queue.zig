@@ -141,3 +141,22 @@ test "stopping a backpressured queue cancels it and rejects later input" {
     queue.stop();
     try std.testing.expectError(error.SessionClosed, queue.enqueue("late input"));
 }
+
+test "allocation rejection is recoverable but transport failure remains latched" {
+    const Sink = struct {
+        fn write(_: *anyopaque, _: []const u8, _: *const std.atomic.Value(bool)) !usize {
+            return error.BrokenPipe;
+        }
+    };
+    var context: u8 = 0;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var queue: Queue = .{ .allocator = failing.allocator(), .io = std.testing.io, .context = &context, .write = Sink.write };
+    defer queue.deinit();
+    try std.testing.expectError(error.OutOfMemory, queue.enqueue("temporarily rejected"));
+    try std.testing.expect(!queue.failed.load(.acquire));
+    failing.fail_index = std.math.maxInt(usize);
+    try queue.enqueue("accepted after allocation recovery");
+    try queue.start();
+    while (!queue.failed.load(.acquire)) std.Thread.yield() catch {};
+    try std.testing.expectError(error.PtyWriteFailed, queue.enqueue("after broken pipe"));
+}
