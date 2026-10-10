@@ -5,6 +5,7 @@ const std = @import("std");
 const vt = @import("vt");
 const Config = @import("../config.zig");
 const TerminalSession = @import("../terminal/session.zig");
+const WriteQueue = @import("../terminal/write_queue.zig");
 
 const c = std.c;
 const posix = std.posix;
@@ -60,6 +61,7 @@ master_fd: c.fd_t,
 child_pid: ?c.pid_t,
 hooks: ?Hooks,
 write_failed: bool,
+writer: WriteQueue,
 
 pub fn init(self: *PtySession, options: Options) !void {
     if (options.cols == 0 or options.rows == 0) return error.InvalidSize;
@@ -71,6 +73,7 @@ pub fn init(self: *PtySession, options: Options) !void {
         .child_pid = null,
         .hooks = options.hooks,
         .write_failed = false,
+        .writer = .{ .allocator = std.heap.page_allocator, .io = options.io, .context = self, .write = writeTransport },
     };
     try self.terminal.init(.{
         .io = options.io,
@@ -134,9 +137,21 @@ pub fn init(self: *PtySession, options: Options) !void {
 
     self.master_fd = master_fd;
     self.child_pid = pid;
+    errdefer {
+        self.closeMaster();
+        posix.kill(pid, .KILL) catch {};
+        _ = waitPid(pid) catch {};
+    }
+    const fd_flags = c.fcntl(master_fd, c.F.GETFD);
+    if (fd_flags < 0 or c.fcntl(master_fd, c.F.SETFD, fd_flags | c.FD_CLOEXEC) < 0) return error.PtyFlagsFailed;
+    const flags = c.fcntl(master_fd, c.F.GETFL);
+    const nonblock: c.O = .{ .NONBLOCK = true };
+    if (flags < 0 or c.fcntl(master_fd, c.F.SETFL, flags | @as(c_int, @bitCast(nonblock))) < 0) return error.PtyFlagsFailed;
+    try self.writer.start();
 }
 
 pub fn deinit(self: *PtySession) void {
+    self.writer.deinit();
     self.closeMaster();
     if (self.child_pid) |pid| {
         posix.kill(pid, .HUP) catch {};
@@ -152,22 +167,38 @@ pub fn write(self: *PtySession, bytes: []const u8) !void {
     if (self.master_fd < 0) return error.SessionClosed;
     if (self.write_failed) return error.PtyWriteFailed;
 
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const written = c.write(self.master_fd, bytes[offset..].ptr, bytes.len - offset);
+    try self.writer.enqueue(bytes);
+}
+
+fn writeTransport(context: *anyopaque, bytes: []const u8, stopped: *const std.atomic.Value(bool)) !usize {
+    const self: *PtySession = @ptrCast(@alignCast(context));
+    while (!stopped.load(.acquire)) {
+        const written = c.write(self.master_fd, bytes.ptr, bytes.len);
         switch (posix.errno(written)) {
-            .SUCCESS => offset += @intCast(written),
+            .SUCCESS => return @intCast(written),
             .INTR => continue,
+            .AGAIN => {
+                var fds = [_]posix.pollfd{.{ .fd = self.master_fd, .events = posix.POLL.OUT, .revents = 0 }};
+                _ = try posix.poll(&fds, 50);
+            },
             else => return error.PtyWriteFailed,
         }
     }
+    return error.Canceled;
 }
 
 pub fn read(self: *PtySession, buffer: []u8) !usize {
     if (self.master_fd < 0) return error.SessionClosed;
-    const count = posix.read(self.master_fd, buffer) catch |err| switch (err) {
-        error.InputOutput => return 0,
-        else => return err,
+    const count = while (true) {
+        break posix.read(self.master_fd, buffer) catch |err| switch (err) {
+            error.WouldBlock => {
+                var fds = [_]posix.pollfd{.{ .fd = self.master_fd, .events = posix.POLL.IN, .revents = 0 }};
+                _ = try posix.poll(&fds, 50);
+                continue;
+            },
+            error.InputOutput => return 0,
+            else => return err,
+        };
     };
     if (count != 0) self.terminal.feed(buffer[0..count]);
     return count;
@@ -420,6 +451,10 @@ test "macOS PTY starts a shell and exchanges data through the VT session" {
     });
     defer session.deinit();
 
+    try std.testing.expect(c.fcntl(session.master_fd, c.F.GETFD) & c.FD_CLOEXEC != 0);
+    const nonblock: c.O = .{ .NONBLOCK = true };
+    try std.testing.expect(c.fcntl(session.master_fd, c.F.GETFL) & @as(c_int, @bitCast(nonblock)) != 0);
+
     try session.write("round-trip\n");
     try drainToEof(&session);
     const exit = try session.wait();
@@ -429,6 +464,18 @@ test "macOS PTY starts a shell and exchanges data through the VT session" {
     const contents = try session.terminal.term.plainString(std.testing.allocator);
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "seen:round-trip") != null);
+}
+
+test "macOS backpressure does not block enqueue or session teardown" {
+    var session: PtySession = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .shell = "/bin/sh", .command = "sleep 30" });
+    defer session.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    try session.write(bytes);
+    // No reader consumes the megabyte; resizing and teardown must still run.
+    try session.resize(81, 25);
 }
 
 test "macOS PTY resize reaches both the child and VT grid" {

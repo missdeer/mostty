@@ -1048,7 +1048,7 @@ fn prepareFrame(
     if (!self.healthy()) return null;
     const tex_cell_count = atlas.tex_cell_count;
 
-    var sb_geom: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    var sb_geom: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = @floatFromInt(grid_w), .y = 0, .w = 0, .h = 0 };
     {
         const sb = term.screens.active.pages.scrollbar();
         const show = sb.total > sb.len and

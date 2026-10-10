@@ -286,7 +286,9 @@ fn createTexture(device: objc.Object, width: u32, height: u32, usage: c_ulong) !
     descriptor.setProperty("width", @as(c_ulong, width));
     descriptor.setProperty("height", @as(c_ulong, height));
     descriptor.setProperty("usage", usage);
-    descriptor.setProperty("resourceOptions", @as(c_ulong, 0));
+    // Keep Metal's platform default (managed on Intel, shared on Apple GPUs).
+    // Render targets are GPU-only; acceptance readback already uses a blit.
+    if (usage & 4 != 0) descriptor.setProperty("storageMode", @as(c_ulong, 2));
     const texture_id = device.msgSend(
         ?*anyopaque,
         objc.sel("newTextureWithDescriptor:"),
@@ -298,4 +300,16 @@ fn createTexture(device: objc.Object, width: u32, height: u32, usage: c_ulong) !
 fn stdMathMul(a: usize, b: usize, c: usize) !usize {
     const ab = @import("std").math.mul(usize, a, b) catch return error.InvalidDrawableSize;
     return @import("std").math.mul(usize, ab, c) catch return error.InvalidDrawableSize;
+}
+
+test "Metal creates upload and render textures, draws, and resizes" {
+    const std = @import("std");
+    var backend = try init();
+    defer backend.deinit();
+    try backend.resize(2, 2);
+    try backend.render(&([_]u8{ 255, 255, 255, 255 } ** 4));
+    try std.testing.expect(backend.texture() != null);
+    try std.testing.expectEqual(@as(c_ulong, 2), backend.target.?.getProperty(c_ulong, "storageMode"));
+    try backend.resize(1, 1);
+    try backend.render(&.{ 0, 0, 0, 255 });
 }

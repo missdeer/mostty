@@ -61,6 +61,10 @@ pub const Cell = struct {
     codepoint: u21,
     grapheme: []const u21,
     style: Style,
+
+    pub fn contains(self: Cell, col: u16, row: u16) bool {
+        return self.row == row and col >= self.col and @as(u32, col) < @as(u32, self.col) + self.width;
+    }
 };
 
 /// Inclusive linear selection over viewport coordinates. Endpoints arrive in
@@ -169,8 +173,9 @@ pub fn build(
     const grid = metrics.gridSize(pixel_width, pixel_height);
     const cols = @min(grid.cols, @as(u32, @intCast(term.cols)));
     const rows = @min(grid.rows, @as(u32, @intCast(term.rows)));
-    const foreground = if (term.colors.foreground.get()) |color| fromRgb(color) else DEFAULT_FOREGROUND;
+    var foreground = if (term.colors.foreground.get()) |color| fromRgb(color) else DEFAULT_FOREGROUND;
     var background = if (term.colors.background.get()) |color| fromRgb(color) else DEFAULT_BACKGROUND;
+    if (term.modes.get(.reverse_colors)) std.mem.swap(Rgba, &foreground, &background);
     background.a = options.background_alpha;
     const selection: SelectionPaint = .{
         .range = if (options.selection) |range| range.normalized() else null,
@@ -335,6 +340,9 @@ test "grid model preserves ordinary, wide, and styled VT cells" {
             found_wide = true;
             try std.testing.expectEqual(@as(u8, 2), cell.width);
             try std.testing.expectEqual(@as(u16, 1), cell.col);
+            try std.testing.expect(cell.contains(1, 0));
+            try std.testing.expect(cell.contains(2, 0));
+            try std.testing.expect(!cell.contains(3, 0));
         }
         if (cell.codepoint == 'B') {
             found_styled = true;
@@ -347,6 +355,27 @@ test "grid model preserves ordinary, wide, and styled VT cells" {
     }
     try std.testing.expect(found_wide);
     try std.testing.expect(found_styled);
+}
+
+test "reverse screen swaps frame and default cells and restores them" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try testSession(&session, &context, 8, 2);
+    defer session.deinit();
+    const options: Options = .{ .metrics = .{ .cell_width = 9, .cell_height = 18 }, .pixel_width = 72, .pixel_height = 36, .background_alpha = 128 };
+    var normal = try build(std.testing.allocator, session.term, options);
+    defer normal.deinit();
+    session.feed("\x1b[?5h");
+    var reversed = try build(std.testing.allocator, session.term, options);
+    defer reversed.deinit();
+    try std.testing.expectEqual(normal.cells[0].style.foreground.r, reversed.background.r);
+    try std.testing.expectEqual(normal.background.r, reversed.cells[0].style.foreground.r);
+    try std.testing.expectEqual(@as(u8, 128), reversed.background.a);
+    session.feed("\x1b[?5l");
+    var restored = try build(std.testing.allocator, session.term, options);
+    defer restored.deinit();
+    try std.testing.expectEqual(normal.background, restored.background);
+    try std.testing.expectEqual(normal.cells[0].style, restored.cells[0].style);
 }
 
 test "consecutive wide glyphs keep following text at its VT columns" {

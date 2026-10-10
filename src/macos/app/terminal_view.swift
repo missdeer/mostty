@@ -75,6 +75,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     var onFocus: (() -> Void)?
 #if MOSTTY_APP_TESTS
     var testSession: OpaquePointer? { tab }
+    func testUpdateURLHover(at point: NSPoint?) { updateURLHover(at: point) }
 #endif
     var launcher: TerminalLauncher?
     var hasActiveSession: Bool {
@@ -541,8 +542,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         let cell = selecting || mostty_tab_mouse_enabled(t) ? nil : point.flatMap { viewportCell(at: $0) }
         let hit = mostty_tab_hover_url(t, cell != nil, cell?.col ?? 0, cell?.row ?? 0)
         if hit != hoveringURL { dirty = true }
-        if let point = point { cursor(hoveringURL: hit, at: point).set() }
-        else if hoveringURL { NSCursor.arrow.set() }
+        if let point = point, bounds.contains(point) {
+            cursor(hoveringURL: hit, at: point).set()
+        }
         hoveringURL = hit
     }
 

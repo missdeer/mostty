@@ -912,7 +912,7 @@ test "bridge mouse writes negotiated encodings and suppresses disabled and dupli
         tab.pty.terminal.feed(case[0]);
         tab.mouse_last_cell = null;
         mostty_tab_mouse(tab, case[1], case[2], 0, 1, ch + 1);
-        const count = try std.posix.read(pipe[0], &out);
+        const count = try readTestInput(pipe[0], &out);
         try std.testing.expectEqualStrings(case[3], out[0..count]);
     }
     mostty_tab_mouse(tab, 2, 0, 0, 1, ch + 1);
@@ -920,13 +920,19 @@ test "bridge mouse writes negotiated encodings and suppresses disabled and dupli
     tab.pty.terminal.feed("\x1b[?1003h\x1b[?1016h");
     mostty_tab_mouse(tab, 2, 7, mod_alt | mod_ctrl, cw + 1, ch + 1);
     var expected: [64]u8 = undefined;
-    const pixel_report = try std.fmt.bufPrint(&expected, "\x1b[<59;{d};{d}M", .{ cw + 1, ch + 1 });
-    const count = try std.posix.read(pipe[0], &out);
+    const pixel_report = try std.fmt.bufPrint(&expected, "\x1b[<59;{d};{d}M", .{ cw + 2, ch + 2 });
+    const count = try readTestInput(pipe[0], &out);
     try std.testing.expectEqualStrings(pixel_report, out[0..count]);
     tab.pty.terminal.feed("\x1b[?1003l");
     try std.testing.expect(!mostty_tab_mouse_enabled(tab));
     mostty_tab_mouse(tab, 0, 0, 0, 1, 1);
     try std.testing.expectError(error.WouldBlock, std.posix.read(pipe[0], &out));
+}
+
+fn readTestInput(fd: std.c.fd_t, out: []u8) !usize {
+    var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    if (try std.posix.poll(&fds, 2000) == 0) return error.InputTimeout;
+    return std.posix.read(fd, out);
 }
 
 test "vim receives mouse clicks and drags from the macOS bridge" {

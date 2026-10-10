@@ -53,6 +53,9 @@ pub fn onCreate(hwnd: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESU
     }
     tooltip.create(window);
     tab_mgmt.newTab(window);
+    // WM_CREATE failure destroys the native window instead of publishing an
+    // input surface whose mandatory first session never started.
+    if (window.panes.items.len == 0) return -1;
     return 0;
 }
 
@@ -67,6 +70,7 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
             win32.L("Mostty"),
         )) return 0;
         tab_mgmt.destroyAllTabs(window);
+        win32.PostQuitMessage(0);
     } else {
         win32.PostQuitMessage(0);
     }

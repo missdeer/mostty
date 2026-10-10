@@ -477,7 +477,7 @@ fn rasterize(
         // otherwise it falls back to inverse video. Either way it is an explicit
         // highlight, so it stays opaque regardless of window opacity.
         if (cursor) |cur| {
-            if (draw_cell.col == cur.col and draw_cell.row == cur.row) {
+            if (draw_cell.contains(cur.col, cur.row)) {
                 const background = draw_cell.style.background;
                 draw_cell.style.background = cursor_color orelse draw_cell.style.foreground;
                 draw_cell.style.foreground = self.paint.cursor_text orelse background;

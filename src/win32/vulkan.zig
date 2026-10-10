@@ -567,7 +567,7 @@ fn prepareFrame(
     const atlas = glyph_mod.setupGlyphAtlas(self);
     const tex_cell_count = atlas.tex_cell_count;
 
-    var scrollbar: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    var scrollbar: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = @floatFromInt(grid_w), .y = 0, .w = 0, .h = 0 };
     const scroll = term.screens.active.pages.scrollbar();
     const show = scroll.total > scroll.len and (!term.screens.active.viewportIsBottom() or mouse_in_scrollbar);
     if (show) {

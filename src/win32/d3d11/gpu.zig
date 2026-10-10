@@ -310,16 +310,35 @@ pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8) ?DecodedBackgr
         return null;
     }
 
+    return copyBackgroundPixels(gpa, w, h, &converter.?.IWICBitmapSource);
+}
+
+fn copyBackgroundPixels(gpa: std.mem.Allocator, w: u32, h: u32, source: anytype) ?DecodedBackground {
     const stride: u32 = w * 4;
     const size: usize = @as(usize, stride) * h;
     const pixels = gpa.alloc(u8, size) catch return null;
-    errdefer gpa.free(pixels);
-    if (converter.?.IWICBitmapSource.CopyPixels(null, stride, @intCast(size), @ptrCast(pixels.ptr)) < 0) {
-        log.warn("background-image: pixel copy failed for '{s}'", .{path});
+    if (source.CopyPixels(null, stride, @intCast(size), @ptrCast(pixels.ptr)) < 0) {
+        gpa.free(pixels);
+        log.warn("background-image: pixel copy failed", .{});
         return null;
     }
 
     return .{ .pixels = pixels, .w = w, .h = h };
+}
+
+test "WIC pixel-copy failure releases its allocation on optional return" {
+    const Source = struct {
+        fn CopyPixels(_: *@This(), _: ?*const win32.WICRect, _: u32, _: u32, _: [*]u8) win32.HRESULT {
+            return -1;
+        }
+    };
+    var source: Source = .{};
+    var counted: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer std.testing.expect(counted.deinit() == .ok) catch @panic("pixel allocation leaked");
+    for (0..3) |_| {
+        try std.testing.expect(copyBackgroundPixels(counted.allocator(), 32, 32, &source) == null);
+        try std.testing.expectEqual(@as(usize, 0), counted.total_requested_bytes);
+    }
 }
 
 // Upload a `DecodedBackground` to a GPU texture + SRV. Must run on the thread

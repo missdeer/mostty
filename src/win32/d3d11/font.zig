@@ -201,8 +201,8 @@ pub fn measureCellSize(
     const line_height_dips = ascent_dips + descent_dips + line_gap_dips;
 
     return .{
-        .cx = @intFromFloat(@round(advance_dips)),
-        .cy = @intFromFloat(@round(line_height_dips)),
+        .cx = Config.fontMetricPixels(advance_dips),
+        .cy = Config.fontMetricPixels(line_height_dips),
     };
 }
 
@@ -252,7 +252,7 @@ pub fn measureTabBarLineHeight(
     const ascent_dips = @as(f32, @floatFromInt(fm.ascent)) * design_to_dips;
     const descent_dips = @as(f32, @floatFromInt(fm.descent)) * design_to_dips;
     const line_gap_dips = @as(f32, @floatFromInt(fm.lineGap)) * design_to_dips;
-    return @intFromFloat(@round(ascent_dips + descent_dips + line_gap_dips));
+    return Config.fontMetricPixels(ascent_dips + descent_dips + line_gap_dips);
 }
 
 fn createTextFormat(

@@ -107,8 +107,8 @@ pub fn encode(writer: *std.Io.Writer, event: Event, opts: Options) std.Io.Writer
         }),
         .sgr_pixels => try writer.print("\x1b[<{d};{d};{d}{c}", .{
             code,
-            event.pos.x,
-            event.pos.y,
+            @as(i64, std.math.clamp(event.pos.x, 0, @as(i32, opts.grid.cols) * opts.grid.cell_width - 1)) + 1,
+            @as(i64, std.math.clamp(event.pos.y, 0, @as(i32, opts.grid.rows) * opts.grid.cell_height - 1)) + 1,
             @as(u8, if (event.action == .release) 'm' else 'M'),
         }),
     }
@@ -157,7 +157,7 @@ fn buttonCode(event: Event, opts: Options) ?u8 {
 fn posOutOfViewport(pos: Pos, grid: Grid) bool {
     const width: i32 = @as(i32, grid.cols) * grid.cell_width;
     const height: i32 = @as(i32, grid.rows) * grid.cell_height;
-    return pos.x < 0 or pos.y < 0 or pos.x > width or pos.y > height;
+    return pos.x < 0 or pos.y < 0 or pos.x >= width or pos.y >= height;
 }
 
 fn posToCell(pos: Pos, grid: Grid) vt.Coordinate {
@@ -173,6 +173,38 @@ fn posToCell(pos: Pos, grid: Grid) vt.Coordinate {
 
 fn testGrid() Grid {
     return .{ .cols = 80, .rows = 24, .cell_width = 10, .cell_height = 20 };
+}
+
+pub fn wheelNotches(accumulator: *i32, delta: i16) i32 {
+    if ((delta > 0 and accumulator.* < 0) or (delta < 0 and accumulator.* > 0)) accumulator.* = 0;
+    accumulator.* += delta;
+    const notches = @divTrunc(accumulator.*, 120);
+    accumulator.* -= notches * 120;
+    return notches;
+}
+
+test "wheel reports preserve high resolution magnitude and direction" {
+    var accumulator: i32 = 0;
+    for (0..7) |_| try std.testing.expectEqual(@as(i32, 0), wheelNotches(&accumulator, 15));
+    try std.testing.expectEqual(@as(i32, 1), wheelNotches(&accumulator, 15));
+    try std.testing.expectEqual(@as(i32, 5), wheelNotches(&accumulator, 600));
+    try std.testing.expectEqual(@as(i32, 0), wheelNotches(&accumulator, 15));
+    try std.testing.expectEqual(@as(i32, -1), wheelNotches(&accumulator, -120));
+}
+
+test "pixel reports are one based and captured releases clamp to viewport" {
+    const cases = .{
+        .{ Pos{ .x = 0, .y = 0 }, "\x1b[<0;1;1m" },
+        .{ Pos{ .x = 10, .y = 20 }, "\x1b[<0;11;21m" },
+        .{ Pos{ .x = 799, .y = 479 }, "\x1b[<0;800;480m" },
+        .{ Pos{ .x = -50, .y = 900 }, "\x1b[<0;1;480m" },
+    };
+    inline for (cases) |case| {
+        var data: [64]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&data);
+        try encode(&writer, .{ .action = .release, .button = .left, .pos = case[0] }, .{ .event = .normal, .format = .sgr_pixels, .grid = testGrid() });
+        try std.testing.expectEqualStrings(case[1], writer.buffered());
+    }
 }
 
 test "SGR reports press and release with one-based cell coordinates" {

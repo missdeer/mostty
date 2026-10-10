@@ -1,5 +1,6 @@
 pub fn build(b: *std.Build) void {
-    const target = resolveTarget(b);
+    const core_only = b.option(bool, "core-only", "Run shared tests without building a native application") orelse false;
+    const target = if (core_only) b.standardTargetOptions(.{}) else resolveTarget(b);
     const optimize = b.standardOptimizeOption(.{});
 
     const dep_opts = .{
@@ -11,6 +12,8 @@ pub fn build(b: *std.Build) void {
     addLayoutTests(b, target, optimize, test_step);
     addCoreTests(b, target, optimize, vt, test_step);
     addMacosGridTests(b, target, optimize, vt, test_step);
+
+    if (core_only) return;
 
     switch (target.result.os.tag) {
         .windows => buildWindows(b, target, optimize, vt, test_step),

@@ -20,6 +20,12 @@ const StreamHandler = struct {
     }
 
     pub fn vt(self: *StreamHandler, comptime action: StreamAction.Tag, value: StreamAction.Value(action)) void {
+        // Both native hosts still encode legacy key events, including releases.
+        // Do not advertise or negotiate a keyboard protocol they cannot honor.
+        switch (action) {
+            .kitty_keyboard_query, .kitty_keyboard_push, .kitty_keyboard_pop, .kitty_keyboard_set, .kitty_keyboard_set_or, .kitty_keyboard_set_not => return,
+            else => {},
+        }
         if (action == .erase_display_scrollback) {
             // ED3 relocates erased history pins without marking them garbage.
             // Retire image anchors first so they cannot reappear at the top.
@@ -61,7 +67,6 @@ pub const Options = struct {
 };
 
 terminal_allocator: std.mem.Allocator,
-terminal_arena: std.heap.ArenaAllocator,
 term: *vt.Terminal,
 stream: SessionStream,
 hooks: Hooks,
@@ -69,14 +74,12 @@ images: InlineImages,
 
 pub fn init(self: *Session, options: Options) !void {
     self.terminal_allocator = options.terminal_allocator;
-    self.terminal_arena = std.heap.ArenaAllocator.init(options.terminal_allocator);
-    errdefer self.terminal_arena.deinit();
 
     self.term = try options.terminal_allocator.create(vt.Terminal);
     errdefer options.terminal_allocator.destroy(self.term);
     self.term.* = try vt.Terminal.init(
         options.io,
-        self.terminal_arena.allocator(),
+        options.terminal_allocator,
         terminalInitOptions(options.cols, options.rows),
     );
     self.hooks = options.hooks;
@@ -103,8 +106,7 @@ pub fn init(self: *Session, options: Options) !void {
 pub fn deinit(self: *Session) void {
     self.images.deinit();
     self.stream.deinit();
-    self.term.deinit(self.terminal_arena.allocator());
-    self.terminal_arena.deinit();
+    self.term.deinit(self.terminal_allocator);
     self.terminal_allocator.destroy(self.term);
     self.* = undefined;
 }
@@ -124,7 +126,7 @@ pub fn setImagesEnabled(self: *Session, enabled: bool) void {
 }
 
 pub fn resize(self: *Session, cols: u16, rows: u16) !void {
-    try self.term.resize(self.terminal_arena.allocator(), .{
+    try self.term.resize(self.terminal_allocator, .{
         .cols = cols,
         .rows = rows,
     });
@@ -232,6 +234,41 @@ test "session owns VT state and routes terminal effects" {
     try std.testing.expectEqualStrings("hello", contents);
     try std.testing.expectEqualStrings("shared core", capture.title[0..capture.title_len]);
     try std.testing.expectEqualStrings("\x1bP>|mostty\x1b\\", capture.response[0..capture.response_len]);
+}
+
+test "image replacement releases allocations during a live session" {
+    var counted: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer std.testing.expect(counted.deinit() == .ok) catch @panic("leaked image memory");
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = counted.allocator(), .stream_allocator = counted.allocator(), .cols = 10, .rows = 2, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    const image = "\x1b_Ga=t,f=24,s=1,v=1,i=1;/wAA\x1b\\";
+    for (0..8) |_| session.feed(image);
+    const plateau = counted.total_requested_bytes;
+    for (0..128) |_| {
+        session.feed(image);
+        try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+        // Final deinit alone cannot detect a pane-lifetime arena regression.
+        try std.testing.expectEqual(plateau, counted.total_requested_bytes);
+    }
+}
+
+test "legacy hosts neither advertise nor negotiate Kitty keyboard flags" {
+    const Capture = struct {
+        replies: usize = 0,
+        fn write(context: *anyopaque, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.replies += 1;
+        }
+    };
+    var capture: Capture = .{};
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 10, .rows = 2, .hooks = .{ .context = &capture, .write_pty = Capture.write } });
+    defer session.deinit();
+    session.feed("\x1b[?u\x1b[>31u\x1b[=31;1u\x1b[=31;2u\x1b[=31;3u\x1b[<1u\x1b[?u");
+    try std.testing.expectEqual(@as(usize, 0), capture.replies);
+    try std.testing.expectEqual(@as(u8, 0), session.term.screens.active.kitty_keyboard.current().int());
 }
 
 test "session resize rejects a zero grid without changing terminal state" {

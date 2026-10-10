@@ -161,7 +161,7 @@ can be installed and discoverable while still requiring this fallback.
 
 ### `font-size`
 
-Font size in points. Must be a positive number.
+Font size in points. Must be finite and in the inclusive range 1–256.
 
 ```
 font-size = 13.5
@@ -222,7 +222,7 @@ tabbar-font-size   = 11
 `tabbar-font-family` uses only the primary family — if a comma list is given,
 only the first entry is taken; the terminal `font-family` chain still acts as
 the fallback for codepoints the tab-bar family lacks (CJK / emoji titles).
-`tabbar-font-size` must be a positive number.
+`tabbar-font-size` must be finite and in the inclusive range 1–256.
 
 Tab titles are rendered proportionally (the font's natural glyph widths, not
 one glyph per terminal cell), and the tab-bar height auto-sizes to the tab-bar

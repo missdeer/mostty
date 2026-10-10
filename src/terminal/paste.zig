@@ -4,6 +4,37 @@ const std = @import("std");
 pub const paste_start = "\x1b[200~";
 pub const paste_end = "\x1b[201~";
 
+pub fn validateUtf16(bytes: []const u16) !void {
+    var it = std.unicode.Utf16LeIterator.init(bytes);
+    while (try it.nextCodepoint()) |_| {}
+}
+
+pub fn writeUtf16(writer: *std.Io.Writer, bytes: []const u16, bracketed: bool) !void {
+    try validateUtf16(bytes);
+    var it = std.unicode.Utf16LeIterator.init(bytes);
+    var state: State = .{ .bracketed = bracketed };
+    try state.begin(writer);
+    while (try it.nextCodepoint()) |cp| try state.onCodepoint(writer, cp);
+    try state.finish(writer);
+}
+
+test "invalid UTF16 is rejected before any bracketed paste can be emitted" {
+    try validateUtf16(&.{ 'a', 0xd83d, 0xde00 });
+    try std.testing.expectError(error.DanglingSurrogateHalf, validateUtf16(&.{ 'a', 0xd800 }));
+    try std.testing.expectError(error.UnexpectedSecondSurrogateHalf, validateUtf16(&.{ 'a', 0xdc00 }));
+    const malformed = ([_]u16{'a'} ** 8192) ++ [_]u16{0xd800};
+    var tiny: [1]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&tiny);
+    // A streaming writer would have flushed the prefix long before the bad
+    // surrogate. Validation must win even over the tiny buffer's WriteFailed.
+    try std.testing.expectError(error.DanglingSurrogateHalf, writeUtf16(&writer, &malformed, true));
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    var buffer: [64]u8 = undefined;
+    writer = .fixed(&buffer);
+    try writeUtf16(&writer, &.{ 'a', '\n', 0xd83d, 0xde00 }, true);
+    try std.testing.expectEqualStrings(paste_start ++ "a\r😀" ++ paste_end, writer.buffered());
+}
+
 pub const State = struct {
     bracketed: bool,
     normalize_newlines: bool = true,

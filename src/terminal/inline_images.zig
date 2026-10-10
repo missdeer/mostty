@@ -283,3 +283,24 @@ test "iTerm dimensions interpret pixels, cells, percent and auto" {
     try std.testing.expectError(error.InvalidSize, dimension("0", 800, 8));
     try std.testing.expectError(error.InvalidSize, dimension("4294967295", 800, 8));
 }
+
+test "image decode releases compressed and original pixels before returning scaled data" {
+    const Decoder = struct {
+        fn decode(allocator: std.mem.Allocator, _: []const u8) vt.sys.DecodeError!vt.sys.Image {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 255);
+            return .{ .width = 1, .height = 1, .data = pixels };
+        }
+    };
+    const previous = decode_image;
+    decode_image = Decoder.decode;
+    defer decode_image = previous;
+    var counted: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer std.testing.expect(counted.deinit() == .ok) catch @panic("image scratch leaked");
+    for (0..16) |_| {
+        const image = try decodeFile(counted.allocator(), "inline=1;width=2px;height=2px:AAAA", 800, 600, 8, 16);
+        try std.testing.expectEqual(@as(usize, 16), counted.total_requested_bytes);
+        counted.allocator().free(image.data);
+        try std.testing.expectEqual(@as(usize, 0), counted.total_requested_bytes);
+    }
+}
