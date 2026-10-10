@@ -1327,7 +1327,10 @@ test "chrome preparation leaves atlas lazy across font changes while panes retai
     try std.testing.expect(terminal.tex_cell_count.eql(gpu.getTextureMaxCellCount(fonts.cell_size_xy)));
     session.feed("pane glyphs");
     pane.render(child, 1, session.term, tabbar, false, false, null, null, null, 1, false, null);
-    try std.testing.expect(pane.shader_cells.cell_buf != null and pane.shadow_cells.len > 0);
+    try std.testing.expect(pane.shader_cells.count > 0 and pane.shadow_cells.len > 0);
+    var cell_desc: win32.D3D11_BUFFER_DESC = undefined;
+    pane.shader_cells.cell_buf.GetDesc(&cell_desc);
+    try std.testing.expectEqual(pane.shader_cells.count * @sizeOf(shader.Cell), cell_desc.ByteWidth);
     try std.testing.expect(parent.glyph_texture.obj == null and parent.glyph_cache == null);
 }
 
