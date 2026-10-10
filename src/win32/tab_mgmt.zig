@@ -186,7 +186,7 @@ fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*c
 
     tab.session.init(.{
         .io = std.Io.Threaded.global_single_threaded.io(),
-        .terminal_allocator = std.heap.page_allocator,
+        .terminal_allocator = global.gpa.allocator(),
         .stream_allocator = global.gpa.allocator(),
         .cols = cell_count.col,
         .rows = cell_count.row,

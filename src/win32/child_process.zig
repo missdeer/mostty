@@ -502,7 +502,7 @@ const InputWriter = struct {
         const self = try std.heap.page_allocator.create(InputWriter);
         errdefer std.heap.page_allocator.destroy(self);
         self.* = .{ .handle = handle, .queue = .{
-            .allocator = std.heap.page_allocator,
+            .allocator = std.heap.smp_allocator,
             .io = runtimeIo(),
             .context = self,
             .write = write,

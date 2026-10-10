@@ -510,7 +510,7 @@ export fn mostty_tab_feed(tab_opt: ?*Tab, ptr: [*]const u8, len: usize) void {
 /// Write input bytes to the PTY master.
 export fn mostty_tab_write(tab_opt: ?*Tab, ptr: [*]const u8, len: usize) void {
     const tab = tab_opt orelse return;
-    tab.pty.write(ptr[0..len]) catch {};
+    tab.pty.write(ptr[0..len]) catch |err| std.log.warn("PTY input enqueue failed: {s}", .{@errorName(err)});
 }
 
 /// Resize the drawable and propagate the new grid to PTY + VT. Writes the

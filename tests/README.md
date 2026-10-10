@@ -34,6 +34,8 @@ skipped counts (for example the macOS-only config-path test on other hosts).
 `tests/macos/ci.sh` runs every macOS entry above and writes
 `tmp/ci-macos/results.tsv` plus individual logs. Read-only probes mark missing
 GUI/Metal or pointer permission as **blocked**. They do not modify TCC.
+Unavailable GUI suites are still compiled, with separate **compile-only** rows;
+the three shell entry points also accept `--compile-only` for this purpose.
 
 `tools/ci-tests.ps1` runs non-GUI Windows contracts and records GUI requirements
 as **blocked**. `-Gui` runs the full local GUI inventory serially. To use it in

@@ -73,7 +73,7 @@ pub fn init(self: *PtySession, options: Options) !void {
         .child_pid = null,
         .hooks = options.hooks,
         .write_failed = false,
-        .writer = .{ .allocator = std.heap.page_allocator, .io = options.io, .context = self, .write = writeTransport },
+        .writer = .{ .allocator = std.heap.smp_allocator, .io = options.io, .context = self, .write = writeTransport },
     };
     try self.terminal.init(.{
         .io = options.io,
@@ -476,6 +476,49 @@ test "macOS backpressure does not block enqueue or session teardown" {
     try session.write(bytes);
     // No reader consumes the megabyte; resizing and teardown must still run.
     try session.resize(81, 25);
+}
+
+test "a later shell cannot inherit an earlier pane master" {
+    var first: PtySession = undefined;
+    try first.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .shell = "/bin/sh", .command = "sleep 30" });
+    defer first.deinit();
+    var command_buffer: [160]u8 = undefined;
+    const command = try std.fmt.bufPrintZ(&command_buffer, "if test -e /dev/fd/{d}; then echo inherited-master; else echo isolated; fi", .{first.master_fd});
+    var second: PtySession = undefined;
+    try second.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .shell = "/bin/sh", .command = command });
+    defer second.deinit();
+    try drainToEof(&second);
+    _ = try second.wait();
+    try expectChildOutputLine(&second, "isolated");
+}
+
+test "delayed PTY reader receives every queued byte in order" {
+    var session: PtySession = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 100, .rows = 24, .shell = "/bin/sh", .command = "stty raw -echo; printf READY; sleep 1; dd bs=1 count=65536 2>/dev/null | /usr/bin/shasum -a 256" });
+    defer session.deinit();
+    var ready: [5]u8 = undefined;
+    var received: usize = 0;
+    while (received < ready.len) {
+        const n = try session.read(ready[received..]);
+        if (n == 0) return error.UnexpectedEof;
+        received += n;
+    }
+    try std.testing.expectEqualStrings("READY", &ready);
+    const input = try std.testing.allocator.alloc(u8, 65536);
+    defer std.testing.allocator.free(input);
+    for (input, 0..) |*byte, i| byte.* = @intCast(i % 251);
+    try session.write(input[0..32768]);
+    try session.write(input[32768..]);
+    try session.resize(101, 25);
+    try drainToEof(&session);
+    const status = try session.wait();
+    try std.testing.expectEqual(@as(u8, 0), status.exited);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(input, &digest, .{});
+    const expected = std.fmt.bytesToHex(digest, .lower);
+    const contents = try session.terminal.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, &expected) != null);
 }
 
 test "macOS PTY resize reaches both the child and VT grid" {

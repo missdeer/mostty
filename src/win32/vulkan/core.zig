@@ -57,7 +57,7 @@ pub fn startupErrorDescription(err: StartupError) []const u8 {
         error.InstanceUnavailable => "the Vulkan loader rejected the required instance capabilities",
         error.SurfaceUnavailable => "the Win32 Vulkan presentation surface is unavailable",
         error.PhysicalDeviceUnavailable => "no Vulkan 1.3 physical device is available",
-        error.RequiredApiVersionUnavailable => "the selected device exposes a Vulkan API version older than 1.3",
+        error.RequiredApiVersionUnavailable => "no usable driver/device supports the required Vulkan 1.3 API",
         error.GpuOverrideUnavailable => "the configured GPU does not expose the required Vulkan presentation capabilities",
         error.GraphicsPresentQueueUnavailable => "no queue family supports both graphics and Win32 presentation",
         error.RequiredDeviceExtensionUnavailable => "the selected device does not support Vulkan swapchains",
@@ -287,8 +287,7 @@ pub const Core = struct {
             .ppEnabledExtensionNames = if (instance_extension_count != 0) &instance_extensions else null,
         };
         var instance: vk.VkInstance = null;
-        if (global.create_instance(&instance_info, null, &instance) != vk.VK_SUCCESS)
-            return error.InstanceUnavailable;
+        try checkInstanceResult(global.create_instance(&instance_info, null, &instance));
         var ip = global.loadInstance(instance) catch return error.LoaderProcedureUnavailable;
         var instance_owned = true;
         errdefer if (instance_owned) ip.destroy_instance(instance, null);
@@ -1799,6 +1798,22 @@ fn selectPresentTier(
     if (has_mailbox and has_present_wait) return .present_wait_mailbox;
     if (has_mailbox) return .timeline_mailbox;
     return .fifo;
+}
+
+fn checkInstanceResult(result: vk.VkResult) StartupError!void {
+    if (result == vk.VK_SUCCESS) return;
+    log.warn("vkCreateInstance failed with VkResult {d}", .{result});
+    // A loader can be installed on a host with no compatible ICD. Preserve
+    // that capability failure separately from OOM or an invalid instance.
+    if (result == vk.VK_ERROR_INCOMPATIBLE_DRIVER) return error.RequiredApiVersionUnavailable;
+    return error.InstanceUnavailable;
+}
+
+test "only an incompatible Vulkan driver is classified as missing API capability" {
+    try checkInstanceResult(vk.VK_SUCCESS);
+    try std.testing.expectError(error.RequiredApiVersionUnavailable, checkInstanceResult(vk.VK_ERROR_INCOMPATIBLE_DRIVER));
+    try std.testing.expectError(error.InstanceUnavailable, checkInstanceResult(vk.VK_ERROR_OUT_OF_HOST_MEMORY));
+    try std.testing.expectError(error.InstanceUnavailable, checkInstanceResult(vk.VK_ERROR_INITIALIZATION_FAILED));
 }
 
 test "present tier preference is ordered from explicit wait to FIFO" {
