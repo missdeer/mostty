@@ -65,7 +65,10 @@ struct ScrollbarTests {
             let end = NSPoint(x: knob.midX, y: y)
             NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
             NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
-            scroller.mouseDown(with: event(.leftMouseDown, start))
+            // Native tracking also consults NSApp.currentEvent. Dispatch the
+            // press through AppKit, as a real window event would arrive.
+            NSApp.sendEvent(event(.leftMouseDown, start))
+            print("DRAG: target=\(y) value=\(scroller.doubleValue) row=\(mostty_tab_scrollbar(tab).offset)")
         }
         let knobPoint = scroller.convert(NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY), to: view)
         expect(view.hitTest(knobPoint) === scroller, "native scrollbar hit testing isolates terminal mouse reporting")
@@ -86,7 +89,7 @@ struct ScrollbarTests {
         let slot = scroller.rect(for: .knobSlot)
         let trackPoint = NSPoint(x: slot.midX, y: (slot.minY + scroller.rect(for: .knob).minY) / 2)
         NSApp.postEvent(event(.leftMouseUp, trackPoint), atStart: false)
-        scroller.mouseDown(with: event(.leftMouseDown, trackPoint))
+        NSApp.sendEvent(event(.leftMouseDown, trackPoint))
         expect(mostty_tab_scrollbar(tab).offset < middle, "clicking above the knob moves toward older history")
         refresh(200, 90, 20)
         let wheel = ScrollWheelEvent()

@@ -453,7 +453,8 @@ pub const ChildProcess = struct {
             };
             if (read_len == 0) return;
             // ring.write returns false only when stop_flag tripped during a
-            // full-ring wait (i.e. destroyTab is tearing us down). Exit then.
+            // full-ring wait (i.e. destroyTab is tearing us down). Keep draining
+            // the pipe without publishing so legacy ClosePseudoConsole can finish.
             if (stop_flag.load(.acquire) or !ring.write(buffer[0..read_len])) continue;
             // Edge-triggered wake. ring.write performed head.store(.release)
             // before returning; posted.swap(.acq_rel) is sequenced after that

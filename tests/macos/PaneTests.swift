@@ -69,10 +69,10 @@ struct PaneTests {
         let window = NSWindow(contentRect: NSRect(x: 60, y: 80, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Mostty pane acceptance"
-        let container = ContainerView(frame: window.contentView!.bounds)
-        container.model = model
-        model.container = container
-        window.contentView = container
+        // Include the production chrome: it owns window opacity and blur.
+        let content = ContentView(model: model, frame: window.contentView!.bounds)
+        let container = content.terminal
+        window.contentView = content
         var failures = 0
         func expect(_ condition: Bool, _ rule: String) {
             print("\(condition ? "PASS" : "FAIL"): \(rule)")
@@ -129,7 +129,7 @@ struct PaneTests {
             expect(received(name) == "input-\(index)-中文\n", "Unicode input reaches only \(name)")
         }
         func dimensionsMatch() -> Bool {
-            panes.allSatisfy { pane in
+            func matches(_ diagnose: Bool) -> Bool { panes.allSatisfy { pane in
                 guard let session = pane.view.testSession else { return false }
                 let fields = pane.title.split(separator: ":")
                 guard fields.count == 4, let rows = UInt32(fields[2]), let cols = UInt32(fields[3]) else { return false }
@@ -139,9 +139,14 @@ struct PaneTests {
                 let layer = surface.layer as! CAMetalLayer
                 let matches = cols == max(1, UInt32(layer.drawableSize.width) / cw) &&
                     rows == max(1, UInt32(layer.drawableSize.height) / ch - 1)
-                if !matches { print("SIZE: \(pane.title) drawable=\(layer.drawableSize) cell=\(cw)x\(ch)") }
+                if !matches && diagnose { print("SIZE: \(pane.title) drawable=\(layer.drawableSize) cell=\(cw)x\(ch)") }
                 return matches
-            }
+            } }
+            // SIGWINCH and the child's OSC title travel asynchronously through
+            // the PTY and main queue. Wait for evidence, not a fixed 150 ms.
+            let deadline = Date().addingTimeInterval(3)
+            while !matches(false) && Date() < deadline { settle(0.02) }
+            return matches(true)
         }
         expect(dimensionsMatch(), "each real PTY reports rows and columns matching its own Metal drawable")
         func pixels(_ pane: PaneItem) throws -> (bytes: [UInt8], width: Int, height: Int) {
@@ -259,14 +264,14 @@ struct PaneTests {
                        abs(Int(color[2]) - 16) <= 1 && abs(Int(color[3]) - 128) <= 1,
                        "reloaded theme and opacity reach hidden pane \(pane.id)'s premultiplied Metal pixels")
             }
-            expect(!window.isOpaque && container.subviews.contains { $0 is NSVisualEffectView } &&
+            expect(!window.isOpaque && content.subviews.contains { $0 is NSVisualEffectView } &&
                    panes.allSatisfy { !$0.view.isOpaque },
                    "transparent pane layers retain a shared native blur backdrop behind the selected tab")
             for pane in panes { input(pane, "R") }
             try writeConfig("font-family = Menlo\nfont-size = 12\nbackground = #101820\nbackground-opacity = 1\nbackground-blur = false\n")
             settle(1)
             expect(panes.map(cellHeight) == beforeCells && window.isOpaque &&
-                   !container.subviews.contains { $0 is NSVisualEffectView } && dimensionsMatch(),
+                   !content.subviews.contains { $0 is NSVisualEffectView } && dimensionsMatch(),
                    "restoring opaque font settings updates all panes and removes the blur backdrop")
         }
         model.selectedID = tab.id

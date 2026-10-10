@@ -6,7 +6,7 @@ $matrixRoot=Join-Path $root "tmp/six-backend-$matrixId"
 New-Item -ItemType Directory -Path $matrixRoot | Out-Null
 $exe=Join-Path $root 'zig-out/bin/Mostty.exe'
 $runner=Join-Path $PSScriptRoot 'pane-acceptance.ps1'
-$sourceFiles=@('pane-acceptance.ps1','pane-test-native.cs','pane-output-probe.py','pane-input-probe.py','pane-image-probe.py','pane-matrix-acceptance.ps1','pane-matrix-summary.jq','pane-matrix-summary-test.ps1')
+$sourceFiles=@('pane-acceptance.ps1','pane-backend-acceptance.ps1','pane-test-native.cs','pane-output-probe.py','pane-input-probe.py','pane-image-probe.py','pane-matrix-acceptance.ps1','pane-matrix-summary.jq','pane-matrix-summary-test.ps1')
 $sourceHashes=[ordered]@{}
 foreach($name in $sourceFiles){$sourceHashes[$name]=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot $name)).Hash}
 Push-Location $root

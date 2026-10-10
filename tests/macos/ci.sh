@@ -18,11 +18,9 @@ run_suite() {
         printf '%s\tfail\texit %s\n' "$name" "$result" >> "$summary"
         failed=1
     fi
-    if [ "$result" -eq 0 ]; then
-        tail -n 12 "tmp/ci-macos/$name.log"
-    else
-        cat "tmp/ci-macos/$name.log"
-    fi
+    printf '::group::%s (exit %s)\n' "$name" "$result"
+    cat "tmp/ci-macos/$name.log"
+    printf '::endgroup::\n'
 }
 run_suite unit zig build test --global-cache-dir .zig-cache --summary all
 run_suite bundle-themes swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/bundle-themes.swift zig-out/Mostty.app

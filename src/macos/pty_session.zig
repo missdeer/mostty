@@ -60,7 +60,6 @@ terminal: TerminalSession,
 master_fd: c.fd_t,
 child_pid: ?c.pid_t,
 hooks: ?Hooks,
-write_failed: bool,
 writer: WriteQueue,
 
 pub fn init(self: *PtySession, options: Options) !void {
@@ -72,7 +71,6 @@ pub fn init(self: *PtySession, options: Options) !void {
         .master_fd = -1,
         .child_pid = null,
         .hooks = options.hooks,
-        .write_failed = false,
         .writer = .{ .allocator = std.heap.smp_allocator, .io = options.io, .context = self, .write = writeTransport },
     };
     try self.terminal.init(.{
@@ -165,8 +163,6 @@ pub fn deinit(self: *PtySession) void {
 
 pub fn write(self: *PtySession, bytes: []const u8) !void {
     if (self.master_fd < 0) return error.SessionClosed;
-    if (self.write_failed) return error.PtyWriteFailed;
-
     try self.writer.enqueue(bytes);
 }
 
@@ -266,8 +262,10 @@ fn onTitleChanged(context: *anyopaque, _: *vt.Terminal) void {
 
 fn onWritePty(context: *anyopaque, bytes: []const u8) void {
     const self: *PtySession = @ptrCast(@alignCast(context));
-    self.write(bytes) catch {
-        self.write_failed = true;
+    self.write(bytes) catch |err| {
+        // Capacity/allocation rejection is recoverable. Only the transport
+        // worker latches a permanent failure in WriteQueue.failed.
+        std.log.warn("PTY reply rejected: {s}", .{@errorName(err)});
     };
 }
 
@@ -464,6 +462,44 @@ test "macOS PTY starts a shell and exchanges data through the VT session" {
     const contents = try session.terminal.term.plainString(std.testing.allocator);
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "seen:round-trip") != null);
+}
+
+test "a rejected VT reply does not poison input after the queue drains" {
+    const Sink = struct {
+        count: std.atomic.Value(usize) = .init(0),
+        fn write(context: *anyopaque, bytes: []const u8, _: *const std.atomic.Value(bool)) !usize {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.count.fetchAdd(bytes.len, .release);
+            return bytes.len;
+        }
+    };
+    var sink: Sink = .{};
+    var session: PtySession = .{
+        .terminal = undefined,
+        .master_fd = 1, // No OS I/O: the queue's test sink owns the transport.
+        .child_pid = null,
+        .hooks = null,
+        .writer = .{ .allocator = std.testing.allocator, .io = std.testing.io, .context = &sink, .write = Sink.write },
+    };
+    try session.terminal.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .hooks = .{ .context = &session, .write_pty = onWritePty } });
+    defer session.terminal.deinit();
+    defer session.writer.deinit();
+    const full = try std.testing.allocator.alloc(u8, WriteQueue.max_bytes);
+    defer std.testing.allocator.free(full);
+    @memset(full, 'x');
+    try session.write(full);
+    try std.testing.expectError(error.InputQueueFull, session.write("overflow"));
+    session.terminal.feed("\x1b[5n"); // DSR reply encounters the same full queue.
+    try session.writer.start();
+    while (true) {
+        session.writer.mutex.lockUncancelable(std.testing.io);
+        const drained = session.writer.pending == 0;
+        session.writer.mutex.unlock(std.testing.io);
+        if (drained) break;
+        std.Thread.yield() catch {};
+    }
+    try session.write("user input");
+    while (sink.count.load(.acquire) != full.len + "user input".len) std.Thread.yield() catch {};
 }
 
 test "macOS backpressure does not block enqueue or session teardown" {

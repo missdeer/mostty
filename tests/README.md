@@ -21,6 +21,7 @@ skipped counts (for example the macOS-only config-path test on other hosts).
 | Shader scalar contracts | `pwsh -File tools/shader-contract-tests.ps1` | Windows inventory; also runnable with PowerShell on Linux; offline math, not GPU execution |
 | Acceptance summary contract | `pwsh -File tools/pane-matrix-summary-test.ps1` | Windows inventory; requires jq; also runnable on Linux |
 | Vulkan report/recovery contract | `pwsh -File tools/vulkan-acceptance.ps1 self-test` | Windows inventory |
+| CI baseline result contract | `pwsh -File tools/ci-result-test.ps1` | Windows inventory; validates pass/fail/blocked mappings and rejects missing/mismatched evidence |
 | First launcher failure | `pwsh -File tools/startup-failure.ps1` | Windows GUI inventory |
 | D3D11 pane acceptance | `pwsh -File tools/pane-acceptance.ps1` | Windows GUI; invoked by matrix |
 | Research backend acceptance | `pwsh -File tools/pane-backend-acceptance.ps1 -Renderer <backend>` | Windows GUI + matching drivers; invoked for all five variants by matrix |
