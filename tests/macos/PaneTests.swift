@@ -85,6 +85,11 @@ struct PaneTests {
                 window.contentView?.layoutSubtreeIfNeeded()
             } while Date() < until
         }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline { settle(0.02) }
+            return condition()
+        }
         func launcher(_ name: String) -> TerminalLauncher {
             TerminalLauncher(label: name,
                 command: "\(client) \(name) tmp/macos-pane-tests",
@@ -115,7 +120,8 @@ struct PaneTests {
         model.splitSelected(1, launcher: launcher("three"))
         model.focusDirection(1)
         model.splitSelected(1, launcher: launcher("four"))
-        settle(1)
+        expect(waitUntil { tab.panes.count == 4 && tab.panes.allSatisfy { $0.title.split(separator: ":").count == 4 } },
+               "all pane probes have entered raw mode and published their initial title")
         expect(tab.panes.count == 4 && tab.panes.allSatisfy { $0.view.hasActiveSession },
                "four mixed-direction panes run independent real PTYs")
         guard tab.panes.count == 4 else { return 1 }
@@ -539,7 +545,7 @@ struct PaneTests {
                "Kitty drawable remains within the native pane bounds after resize and scale changes")
         let siblingHeight = panes[1].view.frame.height
         input(panes[3], "\u{4}")
-        settle(0.5)
+        _ = waitUntil { tab.panes.count == 3 }
         expect(tab.panes.count == 3 && !panes[3].view.hasActiveSession && tab.panes.allSatisfy { $0.view.hasActiveSession },
                "one shell exit closes only its pane and keeps sibling readers alive")
         expect(panes[1].view.frame.height > siblingHeight && panes[1].view.testSession == sessions[1],
@@ -548,8 +554,14 @@ struct PaneTests {
         showSelected()
         let lastTab = model.selectedTab!
         let lastPane = lastTab.panes[0]
+        // tcsetattr(TCSAFLUSH) discards input sent before the probe enters raw
+        // mode. Its OSC title is emitted only after that transition completes.
+        guard waitUntil({ lastPane.title.hasPrefix("last:") }) else {
+            expect(false, "last-pane probe reaches raw input readiness")
+            return 1
+        }
         input(lastPane, "\u{4}")
-        settle(0.5)
+        _ = waitUntil { !model.tabs.contains { $0 === lastTab } }
         expect(!model.tabs.contains { $0 === lastTab } && !lastPane.view.hasActiveSession && model.selectedID == tab.id,
                "last-pane shell exit removes only that tab and selects the surviving tab")
         showSelected()
