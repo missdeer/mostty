@@ -642,12 +642,12 @@ const PreparedFrame = struct {
     client_w: u32,
     client_h: u32,
     cs: CellXY,
-    shader_col: u32,
+    shader_col: u32 = 0,
     tab_bar_h: u32,
-    term_pixel_h: u32,
-    term_shader_row: u32,
-    atlas: gpu.AtlasFrame,
-    tex_cell_count: CellXY,
+    term_pixel_h: u32 = 0,
+    term_shader_row: u32 = 0,
+    atlas: ?gpu.AtlasFrame = null,
+    tex_cell_count: CellXY = .{ .x = 0, .y = 0 },
 };
 
 pub fn render(
@@ -700,7 +700,7 @@ pub fn render(
         prepared.shader_col,
         prepared.term_shader_row,
         prepared.tex_cell_count,
-        prepared.atlas,
+        prepared.atlas.?,
         resizing,
         cursor_text,
         selection_bg,
@@ -756,7 +756,8 @@ pub fn render(
 }
 
 pub fn renderChrome(self: *D3d11Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
-    const prepared = prepareFrame(self, hwnd, term, false) orelse return;
+    _ = term; // Chrome has no terminal cells or glyph atlas.
+    const prepared = prepareFrame(self, hwnd, null, false) orelse return;
     const rgba = color.linearBackground(background, opacity);
     self.context.ClearRenderTargetView(self.grid_rtv.?, &rgba[0]);
     // Child surfaces supply their own alpha. Leaving parent pixels underneath
@@ -774,7 +775,7 @@ pub fn renderChrome(self: *D3d11Renderer, hwnd: win32.HWND, term: *vt.Terminal, 
 fn prepareFrame(
     self: *D3d11Renderer,
     hwnd: win32.HWND,
-    term: *vt.Terminal,
+    terminal: ?*vt.Terminal,
     mouse_in_scrollbar: bool,
 ) ?PreparedFrame {
     const sz = win32.getClientSize(hwnd);
@@ -864,6 +865,16 @@ fn prepareFrame(
     _ = grid.ensureScissorRasterizerState(self);
 
     const cs = self.font_service.cell_size_xy;
+    const tab_bar_h: u32 = @intCast(@max(0, self.common.tab_bar_height));
+    // Surface acquisition/recovery and font metrics are shared with chrome.
+    // Terminal resources must remain lazy: the parent only paints the tab band.
+    const term = terminal orelse return .{
+        .swap_chain = swap_chain,
+        .client_w = client_w,
+        .client_h = client_h,
+        .cs = cs,
+        .tab_bar_h = tab_bar_h,
+    };
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w: u32 = client_w -| sb_px;
     const shader_col: u32 = @divTrunc(grid_w + cs.x - 1, cs.x);
@@ -871,7 +882,6 @@ fn prepareFrame(
     // painted via D2D after the grid. The cell grid is terminal-only and
     // the grid quad is drawn under a viewport offset by tab_bar_h; the
     // shader subtracts tab_bar_h from SV_Position.y.
-    const tab_bar_h: u32 = @intCast(@max(0, self.common.tab_bar_height));
     const term_pixel_h: u32 = client_h -| tab_bar_h;
     const term_shader_row: u32 = @divTrunc(term_pixel_h + cs.y - 1, cs.y);
 
@@ -1277,6 +1287,48 @@ test "pane surfaces share GPU infrastructure and own separate drawing resources"
     try std.testing.expect(pane.glyph_texture.obj != parent.glyph_texture.obj);
     try std.testing.expectEqual(@as(i32, 0), pane.common.tab_bar_height);
     try std.testing.expect(parent.common.tab_bar_height > 0);
+}
+
+test "chrome preparation leaves atlas lazy across font changes while panes retain full atlas" {
+    const hwnd = win32.CreateWindowExW(.{ .NOREDIRECTIONBITMAP = 1 }, win32.L("STATIC"), win32.L(""), .{}, 0, 0, 320, 200, null, null, win32.GetModuleHandleW(null), null) orelse return error.TestWindowUnavailable;
+    defer _ = win32.DestroyWindow(hwnd);
+    const child = win32.CreateWindowExW(.{ .NOREDIRECTIONBITMAP = 1 }, win32.L("STATIC"), win32.L(""), .{ .CHILD = 1 }, 0, 0, 320, 160, hwnd, null, win32.GetModuleHandleW(null), null) orelse return error.TestWindowUnavailable;
+    defer _ = win32.DestroyWindow(child);
+    var common: RendererCommon = undefined;
+    var fonts = FontService.init(&common, 96, .{}, true, null);
+    defer fonts.deinit();
+    var parent = try D3d11Renderer.init(&common, &fonts, null);
+    defer parent.deinit();
+    const tabbar: types.TabBarDraw = .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false };
+    const first = prepareFrame(&parent, hwnd, null, false) orelse return error.TestFrameUnavailable;
+    const signature = tabbar_paint.signature(tabbar, parent.cache_gen, first.cs.x, first.client_w, first.tab_bar_h);
+    try std.testing.expect(fonts.updateDpi(144));
+    parent.onFontStateChanged();
+    for (0..3) |_| {
+        const chrome = prepareFrame(&parent, hwnd, null, false) orelse return error.TestFrameUnavailable;
+        try std.testing.expect(chrome.atlas == null and parent.glyph_texture.obj == null and parent.glyph_cache == null);
+        try std.testing.expect(chrome.cs.eql(fonts.cell_size_xy));
+        try std.testing.expect(signature != tabbar_paint.signature(tabbar, parent.cache_gen, chrome.cs.x, chrome.client_w, chrome.tab_bar_h));
+    }
+    var context: u8 = 0;
+    var session: @import("../terminal/session.zig") = undefined;
+    try session.init(.{ .io = std.Io.Threaded.global_single_threaded.io(), .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 8, .rows = 4, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    parent.renderChrome(hwnd, session.term, tabbar, 0x123456, 0.5, false, &.{});
+    try std.testing.expect(parent.band_local != null);
+    try std.testing.expect(parent.glyph_texture.obj == null and parent.glyph_cache == null);
+    var pane_common = common;
+    pane_common.surface_id = 1;
+    pane_common.tab_bar_height = 0;
+    var pane = D3d11Renderer.initSurface(&parent, &pane_common);
+    defer pane.deinit();
+    const terminal = prepareFrame(&pane, child, session.term, false) orelse return error.TestFrameUnavailable;
+    try std.testing.expect(terminal.atlas != null and pane.glyph_texture.obj != null and pane.glyph_cache != null);
+    try std.testing.expect(terminal.tex_cell_count.eql(gpu.getTextureMaxCellCount(fonts.cell_size_xy)));
+    session.feed("pane glyphs");
+    pane.render(child, 1, session.term, tabbar, false, false, null, null, null, 1, false, null);
+    try std.testing.expect(pane.shader_cells.cell_buf != null and pane.shadow_cells.len > 0);
+    try std.testing.expect(parent.glyph_texture.obj == null and parent.glyph_cache == null);
 }
 
 test "surviving pane restores draw topology after sibling teardown clears shared context" {

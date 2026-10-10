@@ -10,7 +10,11 @@ final class PaneItem: Identifiable {
 
 final class TabItem: Identifiable {
     let id = UUID()
-    var title = "Terminal" { didSet { model?.tabBar?.refresh() } }
+    var title = "Terminal" {
+        didSet {
+            if title != oldValue { model?.tabBar?.refresh() }
+        }
+    }
     weak var model: AppModel?
     let layout: OpaquePointer
     var panes: [PaneItem]
@@ -286,8 +290,9 @@ final class AppModel {
         pane.view.setAccessibilityLabel("Terminal pane \(pane.id)")
         pane.view.onTitleChange = { [weak tab, weak pane] title in
             guard let tab = tab, let pane = pane else { return }
-            pane.title = title.isEmpty ? "Terminal" : title
-            if tab.activePane === pane { tab.title = pane.title }
+            let shown = title.isEmpty ? "Terminal" : title
+            if pane.title != shown { pane.title = shown }
+            if tab.activePane === pane, tab.title != pane.title { tab.title = pane.title }
         }
         pane.view.onExit = { [weak self, weak tab, weak pane] in
             guard let tab = tab, let pane = pane else { return }
@@ -665,6 +670,9 @@ final class TabBar: NSView {
     private let model: AppModel
     private var chips: [UUID: TabChipButton] = [:]
     private let launcher = LauncherMenuButton(frame: .zero)
+#if MOSTTY_APP_TESTS
+    private(set) var testRefreshCount = 0
+#endif
 
     init(model: AppModel) {
         self.model = model
@@ -679,6 +687,9 @@ final class TabBar: NSView {
     required init?(coder: NSCoder) { fatalError("unsupported") }
 
     func refresh() {
+#if MOSTTY_APP_TESTS
+        testRefreshCount += 1
+#endif
         let liveIDs = Set(model.tabs.map(\.id))
         for id in Array(chips.keys) where !liveIDs.contains(id) {
             chips.removeValue(forKey: id)?.removeFromSuperview()

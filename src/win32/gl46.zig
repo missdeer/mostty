@@ -1145,7 +1145,7 @@ pub fn render(
         prepared.shader_col,
         prepared.term_shader_row,
         prepared.tex_cell_count,
-        prepared.atlas,
+        prepared.atlas.?,
         resizing,
         cursor_text,
         selection_bg,
@@ -1253,7 +1253,8 @@ pub fn renderChrome(self: *Gl46Renderer, hwnd: win32.HWND, term: *vt.Terminal, t
         self.recordFailure("initialize chrome", err);
         return;
     };
-    const prepared = self.prepareFrame(hwnd, term, false) orelse return;
+    _ = term; // Chrome has no terminal cells or glyph atlas.
+    const prepared = self.prepareFrame(hwnd, null, false) orelse return;
     const path = self.beginPresentation(hwnd, prepared.client_w, prepared.client_h) orelse return;
     gl.Disable(gl.SCISSOR_TEST);
     const chrome = color.linearBackground(background, opacity);
@@ -1291,19 +1292,19 @@ const PreparedFrame = struct {
     client_w: u32,
     client_h: u32,
     cs: CellXY,
-    shader_col: u32,
+    shader_col: u32 = 0,
     tab_bar_h: u32,
-    term_pixel_h: u32,
-    term_shader_row: u32,
-    atlas: gpu.AtlasFrame,
-    tex_cell_count: CellXY,
-    config: shader.GridConfig,
+    term_pixel_h: u32 = 0,
+    term_shader_row: u32 = 0,
+    atlas: ?gpu.AtlasFrame = null,
+    tex_cell_count: CellXY = .{ .x = 0, .y = 0 },
+    config: shader.GridConfig = std.mem.zeroes(shader.GridConfig),
 };
 
 fn prepareFrame(
     self: *Gl46Renderer,
     hwnd: win32.HWND,
-    term: *vt.Terminal,
+    terminal: ?*vt.Terminal,
     mouse_in_scrollbar: bool,
 ) ?PreparedFrame {
     const sz = win32.getClientSize(hwnd);
@@ -1313,10 +1314,18 @@ fn prepareFrame(
     if (!self.beginFrame()) return null;
 
     const cs = self.font_service.cell_size_xy;
+    const tab_bar_h: u32 = @intCast(@max(0, self.common.tab_bar_height));
+    // Surface acquisition/recovery and font metrics are shared with chrome.
+    // Terminal resources must remain lazy: the parent only paints the tab band.
+    const term = terminal orelse return .{
+        .client_w = client_w,
+        .client_h = client_h,
+        .cs = cs,
+        .tab_bar_h = tab_bar_h,
+    };
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w: u32 = client_w -| sb_px;
     const shader_col: u32 = @divTrunc(grid_w + cs.x - 1, cs.x);
-    const tab_bar_h: u32 = @intCast(@max(0, self.common.tab_bar_height));
     const term_pixel_h: u32 = client_h -| tab_bar_h;
     const term_shader_row: u32 = @divTrunc(term_pixel_h + cs.y - 1, cs.y);
     if (shader_col > cell_buffer.max_shader_col) return null;
@@ -1722,6 +1731,8 @@ test "OpenGL panes share context and programs but own DCs buffers and glyph cach
             const hole = win32.RECT{ .left = 0, .top = 10, .right = 100, .bottom = 50 };
             parent.renderChrome(hwnd, session.term, .{ .tabs = &.{}, .new_tab_col = null, .new_tab_hovered = false }, 0xffffff, 1, false, &.{hole});
             try std.testing.expect(parent.failure == null);
+            try std.testing.expect(parent.atlas == 0 and parent.glyph_cache == null);
+            try std.testing.expect(a.atlas != 0 and b.atlas != 0);
             gl.BindFramebuffer(gl.READ_FRAMEBUFFER, parent.pure_wgl_surface.framebuffer);
             var inside: [4]u8 = undefined;
             var outside: [4]u8 = undefined;

@@ -121,8 +121,9 @@ fn append(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal, 
         x + @as(f64, @floatFromInt(p.dest_width)) <= 0 or y + @as(f64, @floatFromInt(p.dest_height)) <= 0) return;
     if (!self.images.contains(image.id)) {
         const rgba = try @import("../renderer/image_pixels.zig").toRgba(allocator, image);
-        defer allocator.free(rgba);
-        const native = try graphics.Image.createRgba(rgba, image.width, image.height);
+        defer rgba.deinit(allocator);
+        // createRgba's CFData owns a copy before the source can change.
+        const native = try graphics.Image.createRgba(rgba.bytes(), image.width, image.height);
         errdefer native.release();
         try self.images.put(allocator, image.id, .{ .image = native, .generation = image.generation, .width = image.width, .height = image.height });
     }
@@ -161,4 +162,26 @@ pub fn draw(self: *const KittyImages, context: *graphics.BitmapContext, layer: L
         // remain exact without allocating a new CGImage for each placement.
         ctx.drawImage(context, graphics.Rect.init(p.x - @as(f64, @floatFromInt(p.source_x)) * sx, top + @as(f64, @floatFromInt(p.source_y)) * sy - image_height, image_width, image_height), entry.image);
     }
+}
+
+test "native image retains pixels after borrowed upload source changes" {
+    var source = [_]u8{ 255, 0, 0, 255 };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const rgba = try @import("../renderer/image_pixels.zig").toRgba(failing.allocator(), .{
+        .width = 1,
+        .height = 1,
+        .format = .rgba,
+        .data = .{ .complete = &source },
+    });
+    const native = try graphics.Image.createRgba(rgba.bytes(), 1, 1);
+    defer native.release();
+    rgba.deinit(failing.allocator());
+    @memset(&source, 0);
+    var pixels = [_]u8{0} ** 4;
+    const space = try graphics.ColorSpace.createDeviceRGB();
+    defer space.release();
+    const context = try graphics.BitmapContext.create(&pixels, 1, 1, 8, 4, space, @intFromEnum(graphics.ImageAlphaInfo.premultiplied_last));
+    defer graphics.Context.release(context);
+    graphics.Context.drawImage(context, graphics.Rect.init(0, 0, 1, 1), native);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, &pixels);
 }
