@@ -240,7 +240,9 @@ struct PaneTests {
         let other = model.selectedTab!
         let titles = panes.map(\.title)
         let beforeHistory = mostty_tab_scrollbar(panes[0].view.testSession!).total
-        settle(0.3)
+        // Background output is periodic and its PTY reader is asynchronous.
+        // A short fixed delay can expire before a newly exposed viewport fills.
+        _ = waitUntil { mostty_tab_scrollbar(panes[0].view.testSession!).total > beforeHistory }
         expect(panes.allSatisfy { $0.view.hasActiveSession } && panes.map { $0.view.testSession } == sessions,
                "switching tabs preserves all hidden sessions")
         expect(mostty_tab_scrollbar(panes[0].view.testSession!).total > beforeHistory,

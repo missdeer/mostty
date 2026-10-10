@@ -37,10 +37,14 @@ jobs:
 
       - name: Install shader toolchain
         shell: pwsh
-        run: >-
-          winget install --id KhronosGroup.VulkanSDK --version 1.4.350.0 --exact
-          --silent --disable-interactivity --accept-package-agreements
-          --accept-source-agreements
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            winget install --source winget --id KhronosGroup.VulkanSDK --version 1.4.350.0 --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Warning "Vulkan SDK installation attempt $attempt failed with exit code $LASTEXITCODE"
+            if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+          }
+          throw 'Vulkan SDK installation failed after three attempts'
 
       - name: Build
         run: zig build -Doptimize=${{ matrix.optimize }} -Dcpu=${{ matrix.cpu }}
