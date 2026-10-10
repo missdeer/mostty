@@ -1,5 +1,62 @@
 import AppKit
 
+// No window, PTY, Metal device or pointer injection is needed: only the title
+// C bridge is doubled, while the production view, model and tab strip run.
+private func testTitleUpdates(_ model: AppModel, expect: (Bool, String) -> Void) {
+    let first = model.selectedTab!
+    let view = first.view
+    let originalCallback = view.onTitleChange
+    var notifications = 0
+    view.onTitleChange = { title in
+        notifications += 1
+        originalCallback?(title)
+    }
+    defer {
+        view.onTitleChange = originalCallback
+        clipboard_test_title("")
+    }
+    let bar = model.tabBar!
+    let refreshes = bar.testRefreshCount
+    func poll() { view.testUpdateTitle(session: clipboard_test_title_session()) }
+    clipboard_test_title("mostty")
+    for _ in 0..<1000 { poll() }
+    expect(notifications == 1 && bar.testRefreshCount == refreshes + 1 &&
+           first.title == "mostty" && first.activePane?.title == "mostty",
+           "1000 unchanged PTY title polls deliver one notification and one tab refresh")
+    clipboard_test_title("")
+    poll()
+    clipboard_test_title("mostty")
+    poll()
+    expect(notifications == 1 && first.title == "mostty" && bar.testRefreshCount == refreshes + 1,
+           "empty title preserves the old display and does not invalidate duplicate suppression")
+    clipboard_test_title("编辑器 — build")
+    poll()
+    expect(notifications == 2 && first.title == "编辑器 — build" && bar.testRefreshCount == refreshes + 2,
+           "a genuine Unicode title change is immediately propagated")
+    let unchangedRefreshes = bar.testRefreshCount
+    let unchangedTitle = first.title
+    for _ in 0..<1000 { first.title = unchangedTitle }
+    expect(bar.testRefreshCount == unchangedRefreshes,
+           "1000 identical tab title assignments perform no full-strip refresh")
+    let chip = bar.subviews.compactMap { $0 as? TabChipButton }.first { $0.selected }!
+    expect(chip.title == first.title && chip.toolTip == first.title &&
+           chip.accessibilityLabel() == first.title &&
+           chip.closeButton.accessibilityLabel() == "Close \(first.title)",
+           "changed titles reach painting, tooltip and VoiceOver labels")
+    let font = model.tabbarFont
+    model.tabbarFont = NSFont.monospacedSystemFont(ofSize: 24, weight: .regular)
+    expect(bar.testRefreshCount == unchangedRefreshes + 1 && chip.titleFont.pointSize == 24,
+           "font changes refresh unchanged titles")
+    model.tabbarFont = font
+    let themeRefreshes = bar.testRefreshCount
+    model.selectTheme("Dark")
+    expect(bar.testRefreshCount > themeRefreshes, "theme changes refresh unchanged titles")
+    let tabRefreshes = bar.testRefreshCount
+    let tabs = model.tabs
+    model.tabs = tabs
+    expect(bar.testRefreshCount == tabRefreshes + 1, "explicit tab-list refresh survives title deduplication")
+}
+
 private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
     let first = model.tabs[0]
     first.title = "确认 Windows 和 macOS 标签栏渲染方式 | mostty"
@@ -69,8 +126,22 @@ private func testTabBar(_ model: AppModel, expect: (Bool, String) -> Void) {
         $0.convert($0.bounds, to: host).minX < $1.convert($1.bounds, to: host).minX
     }
     let plus = descendants(host, of: LauncherMenuButton.self).first!
+    let unchangedRefreshes = host.testRefreshCount
+    let unchangedTitle = first.title
+    for _ in 0..<1000 { first.title = unchangedTitle }
+    expect(host.testRefreshCount == unchangedRefreshes,
+           "1000 identical tab title assignments perform no full-strip refresh")
+    first.title = "Changed title"
+    expect(host.testRefreshCount == unchangedRefreshes + 1 && chips[0].title == first.title &&
+           chips[0].toolTip == first.title && chips[0].accessibilityLabel() == first.title &&
+           chips[0].closeButton.accessibilityLabel() == "Close \(first.title)",
+           "one real title change refreshes once and updates painting, tooltip and VoiceOver labels")
+    first.title = unchangedTitle
     let originalFont = model.tabbarFont
+    let fontRefreshes = host.testRefreshCount
     model.tabbarFont = NSFont(name: "Courier New", size: 30)!
+    expect(host.testRefreshCount == fontRefreshes + 1,
+           "explicit font changes still refresh unchanged titles")
     window.setContentSize(NSSize(width: 1200, height: model.tabbarHeight + 8))
     settle()
     expect(chips.allSatisfy { $0.titleFont.familyName == "Courier New" && $0.titleFont.pointSize == 30 },
@@ -204,6 +275,7 @@ private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
     let first = model.selectedTab!
     expect(window.isVisible && window.firstResponder === first.view && first.view.hasActiveSession,
            "AppKit launch displays a running terminal with keyboard focus")
+    testTitleUpdates(model, expect: expect)
     expect(window.tabbingMode == .disallowed &&
            window.contentMinSize.width >= 480 && window.contentMinSize.height >= 300,
            "native window preserves custom tabs and terminal minimum dimensions")
@@ -266,10 +338,17 @@ private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
     let bottom = first.activePane!
     expect(bottom !== right && bottom.view.frame.minY > right.view.frame.minY,
            "split-down shortcut creates and focuses a pane below its source")
+    let backgroundRefreshes = model.tabBar!.testRefreshCount
+    left.view.onTitleChange?("left title")
+    right.view.onTitleChange?("right title")
+    expect(model.tabBar!.testRefreshCount == backgroundRefreshes &&
+           left.title == "left title" && right.title == "right title",
+           "background pane title changes are retained without refreshing the active tab")
+    bottom.view.onTitleChange?("bottom title")
     for (key, target) in [(NSUpArrowFunctionKey, right), (NSDownArrowFunctionKey, bottom),
                            (NSLeftArrowFunctionKey, left), (NSRightArrowFunctionKey, right)] {
         expect(shortcut(String(UnicodeScalar(key)!), modifiers: [.command, .option]) &&
-               first.activePane === target && window.firstResponder === target.view,
+               first.activePane === target && window.firstResponder === target.view && first.title == target.title,
                "native directional shortcut focuses the adjacent pane and its input responder")
     }
     expect(shortcut("\r", modifiers: [.command, .shift]) && mostty_layout_panes(first.layout, nil, 0) == 1,
@@ -313,7 +392,10 @@ private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
     let light = themeMenu.item(withTitle: "L")!.submenu!
     light.performActionForItem(at: 0)
     expect(model.activeTheme == "Light", "native theme menu actions apply the selected theme")
+    let themeRefreshes = model.tabBar!.testRefreshCount
     model.selectTheme("Dark")
+    expect(model.tabBar!.testRefreshCount > themeRefreshes,
+           "explicit theme changes still refresh tabs whose titles have not changed")
     delegate.menuNeedsUpdate(themeMenu)
     expect(themeMenu.item(withTitle: "D")!.submenu!.items[0].state == .on &&
            themeMenu.item(withTitle: "L")!.submenu!.items[0].state == .off,
@@ -398,8 +480,11 @@ private final class OriginalDelegate: NSObject, NSWindowDelegate {
 struct InteractionTests {
     static func main() {
         _ = NSApplication.shared
-        NSApp.setActivationPolicy(.regular)
-        NSApp.finishLaunching()
+        let titlesOnly = CommandLine.arguments.contains("--titles-only")
+        if !titlesOnly {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.finishLaunching()
+        }
         var failures = 0
         func expect(_ condition: Bool, _ rule: String) {
             print("\(condition ? "PASS" : "FAIL"): \(rule)")
@@ -407,6 +492,12 @@ struct InteractionTests {
         }
         let model = AppModel.shared
         defer { model.shutdownAll() }
+        if titlesOnly {
+            let bar = TabBar(model: model)
+            withExtendedLifetime(bar) { testTitleUpdates(model, expect: expect) }
+            print("\(failures) title checks failed")
+            exit(failures == 0 ? 0 : 1)
+        }
         testTabBar(model, expect: expect)
         for _ in 1..<9 { model.newTab() }
         for index in 0..<9 {

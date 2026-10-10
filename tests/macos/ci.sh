@@ -24,6 +24,9 @@ run_suite() {
 }
 run_suite unit zig build test --global-cache-dir .zig-cache --summary all
 run_suite bundle-themes swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/bundle-themes.swift zig-out/Mostty.app
+# Production AppKit title handling with bridge doubles; no windows, Metal or
+# pointer permission. Keep this outside the native GUI capability gates.
+run_suite titles bash tests/macos/interactions.sh --titles-only
 swiftc -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/preflight.swift -o tmp/ci-macos/preflight
 preflight_build=$?
 if [ "$preflight_build" -ne 0 ]; then

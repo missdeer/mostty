@@ -15,4 +15,15 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig build test -Dcore-only --global-cache-dir .zig-cache --summary all
+      - name: Run shared suites
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p tmp/ci-core
+          zig build test -Dcore-only --global-cache-dir .zig-cache --summary all 2>&1 | tee tmp/ci-core/unit.log
+      - name: Preserve shared test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-evidence
+          path: tmp/ci-core/

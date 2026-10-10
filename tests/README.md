@@ -13,12 +13,14 @@ skipped counts (for example the macOS-only config-path test on other hosts).
 | All host unit suites | `zig build test --summary all` | Both native build workflows; Windows executes all 12 build configurations |
 | Cross-platform semantic analysis | `zig build check-macos-session -Dtarget=aarch64-macos` or `x86_64-macos` | Compile-only on Linux; never a native test pass |
 | Bundled themes | `swift tests/macos/bundle-themes.swift zig-out/Mostty.app` | macOS inventory |
+| Title notification / refresh / accessibility | `bash tests/macos/interactions.sh --titles-only` | macOS AppKit; no Metal, GUI session or pointer injection requirement |
 | Native panes / real PTY / Metal | `zig build test-macos-panes` | macOS desktop + Metal |
 | Pane configuration reload | `zig build test-macos-pane-config` | Same; temporarily changes and restores user config |
 | Clipboard | `bash tests/macos/clipboard.sh` | macOS desktop; restores clipboard |
 | Interactions | `bash tests/macos/interactions.sh` | macOS desktop + pointer injection permission |
 | Scrollbar | `bash tests/macos/scrollbar.sh` | macOS desktop + Metal + existing pointer injection permission; exercises native tracking with real system events |
 | Shader scalar contracts | `pwsh -File tools/shader-contract-tests.ps1` | Windows inventory; also runnable with PowerShell on Linux; offline math, not GPU execution |
+| Chrome resource separation | `pwsh -File tools/chrome-resource-contract-tests.ps1` | Windows inventory; also runnable on Linux; source contracts, not GPU execution. Native resource assertions run in Windows unit tests |
 | Acceptance summary contract | `pwsh -File tools/pane-matrix-summary-test.ps1` | Windows inventory; requires jq; also runnable on Linux |
 | Vulkan report/recovery contract | `pwsh -File tools/vulkan-acceptance.ps1 self-test` | Windows inventory |
 | CI baseline result contract | `pwsh -File tools/ci-result-test.ps1` | Windows inventory; validates pass/fail/blocked mappings and rejects missing/mismatched evidence |

@@ -19,6 +19,7 @@ function Invoke-Suite([string]$Name, [scriptblock]$Run, [string]$ResultDirectory
 }
 try {
     Invoke-Suite 'shader-contract-tests' { & tools/shader-contract-tests.ps1 }
+    Invoke-Suite 'chrome-resource-contract-tests' { & tools/chrome-resource-contract-tests.ps1 }
     Invoke-Suite 'pane-matrix-summary-test' { & tools/pane-matrix-summary-test.ps1 }
     Invoke-Suite 'vulkan-self-test' { & tools/vulkan-acceptance.ps1 self-test }
     Invoke-Suite 'ci-result-test' { & tools/ci-result-test.ps1 }

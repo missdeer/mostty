@@ -248,13 +248,15 @@ fn uploadImageIfNeeded(
     }
 
     const rgba = try @import("../../renderer/image_pixels.zig").toRgba(alloc, image);
-    defer alloc.free(rgba);
+    defer rgba.deinit(alloc);
 
     // Secure the map slot before any GPU work is recorded. Uploading first
     // and releasing on a failed insert would destroy a resource the backend
     // has already named in commands it has not submitted yet.
     const gop = try self.images.getOrPut(alloc, key);
-    const uploaded = renderer.kittyImageUpload(image.width, image.height, rgba) orelse {
+    // D3D11/GL consume CPU bytes during this call; D3D12/Vulkan copy them
+    // into owned staging before recording asynchronous GPU work.
+    const uploaded = renderer.kittyImageUpload(image.width, image.height, rgba.bytes()) orelse {
         if (!gop.found_existing) _ = self.images.remove(key);
         return error.UploadFailed;
     };

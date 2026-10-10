@@ -27,6 +27,10 @@ private var mouseAction: UInt32 = 0
 private var mouseButton: UInt32 = 0
 private var mouseX: Int32 = 0
 private var mouseY: Int32 = 0
+private var displayTitle = ""
+
+func clipboard_test_title(_ title: String) { displayTitle = title }
+func clipboard_test_title_session() -> OpaquePointer { OpaquePointer(tabs) }
 
 func clipboard_test_mouse_mode(_ enabled: Bool) { mouseEnabled = enabled; mouseCount = 0 }
 func clipboard_test_mouse_count() -> UInt32 { mouseCount }
@@ -135,7 +139,11 @@ func stubSetSurface(_ tab: OpaquePointer?, _ width: UInt32, _ height: UInt32, _ 
 func stubRender(_ tab: OpaquePointer?, _ cursor: Bool, _ textBlinkOn: Bool,
                 _ cols: UnsafeMutablePointer<UInt32>?, _ rows: UnsafeMutablePointer<UInt32>?) -> UnsafeMutableRawPointer? { nil }
 @_cdecl("mostty_tab_title")
-func stubTitle(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ capacity: Int) -> Int { 0 }
+func stubTitle(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ capacity: Int) -> Int {
+    let bytes = Array(displayTitle.utf8.prefix(capacity))
+    buffer?.update(from: bytes, count: bytes.count)
+    return bytes.count
+}
 @_cdecl("mostty_tab_poll_exit")
 func stubPollExit(_ tab: OpaquePointer?, _ code: UnsafeMutablePointer<Int32>?) -> Bool { false }
 @_cdecl("mostty_tab_cell_size")

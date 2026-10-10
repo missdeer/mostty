@@ -73,10 +73,18 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     private var overlay: OverlayView?
 
     var onTitleChange: ((String) -> Void)?
+    private var lastNotifiedTitle: String?
     var onExit: (() -> Void)?
     var onFocus: (() -> Void)?
 #if MOSTTY_APP_TESTS
     var testSession: OpaquePointer? { tab }
+    func testUpdateTitle(session: OpaquePointer? = nil) {
+        // Title-only tests use the bridge double without starting PTY/Metal.
+        let saved = tab
+        if let session = session { tab = session }
+        defer { tab = saved }
+        updateTitle()
+    }
     func testUpdateURLHover(at point: NSPoint?) {
         updateURLHover(at: point, updateCursor: point.map { bounds.contains($0) } ?? false)
     }
@@ -409,7 +417,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         let n = mostty_tab_title(t, &buf, buf.count)
         if n > 0 {
             let title = String(decoding: buf[0..<n], as: UTF8.self)
-            onTitleChange?(title)
+            // Empty bridge titles keep the previous display title. Cache only
+            // a delivered nonempty title, so ordinary PTY output is a no-op.
+            guard title != lastNotifiedTitle, let onTitleChange = onTitleChange else { return }
+            lastNotifiedTitle = title
+            onTitleChange(title)
         }
     }
 

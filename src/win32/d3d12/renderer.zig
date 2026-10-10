@@ -890,7 +890,7 @@ pub fn render(
         prepared.shader_col,
         prepared.term_shader_row,
         prepared.tex_cell_count,
-        prepared.atlas,
+        prepared.atlas.?,
         resizing,
         cursor_text,
         selection_bg,
@@ -934,7 +934,8 @@ pub fn syncSurface(self: *D3d12Renderer, parent: *D3d12Renderer) void {
 }
 
 pub fn renderChrome(self: *D3d12Renderer, hwnd: win32.HWND, term: *vt.Terminal, tabbar: types.TabBarDraw, background: u24, opacity: f32, remote_session: bool, pane_rects: []const win32.RECT) void {
-    const prepared = self.prepareFrame(hwnd, term, false) orelse return;
+    _ = term; // Chrome has no terminal cells or glyph atlas.
+    const prepared = self.prepareFrame(hwnd, null, false) orelse return;
     self.grid_target.moveTo(self.command_list, win32.D3D12_RESOURCE_STATE_RENDER_TARGET);
     const rgba = color.linearBackground(background, opacity);
     self.command_list.ClearRenderTargetView(self.render_targets.cpu(), &rgba[0], 0, &.{});
@@ -947,19 +948,19 @@ const PreparedFrame = struct {
     client_w: u32,
     client_h: u32,
     cs: CellXY,
-    shader_col: u32,
+    shader_col: u32 = 0,
     tab_bar_h: u32,
-    term_pixel_h: u32,
-    term_shader_row: u32,
-    atlas: gpu.AtlasFrame,
-    tex_cell_count: CellXY,
-    config: shader.GridConfig,
+    term_pixel_h: u32 = 0,
+    term_shader_row: u32 = 0,
+    atlas: ?gpu.AtlasFrame = null,
+    tex_cell_count: CellXY = .{ .x = 0, .y = 0 },
+    config: shader.GridConfig = std.mem.zeroes(shader.GridConfig),
 };
 
 fn prepareFrame(
     self: *D3d12Renderer,
     hwnd: win32.HWND,
-    term: *vt.Terminal,
+    terminal: ?*vt.Terminal,
     mouse_in_scrollbar: bool,
 ) ?PreparedFrame {
     self.frame_pending = false;
@@ -1036,10 +1037,18 @@ fn prepareFrame(
     if (!self.healthy()) return null;
 
     const cs = self.font_service.cell_size_xy;
+    const tab_bar_h: u32 = @intCast(@max(0, self.common.tab_bar_height));
+    // Surface acquisition/recovery and font metrics are shared with chrome.
+    // Terminal resources must remain lazy: the parent only paints the tab band.
+    const term = terminal orelse return .{
+        .client_w = client_w,
+        .client_h = client_h,
+        .cs = cs,
+        .tab_bar_h = tab_bar_h,
+    };
     const sb_px: u32 = scrollbarWidth(win32.dpiFromHwnd(hwnd));
     const grid_w: u32 = client_w -| sb_px;
     const shader_col: u32 = @divTrunc(grid_w + cs.x - 1, cs.x);
-    const tab_bar_h: u32 = @intCast(@max(0, self.common.tab_bar_height));
     const term_pixel_h: u32 = client_h -| tab_bar_h;
     const term_shader_row: u32 = @divTrunc(term_pixel_h + cs.y - 1, cs.y);
     if (shader_col > cell_buffer.max_shader_col) return null;
@@ -1598,11 +1607,20 @@ comptime {
 }
 
 test "D3D12 panes share device and pipelines but own command and cache resources" {
+    const hwnd = win32.CreateWindowExW(.{ .NOREDIRECTIONBITMAP = 1 }, win32.L("STATIC"), win32.L(""), .{}, 0, 0, 320, 200, null, null, win32.GetModuleHandleW(null), null) orelse return error.TestWindowUnavailable;
+    defer _ = win32.DestroyWindow(hwnd);
     var common: RendererCommon = undefined;
     var fonts = FontService.init(&common, 96, .{}, true, null);
     defer fonts.deinit();
     var parent = try D3d12Renderer.init(&common, &fonts, null);
     defer parent.deinit();
+    for (0..2) |_| {
+        const chrome = parent.prepareFrame(hwnd, null, false) orelse return error.TestFrameUnavailable;
+        try std.testing.expect(chrome.atlas == null and parent.atlas.resource == null and parent.glyph_cache == null);
+        try std.testing.expect(chrome.cs.eql(fonts.cell_size_xy));
+        fonts.updateFont(.{});
+        parent.onFontStateChanged();
+    }
     var ac = common;
     ac.surface_id = 1;
     ac.tab_bar_height = 0;

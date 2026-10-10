@@ -242,8 +242,11 @@ fn decodeFile(allocator: std.mem.Allocator, payload: []const u8, viewport_width:
     try decoder.decode(data, encoded);
     const decode = decode_image orelse vt.sys.decode_png orelse return error.UnsupportedFormat;
     const image = try decode(allocator, data);
-    defer allocator.free(image.data);
+    var image_owned = true;
+    defer if (image_owned) allocator.free(image.data);
     if (image.width == 0 or image.height == 0) return error.InvalidData;
+    const source_count = try std.math.mul(usize, image.width, image.height);
+    if (image.data.len != try std.math.mul(usize, source_count, 4)) return error.InvalidData;
     var w = width orelse image.width;
     var h = height orelse image.height;
     if (preserve_aspect) {
@@ -254,6 +257,10 @@ fn decodeFile(allocator: std.mem.Allocator, payload: []const u8, viewport_width:
         h = @intFromFloat(@max(1, @round(@as(f64, @floatFromInt(image.height)) * scale)));
     }
     if (w == 0 or h == 0 or w > Sixel.max_dimension or h > Sixel.max_dimension or @as(usize, w) * h * 4 > Sixel.max_bytes) return error.InvalidSize;
+    if (w == image.width and h == image.height) {
+        image_owned = false;
+        return image;
+    }
     const pixels = try allocator.alloc(u8, @as(usize, w) * h * 4);
     for (0..h) |y| {
         for (0..w) |x| {
@@ -303,4 +310,58 @@ test "image decode releases compressed and original pixels before returning scal
         counted.allocator().free(image.data);
         try std.testing.expectEqual(@as(usize, 0), counted.total_requested_bytes);
     }
+}
+
+test "same-size image transfers decoder pixels without an output allocation or copy" {
+    const Decoder = struct {
+        var original: [*]u8 = undefined;
+        const pixels = [_]u8{ 11, 22, 33, 0, 44, 55, 66, 127 };
+        fn decode(allocator: std.mem.Allocator, _: []const u8) vt.sys.DecodeError!vt.sys.Image {
+            const data = try allocator.dupe(u8, &pixels);
+            original = data.ptr;
+            return .{ .width = 2, .height = 1, .data = data };
+        }
+    };
+    const previous = decode_image;
+    decode_image = Decoder.decode;
+    defer decode_image = previous;
+    for ([_][]const u8{
+        "inline=1:AAAA",
+        "inline=1;width=2px;height=1px:AAAA",
+        "inline=1;width=2px;height=2px:AAAA", // Aspect fit is still the original size.
+        "inline=1;width=2px;height=1px;preserveAspectRatio=0:AAAA",
+    }) |payload| {
+        // Only base64 scratch + decoder pixels may allocate. A third allocation fails.
+        var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+        const image = try decodeFile(counted.allocator(), payload, 800, 600, 8, 16);
+        try std.testing.expectEqual(@as(usize, 2), counted.allocations);
+        try std.testing.expectEqual(Decoder.original, image.data.ptr);
+        try std.testing.expectEqual(std.hash.Wyhash.hash(0, &Decoder.pixels), std.hash.Wyhash.hash(0, image.data));
+        try std.testing.expectEqual(@as(usize, 8), counted.allocated_bytes - counted.freed_bytes);
+        counted.allocator().free(image.data);
+        try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+    }
+}
+
+test "image decode failures release scratch and decoder pixels" {
+    const Decoder = struct {
+        var malformed = false;
+        fn decode(allocator: std.mem.Allocator, _: []const u8) vt.sys.DecodeError!vt.sys.Image {
+            const pixels = try allocator.alloc(u8, if (malformed) 3 else 4);
+            @memset(pixels, 255);
+            return .{ .width = 1, .height = 1, .data = pixels };
+        }
+    };
+    const previous = decode_image;
+    decode_image = Decoder.decode;
+    defer decode_image = previous;
+    for (0..3) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, decodeFile(failing.allocator(), "inline=1;width=2px;height=2px:AAAA", 800, 600, 8, 16));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+    Decoder.malformed = true;
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try std.testing.expectError(error.InvalidData, decodeFile(counted.allocator(), "inline=1:AAAA", 800, 600, 8, 16));
+    try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
 }
