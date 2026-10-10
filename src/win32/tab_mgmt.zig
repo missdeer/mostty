@@ -44,7 +44,7 @@ fn onTitleChanged(context: *anyopaque, term: *vt.Terminal) void {
 // this, tools like nvim/fzf/less hang waiting for the reply they parse off
 // stdin. Reached only via TerminalSession.feed on the UI thread; replies
 // are small (a few bytes) and go through the same path as user keystrokes
-// (see writeToActivePty), so synchronous writeAll is fine in practice.
+// (see writeToActivePty), through the ordered asynchronous input queue.
 fn onWritePty(context: *anyopaque, data: []const u8) void {
     const tab: *Tab = @ptrCast(@alignCast(context));
     if (tab.closing) return;
@@ -186,7 +186,7 @@ fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*c
 
     tab.session.init(.{
         .io = std.Io.Threaded.global_single_threaded.io(),
-        .terminal_allocator = std.heap.page_allocator,
+        .terminal_allocator = global.gpa.allocator(),
         .stream_allocator = global.gpa.allocator(),
         .cols = cell_count.col,
         .rows = cell_count.row,
@@ -307,18 +307,10 @@ fn releasePane(window: *Window, tab: *Tab) void {
         }
     }
 
-    // Stop the reader. Three wake mechanisms:
-    //   1. CancelIoEx     — interrupts ReadFile (if reader is parked there)
-    //   2. SetEvent       — wakes WaitForSingleObject on the ring's
-    //                       wake_event (if ring was full)
-    //   3. closePty       — closes the ConPTY + our_write side, guaranteeing
-    //                       ReadFile returns BROKEN_PIPE even if CancelIoEx
-    //                       lost a race (reader hadn't entered ReadFile yet).
-    // (1) and (2) are fast wakes; (3) is the belt-and-suspenders guarantee
-    // against the narrow window where reader is between the stop_flag check
-    // at the top of the loop and the ReadFile call.
+    // Stop UI publication and wake a full ring. The reader must keep draining
+    // and discarding until EOF: legacy ClosePseudoConsole waits for its output
+    // flush. Canceling the reader before that flush can deadlock this thread.
     tab.reader_stop.store(true, .release);
-    _ = win32.CancelIoEx(tab.child_process.read, null);
     _ = win32.SetEvent(tab.pty_ring.wake_event);
     tab.child_process.closePty();
 

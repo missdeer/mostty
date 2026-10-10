@@ -1,5 +1,6 @@
 pub fn build(b: *std.Build) void {
-    const target = resolveTarget(b);
+    const core_only = b.option(bool, "core-only", "Run shared tests without building a native application") orelse false;
+    const target = if (core_only) b.standardTargetOptions(.{}) else resolveTarget(b);
     const optimize = b.standardOptimizeOption(.{});
 
     const dep_opts = .{
@@ -11,6 +12,8 @@ pub fn build(b: *std.Build) void {
     addLayoutTests(b, target, optimize, test_step);
     addCoreTests(b, target, optimize, vt, test_step);
     addMacosGridTests(b, target, optimize, vt, test_step);
+
+    if (core_only) return;
 
     switch (target.result.os.tag) {
         .windows => buildWindows(b, target, optimize, vt, test_step),
@@ -176,6 +179,18 @@ fn buildMacos(
         renderer_check.root_module.linkSystemLibrary("c", .{});
         check_step.dependOn(&renderer_check.step);
         test_step.dependOn(&renderer_check.step);
+        // Analyze native regression test bodies too. No emitted executable and
+        // no Apple framework linking: this remains explicitly compile-only.
+        const native_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mosttymacos.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        native_tests.root_module.addImport("vt", vt);
+        native_tests.root_module.addImport("z2d", b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d"));
+        native_tests.root_module.linkSystemLibrary("c", .{});
+        check_step.dependOn(&native_tests.step);
+        test_step.dependOn(&native_tests.step);
     }
 }
 
@@ -242,6 +257,9 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     pane_client.addFileArg(b.path("tests/macos/pane-client.swift"));
     pane_client.addArg("-o");
     const pane_client_exe = pane_client.addOutputFileArg("pane-client");
+    const pane_check = b.step("check-macos-panes", "Compile native pane acceptance executables without running GUI tests");
+    pane_check.dependOn(&pane_link.step);
+    pane_check.dependOn(&pane_client.step);
     const pane_run = b.addSystemCommand(&.{"/usr/bin/env"});
     pane_run.addFileArg(pane_exe);
     pane_run.addFileArg(pane_client_exe);

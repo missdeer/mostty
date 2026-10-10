@@ -509,8 +509,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 std.log.warn("config: {s}:{}: invalid font-size '{s}'", .{ source_name, line_no, value });
                 continue;
             };
-            if (!(n > 0)) {
-                std.log.warn("config: {s}:{}: font-size must be positive (got {d})", .{ source_name, line_no, n });
+            if (!validFontSize(n)) {
+                std.log.warn("config: {s}:{}: font-size must be finite and in [1,256] (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             font_size_pt = n;
@@ -540,8 +540,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 std.log.warn("config: {s}:{}: invalid tabbar-font-size '{s}'", .{ source_name, line_no, value });
                 continue;
             };
-            if (!(n > 0)) {
-                std.log.warn("config: {s}:{}: tabbar-font-size must be positive (got {d})", .{ source_name, line_no, n });
+            if (!validFontSize(n)) {
+                std.log.warn("config: {s}:{}: tabbar-font-size must be finite and in [1,256] (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             tabbar_font_size_pt = n;
@@ -814,6 +814,27 @@ fn parseFullscreen(value: []const u8) ?bool {
 
 // 1..1000 ms: 1 ms is effectively "no throttle" (a single GetTickCount tick),
 // 1000 ms is 1 FPS — anything outside that range is almost certainly a typo.
+pub fn validFontSize(value: f32) bool {
+    return std.math.isFinite(value) and value >= 1 and value <= 256;
+}
+
+// Native font metrics must remain representable and nonzero even if a font
+// reports a degenerate advance or a device reports an unusual DPI.
+pub fn fontMetricPixels(value: f32) i32 {
+    if (!std.math.isFinite(value)) return 1;
+    return @intFromFloat(std.math.clamp(@round(value), 1, 16384));
+}
+
+test "font sizes and native metrics cannot create zero or unrepresentable cells" {
+    for ([_]f32{ 0, 0.0001, -1, 257, std.math.inf(f32), std.math.nan(f32) }) |value|
+        try std.testing.expect(!validFontSize(value));
+    for ([_]f32{ 1, 13, 256 }) |value| try std.testing.expect(validFontSize(value));
+    for ([_]f32{ 0, 0.1, -1, std.math.inf(f32), std.math.nan(f32) }) |value|
+        try std.testing.expectEqual(@as(i32, 1), fontMetricPixels(value));
+    try std.testing.expectEqual(@as(i32, 16384), fontMetricPixels(1e20));
+    try std.testing.expectEqual(@as(i32, 18), fontMetricPixels(17.6));
+}
+
 fn parseRenderIntervalMs(value: []const u8) ?u32 {
     const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, " \t"), 10) catch return null;
     if (n < 1 or n > 1000) return null;

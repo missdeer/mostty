@@ -69,10 +69,10 @@ struct PaneTests {
         let window = NSWindow(contentRect: NSRect(x: 60, y: 80, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Mostty pane acceptance"
-        let container = ContainerView(frame: window.contentView!.bounds)
-        container.model = model
-        model.container = container
-        window.contentView = container
+        // Include the production chrome: it owns window opacity and blur.
+        let content = ContentView(model: model, frame: window.contentView!.bounds)
+        let container = content.terminal
+        window.contentView = content
         var failures = 0
         func expect(_ condition: Bool, _ rule: String) {
             print("\(condition ? "PASS" : "FAIL"): \(rule)")
@@ -84,6 +84,11 @@ struct PaneTests {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.01))
                 window.contentView?.layoutSubtreeIfNeeded()
             } while Date() < until
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline { settle(0.02) }
+            return condition()
         }
         func launcher(_ name: String) -> TerminalLauncher {
             TerminalLauncher(label: name,
@@ -115,7 +120,8 @@ struct PaneTests {
         model.splitSelected(1, launcher: launcher("three"))
         model.focusDirection(1)
         model.splitSelected(1, launcher: launcher("four"))
-        settle(1)
+        expect(waitUntil { tab.panes.count == 4 && tab.panes.allSatisfy { $0.title.split(separator: ":").count == 4 } },
+               "all pane probes have entered raw mode and published their initial title")
         expect(tab.panes.count == 4 && tab.panes.allSatisfy { $0.view.hasActiveSession },
                "four mixed-direction panes run independent real PTYs")
         guard tab.panes.count == 4 else { return 1 }
@@ -129,7 +135,7 @@ struct PaneTests {
             expect(received(name) == "input-\(index)-中文\n", "Unicode input reaches only \(name)")
         }
         func dimensionsMatch() -> Bool {
-            panes.allSatisfy { pane in
+            func matches(_ diagnose: Bool) -> Bool { panes.allSatisfy { pane in
                 guard let session = pane.view.testSession else { return false }
                 let fields = pane.title.split(separator: ":")
                 guard fields.count == 4, let rows = UInt32(fields[2]), let cols = UInt32(fields[3]) else { return false }
@@ -139,9 +145,14 @@ struct PaneTests {
                 let layer = surface.layer as! CAMetalLayer
                 let matches = cols == max(1, UInt32(layer.drawableSize.width) / cw) &&
                     rows == max(1, UInt32(layer.drawableSize.height) / ch - 1)
-                if !matches { print("SIZE: \(pane.title) drawable=\(layer.drawableSize) cell=\(cw)x\(ch)") }
+                if !matches && diagnose { print("SIZE: \(pane.title) drawable=\(layer.drawableSize) cell=\(cw)x\(ch)") }
                 return matches
-            }
+            } }
+            // SIGWINCH and the child's OSC title travel asynchronously through
+            // the PTY and main queue. Wait for evidence, not a fixed 150 ms.
+            let deadline = Date().addingTimeInterval(3)
+            while !matches(false) && Date() < deadline { settle(0.02) }
+            return matches(true)
         }
         expect(dimensionsMatch(), "each real PTY reports rows and columns matching its own Metal drawable")
         func pixels(_ pane: PaneItem) throws -> (bytes: [UInt8], width: Int, height: Int) {
@@ -229,7 +240,9 @@ struct PaneTests {
         let other = model.selectedTab!
         let titles = panes.map(\.title)
         let beforeHistory = mostty_tab_scrollbar(panes[0].view.testSession!).total
-        settle(0.3)
+        // Background output is periodic and its PTY reader is asynchronous.
+        // A short fixed delay can expire before a newly exposed viewport fills.
+        _ = waitUntil { mostty_tab_scrollbar(panes[0].view.testSession!).total > beforeHistory }
         expect(panes.allSatisfy { $0.view.hasActiveSession } && panes.map { $0.view.testSession } == sessions,
                "switching tabs preserves all hidden sessions")
         expect(mostty_tab_scrollbar(panes[0].view.testSession!).total > beforeHistory,
@@ -259,14 +272,14 @@ struct PaneTests {
                        abs(Int(color[2]) - 16) <= 1 && abs(Int(color[3]) - 128) <= 1,
                        "reloaded theme and opacity reach hidden pane \(pane.id)'s premultiplied Metal pixels")
             }
-            expect(!window.isOpaque && container.subviews.contains { $0 is NSVisualEffectView } &&
+            expect(!window.isOpaque && content.subviews.contains { $0 is NSVisualEffectView } &&
                    panes.allSatisfy { !$0.view.isOpaque },
                    "transparent pane layers retain a shared native blur backdrop behind the selected tab")
             for pane in panes { input(pane, "R") }
             try writeConfig("font-family = Menlo\nfont-size = 12\nbackground = #101820\nbackground-opacity = 1\nbackground-blur = false\n")
             settle(1)
             expect(panes.map(cellHeight) == beforeCells && window.isOpaque &&
-                   !container.subviews.contains { $0 is NSVisualEffectView } && dimensionsMatch(),
+                   !content.subviews.contains { $0 is NSVisualEffectView } && dimensionsMatch(),
                    "restoring opaque font settings updates all panes and removes the blur backdrop")
         }
         model.selectedID = tab.id
@@ -534,7 +547,7 @@ struct PaneTests {
                "Kitty drawable remains within the native pane bounds after resize and scale changes")
         let siblingHeight = panes[1].view.frame.height
         input(panes[3], "\u{4}")
-        settle(0.5)
+        _ = waitUntil { tab.panes.count == 3 }
         expect(tab.panes.count == 3 && !panes[3].view.hasActiveSession && tab.panes.allSatisfy { $0.view.hasActiveSession },
                "one shell exit closes only its pane and keeps sibling readers alive")
         expect(panes[1].view.frame.height > siblingHeight && panes[1].view.testSession == sessions[1],
@@ -543,8 +556,14 @@ struct PaneTests {
         showSelected()
         let lastTab = model.selectedTab!
         let lastPane = lastTab.panes[0]
+        // tcsetattr(TCSAFLUSH) discards input sent before the probe enters raw
+        // mode. Its OSC title is emitted only after that transition completes.
+        guard waitUntil({ lastPane.title.hasPrefix("last:") }) else {
+            expect(false, "last-pane probe reaches raw input readiness")
+            return 1
+        }
         input(lastPane, "\u{4}")
-        settle(0.5)
+        _ = waitUntil { !model.tabs.contains { $0 === lastTab } }
         expect(!model.tabs.contains { $0 === lastTab } && !lastPane.view.hasActiveSession && model.selectedID == tab.id,
                "last-pane shell exit removes only that tab and selects the surviving tab")
         showSelected()

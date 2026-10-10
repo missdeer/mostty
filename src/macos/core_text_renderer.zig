@@ -477,7 +477,7 @@ fn rasterize(
         // otherwise it falls back to inverse video. Either way it is an explicit
         // highlight, so it stays opaque regardless of window opacity.
         if (cursor) |cur| {
-            if (draw_cell.col == cur.col and draw_cell.row == cur.row) {
+            if (draw_cell.contains(cur.col, cur.row)) {
                 const background = draw_cell.style.background;
                 draw_cell.style.background = cursor_color orelse draw_cell.style.foreground;
                 draw_cell.style.foreground = self.paint.cursor_text orelse background;
@@ -803,6 +803,17 @@ test "CoreText and Metal render a resized styled terminal frame" {
     try std.testing.expect(result.cols > 0);
     try std.testing.expect(result.rows > 0);
     try std.testing.expect(@intFromPtr(result.texture) != 0);
+
+    // Both cursor columns of the wide glyph must produce the same visible
+    // block. Comparing real rasterized pixels catches a renderer regression
+    // even if the shared cell-containment helper continues to pass.
+    _ = try renderer.render(&session, .{ .col = 1, .row = 0 });
+    const leading = try std.testing.allocator.dupe(u8, renderer.pixels);
+    defer std.testing.allocator.free(leading);
+    _ = try renderer.render(&session, .{ .col = 2, .row = 0 });
+    try std.testing.expectEqualSlices(u8, leading, renderer.pixels);
+    _ = try renderer.render(&session, null);
+    try std.testing.expect(!std.mem.eql(u8, leading, renderer.pixels));
 }
 
 test "color emoji keep their presentation and fit their VT cell span" {

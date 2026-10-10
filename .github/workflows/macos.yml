@@ -32,11 +32,16 @@ jobs:
       - name: Build
         run: zig build
 
-      - name: Test
-        run: zig build test
+      - name: Run test inventory
+        timeout-minutes: 25
+        run: bash tests/macos/ci.sh
 
-      - name: Verify bundled themes
-        run: swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/bundle-themes.swift zig-out/Mostty.app
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-evidence
+          path: tmp/
 
       - name: Package app bundle
         run: |

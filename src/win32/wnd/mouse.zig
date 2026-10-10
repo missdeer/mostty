@@ -507,15 +507,17 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     // captured tab whose mouse mode was disabled mid-drag would leak input
     // into global_mod.inputPane(hwnd).
     const tab = if (window.capture_pane_id) |id| window.findById(id) orelse return 0 else global_mod.inputPane(hwnd);
+    const notches = mouse_report.wheelNotches(&tab.wheel_accum, delta);
+    if (notches == 0) return 0;
     if (!util.isShiftDown() and mouse_report.enabled(tab.term)) {
         var pt: win32.POINT = .{ .x = win32.xFromLparam(lparam), .y = win32.yFromLparam(lparam) };
         const target_hwnd = tab.hwnd orelse hwnd;
         _ = win32.ScreenToClient(target_hwnd, &pt);
         const tm = terminalMouse(tab, target_hwnd, pt.x, pt.y);
         if (tm.in_grid) {
-            _ = sendMouseReport(tab, .{
+            for (0..@abs(notches)) |_| _ = sendMouseReport(tab, .{
                 .action = .press,
-                .button = if (delta > 0) .wheel_up else .wheel_down,
+                .button = if (notches > 0) .wheel_up else .wheel_down,
                 .mods = currentMods(),
                 .pos = tm.pos,
             }, tm.grid);
@@ -527,17 +529,9 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     // emit many messages with small deltas per physical notch. Accumulate
     // until we cross a notch boundary so scroll speed matches the wheel,
     // not the message rate.
-    const WHEEL_DELTA: i32 = 120;
     // Reset on direction reversal: a stale sub-notch residual in the
     // opposite direction would otherwise cancel part of the new flick
     // and swallow a notch the user physically produced.
-    if ((delta > 0 and tab.wheel_accum < 0) or (delta < 0 and tab.wheel_accum > 0)) {
-        tab.wheel_accum = 0;
-    }
-    tab.wheel_accum += @as(i32, delta);
-    const notches = @divTrunc(tab.wheel_accum, WHEEL_DELTA);
-    if (notches == 0) return 0;
-    tab.wheel_accum -= notches * WHEEL_DELTA;
     const scroll_lines: isize = -@as(isize, notches) * 3;
     const screen = tab.term.screens.active;
     const old_offset = if (@import("../diag.zig").isEnabled()) screen.pages.scrollbar().offset else 0;

@@ -93,10 +93,9 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         lerp(0.10, 0.09, (pos.x + pos.y) * 0.5)
     );
 
-    uint grid_pixel_width = col_count * cell_size.x;
-
-    // Scrollbar area (beyond the cell grid)
-    if (sv_pos.x >= (float)grid_pixel_width) {
+    // Actual pane boundary; ceil(col_count) includes a partial final cell.
+    // scrollbar_x remains valid even while the thumb is hidden.
+    if (sv_pos.x >= scrollbar_x) {
         float3 color = to_linear(purple_gradient);
         float alpha = 0.94;
 
@@ -233,10 +232,10 @@ float4 PixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {
         cov = float3(1.0, 1.0, 1.0) * fg.a;
     }
 
-    float3 color = back_rgb * (1.0 - cov) + linear_fg * cov;
+    float3 color = back_rgb * back_a * (1.0 - cov) + linear_fg * cov;
     float alpha = lerp(back_a, 1.0, max(cov.r, max(cov.g, cov.b)));
 
-    return float4(color * alpha, alpha);
+    return float4(color, alpha);
 }
 
 float4 ImagePixelMain(float4 sv_pos : SV_POSITION) : SV_TARGET {

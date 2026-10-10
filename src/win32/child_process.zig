@@ -5,6 +5,7 @@ const util = @import("util.zig");
 const err_mod = @import("error.zig");
 const pty_ring_mod = @import("pty_ring.zig");
 const Config = @import("../config.zig");
+const WriteQueue = @import("../terminal/write_queue.zig");
 
 const Error = err_mod.Error;
 const GridPos = types.GridPos;
@@ -25,15 +26,15 @@ pub const ChildProcess = struct {
     process_handle: win32.HANDLE,
 
     pub const Pty = struct {
-        write: std.Io.File,
+        writer: *InputWriter,
         hpcon: win32.HPCON,
         conpty: ConptyApi,
         pub fn deinit(self: *Pty) void {
+            self.writer.deinit();
             self.conpty.close(self.hpcon);
-            self.write.close(runtimeIo());
         }
         pub fn writeFlushAll(self: *const Pty, slice: []const u8) !void {
-            try self.write.writeStreamingAll(runtimeIo(), slice);
+            try self.writer.queue.enqueue(slice);
         }
     };
 
@@ -281,7 +282,13 @@ pub const ChildProcess = struct {
         win32.closeHandle(pty_read);
         win32.closeHandle(pty_write);
         pty_handles_closed = true;
-        errdefer conpty.close(hpcon);
+        errdefer {
+            // Stop publishing to the UI, but keep draining during legacy
+            // ClosePseudoConsole's synchronous flush.
+            stop_flag.store(true, .release);
+            _ = win32.SetEvent(ring.wake_event);
+            conpty.close(hpcon);
+        }
 
         var attr_list_size: usize = undefined;
         std.debug.assert(0 == win32.InitializeProcThreadAttributeList(null, 1, 0, &attr_list_size));
@@ -391,11 +398,12 @@ pub const ChildProcess = struct {
             win32.GetLastError(),
         );
 
+        const writer = InputWriter.init(our_write) catch |e| return out_err.setZig("CreateInputWriter", e);
         _ = win32.ResumeThread(process_info.hThread.?);
 
         return .{
             .pty = .{
-                .write = .{ .handle = our_write, .flags = .{ .nonblocking = false } },
+                .writer = writer,
                 .hpcon = hpcon,
                 .conpty = conpty,
             },
@@ -422,7 +430,6 @@ pub const ChildProcess = struct {
         ring: *PtyRing,
     ) void {
         while (true) {
-            if (stop_flag.load(.acquire)) return;
             var buffer: [65536]u8 = undefined;
             var read_len: u32 = undefined;
             if (0 == win32.ReadFile(
@@ -446,8 +453,9 @@ pub const ChildProcess = struct {
             };
             if (read_len == 0) return;
             // ring.write returns false only when stop_flag tripped during a
-            // full-ring wait (i.e. destroyTab is tearing us down). Exit then.
-            if (!ring.write(buffer[0..read_len])) return;
+            // full-ring wait (i.e. destroyTab is tearing us down). Keep draining
+            // the pipe without publishing so legacy ClosePseudoConsole can finish.
+            if (stop_flag.load(.acquire) or !ring.write(buffer[0..read_len])) continue;
             // Edge-triggered wake. ring.write performed head.store(.release)
             // before returning; posted.swap(.acq_rel) is sequenced after that
             // store in program order so any UI thread that observes
@@ -471,7 +479,7 @@ pub const ChildProcess = struct {
                         // intentionally dropped (matches the documented
                         // close-time tail-output semantics).
                         ring.posted.store(false, .release);
-                        return;
+                        break;
                     }
                     attempt += 1;
                     if (attempt == 1 or attempt % 100 == 0) {
@@ -483,10 +491,86 @@ pub const ChildProcess = struct {
                     std.Io.sleep(runtimeIo(), .fromMilliseconds(1), .awake) catch {};
                 }
             }
-            if (stop_flag.load(.acquire)) return;
         }
     }
 };
+
+const InputWriter = struct {
+    handle: win32.HANDLE,
+    queue: WriteQueue,
+
+    fn init(handle: win32.HANDLE) !*InputWriter {
+        const self = try std.heap.page_allocator.create(InputWriter);
+        errdefer std.heap.page_allocator.destroy(self);
+        self.* = .{ .handle = handle, .queue = .{
+            .allocator = std.heap.smp_allocator,
+            .io = runtimeIo(),
+            .context = self,
+            .write = write,
+        } };
+        try self.queue.start();
+        return self;
+    }
+
+    fn write(context: *anyopaque, bytes: []const u8, _: *const std.atomic.Value(bool)) !usize {
+        const self: *InputWriter = @ptrCast(@alignCast(context));
+        var written: u32 = 0;
+        if (win32.WriteFile(self.handle, bytes.ptr, @intCast(@min(bytes.len, 65536)), &written, null) == 0) return error.PtyWriteFailed;
+        return written;
+    }
+
+    fn deinit(self: *InputWriter) void {
+        self.queue.stop();
+        const thread = self.queue.thread.?;
+        // Cancellation can race the worker entering WriteFile. Retry until
+        // the thread exits, and retain the pipe handle until the join.
+        while (win32.WaitForSingleObject(thread.getHandle(), 0) == win32.WAIT_TIMEOUT) {
+            _ = win32.CancelSynchronousIo(thread.getHandle());
+            _ = win32.WaitForSingleObject(thread.getHandle(), 10);
+        }
+        self.queue.deinit();
+        win32.closeHandle(self.handle);
+        std.heap.page_allocator.destroy(self);
+    }
+};
+
+test "closing output reader drains a full pipe until EOF without the UI" {
+    var read: win32.HANDLE = undefined;
+    var write: win32.HANDLE = undefined;
+    try std.testing.expect(win32.CreatePipe(@ptrCast(&read), @ptrCast(&write), null, 0) != 0);
+    defer win32.closeHandle(read);
+    var stopped: std.atomic.Value(bool) = .init(true);
+    var ring = try PtyRing.init(std.testing.allocator, &stopped);
+    defer ring.deinit(std.testing.allocator);
+    const thread = try std.Thread.spawn(.{}, ChildProcess.readConsoleThread, .{
+        @as(win32.HWND, @ptrFromInt(1)), @as(u32, 0), read, @as(TabId, 1), &stopped, &ring,
+    });
+    // Model ClosePseudoConsole flushing more than the UI ring capacity.
+    // With publication stopped, the reader must discard instead of exiting.
+    defer thread.join();
+    defer win32.closeHandle(write);
+    const block = [_]u8{'x'} ** 65536;
+    for (0..32) |_| {
+        var written: u32 = 0;
+        try std.testing.expect(win32.WriteFile(write, &block, block.len, &written, null) != 0);
+        try std.testing.expectEqual(@as(u32, block.len), written);
+    }
+    try std.testing.expect(!ring.hasData());
+}
+
+test "input writer cancellation joins even when the pipe has no consumer" {
+    var read: win32.HANDLE = undefined;
+    var write: win32.HANDLE = undefined;
+    try std.testing.expect(win32.CreatePipe(@ptrCast(&read), @ptrCast(&write), null, 0) != 0);
+    defer win32.closeHandle(read);
+    const writer = try InputWriter.init(write);
+    defer writer.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    try writer.queue.enqueue(bytes);
+    win32.Sleep(20);
+}
 
 const ConptyApi = union(enum) {
     system,

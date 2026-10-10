@@ -894,7 +894,7 @@ fn prepareFrame(
     // the ConfigSnapshot compare see the same values. Coordinates are
     // RT-absolute: the grid sits below the tab-bar band so the scrollbar's
     // y origin is the band height.
-    var sb_geom: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    var sb_geom: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = @floatFromInt(grid_w), .y = 0, .w = 0, .h = 0 };
     {
         const sb = term.screens.active.pages.scrollbar();
         const show_scrollbar = sb.total > sb.len and (!term.screens.active.viewportIsBottom() or mouse_in_scrollbar);

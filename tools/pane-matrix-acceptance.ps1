@@ -1,3 +1,4 @@
+param([string]$Zig = 'zig', [switch]$SkipBuild)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $matrixId=[Guid]::NewGuid().ToString('N')
@@ -5,19 +6,21 @@ $matrixRoot=Join-Path $root "tmp/six-backend-$matrixId"
 New-Item -ItemType Directory -Path $matrixRoot | Out-Null
 $exe=Join-Path $root 'zig-out/bin/Mostty.exe'
 $runner=Join-Path $PSScriptRoot 'pane-acceptance.ps1'
-$sourceFiles=@('pane-acceptance.ps1','pane-test-native.cs','pane-output-probe.py','pane-input-probe.py','pane-image-probe.py','pane-matrix-acceptance.ps1','pane-matrix-summary.jq','pane-matrix-summary-test.ps1')
+$sourceFiles=@('pane-acceptance.ps1','pane-backend-acceptance.ps1','pane-test-native.cs','pane-output-probe.py','pane-input-probe.py','pane-image-probe.py','pane-matrix-acceptance.ps1','pane-matrix-summary.jq','pane-matrix-summary-test.ps1')
 $sourceHashes=[ordered]@{}
 foreach($name in $sourceFiles){$sourceHashes[$name]=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot $name)).Hash}
 Push-Location $root
 try{
     & (Join-Path $PSScriptRoot 'pane-matrix-summary-test.ps1') *> (Join-Path $matrixRoot 'summary-tests.log')
     if(-not $?){throw 'Matrix summary contract tests failed'}
-    cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir D:\zig-cache" *> (Join-Path $matrixRoot 'build.log')
-    if($LASTEXITCODE -ne 0){throw 'Matrix build failed'}
-    cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build test --global-cache-dir D:\zig-cache --summary all" *> (Join-Path $matrixRoot 'tests.log')
-    if($LASTEXITCODE -ne 0){throw 'Matrix tests failed'}
+    if (-not $SkipBuild) {
+        & $Zig build --global-cache-dir .zig-cache *> (Join-Path $matrixRoot 'build.log')
+        if($LASTEXITCODE -ne 0){throw 'Matrix build failed'}
+        & $Zig build test --global-cache-dir .zig-cache --summary all *> (Join-Path $matrixRoot 'tests.log')
+        if($LASTEXITCODE -ne 0){throw 'Matrix tests failed'}
+    }
     $exeHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
-    $metadata=[ordered]@{matrix_id=$matrixId;created_utc=[DateTime]::UtcNow.ToString('o');source_commit=(git rev-parse HEAD);zig_version=(& 'D:\zig-x86_64-windows-0.16.0\zig.exe' version);os=[Environment]::OSVersion.VersionString;executable_sha256=$exeHash;runner_sha256=$sourceHashes;scope='local six-backend acceptance; unverified hardware scenarios remain separate'}
+    $metadata=[ordered]@{matrix_id=$matrixId;created_utc=[DateTime]::UtcNow.ToString('o');source_commit=(git rev-parse HEAD);zig_version=(& $Zig version);build_skipped=[bool]$SkipBuild;os=[Environment]::OSVersion.VersionString;executable_sha256=$exeHash;runner_sha256=$sourceHashes;scope='local six-backend acceptance; unverified hardware scenarios remain separate'}
     $metadata | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $matrixRoot 'metadata.json') -Encoding utf8
     git diff HEAD -- src tools README.md ARCHITECTURE.md configurations.md rad-notes/windows-pane-acceptance.md | Set-Content -LiteralPath (Join-Path $matrixRoot 'pending.patch') -Encoding utf8
     $repro=Join-Path $matrixRoot 'reproduction'
@@ -32,7 +35,11 @@ try{
         $started=[DateTime]::UtcNow
         $failure=$null
         try{
-            & $runner -Renderer $backend -TestRecovery:($backend -ne 'd3d11') -VulkanValidation:($backend -in @('vulkan','native-vulkan')) *> (Join-Path $destination 'runner.log')
+            if ($backend -eq 'd3d11') {
+                & $runner -Renderer $backend *> (Join-Path $destination 'runner.log')
+            } else {
+                & (Join-Path $PSScriptRoot 'pane-backend-acceptance.ps1') -Renderer $backend *> (Join-Path $destination 'runner.log')
+            }
         }catch{$failure=$_.Exception.Message}
         $output=Join-Path $root $(if($backend -eq 'd3d11'){'tmp/pane-acceptance'}else{"tmp/pane-acceptance-$backend"})
         $result=Join-Path $output 'result.json'

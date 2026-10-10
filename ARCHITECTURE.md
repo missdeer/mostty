@@ -6,11 +6,11 @@ emulator that pairs Ghostty's VT state machine (`libghostty-vt`) with a hand-rol
 Win32 / D3D11 / DirectWrite shell. The macOS target builds the platform-neutral
 terminal core, a native PTY/session layer, and a CoreText/Metal renderer, driven
 by a Swift/AppKit application (`src/macos/app/`) through a C-ABI boundary
-(`src/macos/capi.zig`); every VT-touching call runs on the main thread, and only
-the background PTY reader runs off it.
+(`src/macos/capi.zig`); every VT-touching call runs on the main thread. PTY
+reading and queued input writing run on independent background threads.
 
 Pinned versions: Zig `0.16.0`, Vulkan SDK `1.4.350.0` in CI. The Windows application requires the MSVC ABI, Windows SDK `fxc.exe`, Windows SDK `dxc.exe` with `dxil.dll` beside it (signed DXIL for D3D12; the Vulkan SDK DXC cannot sign), and Vulkan SDK `dxc.exe` / `spirv-cross.exe` / `glslangValidator.exe` / `spirv-val.exe`. The macOS core target does not discover or depend on those Windows tools. Build the Windows application with
-`cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir D:\zig-cache"`.
+`zig build --global-cache-dir .zig-cache` with Zig 0.16.0 on PATH.
 
 ---
 
@@ -126,6 +126,7 @@ Mostty is a single-process, multi-thread program. A Windows tab owns a SplitLayo
 | --- | --- | --- |
 | UI thread | Win32 message loop, all D3D11/D2D rendering, all VT stream parsing, all Terminal mutation | The only thread that touches `vt.Terminal` |
 | Reader thread (per pane) | Blocks in `ReadFile` on the ConPTY output pipe; memcpy's bytes into `Pane.pty_ring` (SPSC) and `PostMessageW`s a wake-up | Spawned in `child_process.startConPtyWin32` (before `CreatePseudoConsole`), joined in `tab_mgmt.releasePane` |
+| Input writer (per pane, both platforms) | Services the ordered `terminal/write_queue.zig` queue | UI enqueue never waits for PTY capacity; transport is canceled and joined before closing its handle |
 | Config-watch thread (1) | Blocks in `ReadDirectoryChangesW`, posts `WM_APP_CONFIG_CHANGED` | Detached |
 | Background-image decode (transient) | WIC decode of `background-image` on hot-reload or first paint | Detached, result posted via `WM_APP_BG_IMAGE_DECODED` |
 
@@ -144,11 +145,11 @@ Ownership rules:
   wake-up chain is in flight per pane. When the ring is full the reader
   parks on the ring's auto-reset `wake_event`; the UI thread signals that
   event on every drain.
-- Pane close uses `reader_stop` (`std.atomic.Value(bool)`) + `CancelIoEx`
-  (unblocks `ReadFile`) + `SetEvent(pty_ring.wake_event)` (unblocks a
-  full-ring writer), then a direct `thread.join` — no UI message pump
-  needed, because the reader no longer calls into the UI thread
-  synchronously. Stale `WM_APP_CHILD_PROCESS_DATA` posts that race with
+- Pane close sets `reader_stop` to stop publication to the UI and signals
+  `pty_ring.wake_event` to unblock a full ring. The reader continues draining
+  and discarding while `ClosePseudoConsole` flushes, then exits on EOF and is
+  joined. Never cancel that reader before the ConPTY close completes.
+  Stale `WM_APP_CHILD_PROCESS_DATA` posts that race with
   teardown resolve via `findById(pane_id) → null` and drop harmlessly;
   pane IDs are monotonic and never reused.
 
@@ -332,8 +333,9 @@ thread. The main loop waits on every pane process, including hidden tabs, and
 posts `WM_APP_CLOSE_PANE` when one exits.
 
 Pane close marks it closing, releases its capture and presentation resources,
-unhooks it from the registry, sets the reader stop flag, calls `CancelIoEx`,
-signals the ring wake event, closes ConPTY and joins the reader. Only then are
+unhooks it from the registry, sets the publication stop flag,
+signals the ring wake event, cancels and joins the input writer, closes ConPTY
+while the reader drains output, and joins the reader. Only then are
 its remaining handles, terminal session and ring released. Late PTY or glyph
 messages cannot resolve the removed ID. The layout collapses the sibling into
 the removed leaf’s parent. The last pane removes its tab; the last tab quits.
@@ -351,15 +353,15 @@ geometry. Maximized-away panes keep their session and last size until restored.
 
 ```
 loop:
-  if reader_stop.load(.acquire): exit
   ReadFile(read, buf[65536], &n, null)
     on ERROR_BROKEN_PIPE | ERROR_HANDLE_EOF      → exit (child died)
     on ERROR_OPERATION_ABORTED                   → exit (CancelIoEx)
-  if !pty_ring.write(buf[0..n]): exit            // stop tripped while ring-full
+  if reader_stop.load(.acquire): continue       // discard during close
+  if !pty_ring.write(buf[0..n]): continue        // stop tripped while ring-full
   if pty_ring.posted.swap(true, .acq_rel) == false:
     while PostMessageW(hwnd, WM_APP_CHILD_PROCESS_DATA, pane_id, 0) == 0:
       if reader_stop.load(.acquire):
-        pty_ring.posted.store(false, .release); exit  // tail bytes dropped
+        pty_ring.posted.store(false, .release); break // resume discard/drain
       log warn (attempt 1, then every 100)
       Sleep(1 ms)                                // queue saturation backoff
   if reader_stop.load(.acquire): exit
@@ -384,7 +386,7 @@ is paired with `reader_stop` being set by `destroyTab`.
 ### 5.3 Terminal session and effects (`terminal/Session.zig`, `tab_mgmt.zig`)
 
 Each Windows `Pane` owns a platform-neutral `TerminalSession`, which owns the upstream
-`vt.Terminal`, its arena, and the persistent `vt.TerminalStream`. Wide-character
+`vt.Terminal`, its independently freeing allocator, and the persistent `vt.TerminalStream`. Wide-character
 overwrite consistency is handled by `libghostty-vt`; Mostty does not pre-process
 print actions.
 
@@ -406,6 +408,16 @@ On macOS, `PtySession` owns the shell child and PTY master around the same
 state, resize both sides as one operation, and explicitly reap the child. Exec
 startup uses a close-on-exec handshake so a missing shell is reported to the
 caller and cleaned up before initialization succeeds.
+
+Terminal allocations must not use a pane-lifetime arena: image replacement,
+eviction and decode scratch release memory while the pane remains alive.
+Both hosts enqueue keys, replies and complete paste transactions in order.
+The input queue owns copied bytes, limits pending input to 64 MiB and reports
+overflow without emitting a partial paste. Its lock never spans transport I/O.
+Windows cancels synchronous writer I/O before joining; macOS uses a nonblocking,
+close-on-exec master and retries partial writes using writable polling with a
+50 ms cancellation bound. Kitty keyboard negotiation is suppressed until both
+hosts implement the corresponding encoding and release events.
 
 The macOS renderer reads the shared VT viewport through `GridModel`, which
 resolves cell geometry, wide-cell spans, colors, and text styles without Apple
@@ -1148,7 +1160,7 @@ WM_LBUTTONUP
   successful `PtyRing.write` (which itself did `head.store(.release)`).
   If `PostMessageW` fails it is retried in a `Sleep(1 ms)` loop until it
   succeeds or `reader_stop` is observed; only on stop does the reader
-  reset `posted = false` and exit (the ring's tail bytes are dropped
+  reset `posted = false` and switch to draining (the ring's tail bytes are dropped
   intentionally, matching the close-time tail-output semantics).
   Resetting `posted = false` and falling through would leak bytes with
   no wake-up coming.
@@ -1163,15 +1175,12 @@ WM_LBUTTONUP
   own wake-up. Timer backlog scans also clear `posted` when they observe
   `posted == true` but no ring data, then run the same re-check/re-arm closure
   so an inconsistent stale flag cannot suppress a raced reader wake-up.
-- **`tab.closing` is set together with `reader_stop` + `CancelIoEx` +
-  `SetEvent(pty_ring.wake_event)` + `closePty()`, in that order, BEFORE
-  `thread.join`.** The two wake calls cover the reader's two visible
-  park points (`ReadFile` and `WaitForSingleObject` on a full ring);
-  `closePty` closes the race window where the reader is between its
-  loop-top stop-check and the `ReadFile` syscall — `CancelIoEx` is a
-  no-op there, but a closed PTY makes `ReadFile` return `BROKEN_PIPE`
-  on entry. The startup `errdefer` chain in `startConPtyWin32` uses the
-  same trio for the same reason.
+- **Set `tab.closing`, then `reader_stop`, signal the ring event, and close
+  ConPTY before joining the reader.** `reader_stop` means discard output, not
+  stop reading. Legacy system ConPTY can block on its final output flush, so
+  the reader must remain alive throughout close, including startup rollback.
+  The input writer is independently canceled and joined before its pipe is
+  released; its cancellation retries cover the race entering `WriteFile`.
 - **`PtyRing` lifetime: initialize after the pane field-default block, and
   deinitialize only after the reader joins.** The reader borrows the ring inside
   a heap-allocated `Pane` whose address never changes.

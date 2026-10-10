@@ -72,12 +72,7 @@ pub fn pasteClipboard(hwnd: win32.HWND, tab: *Tab) void {
         return;
     }));
     defer util.globalUnlock(hmem);
-    var buf: [4096]u8 = undefined;
-    var pty_writer = pty.write.writerStreaming(std.Io.Threaded.global_single_threaded.io(), &buf);
-    pasteUtf16(tab, mem, &pty_writer.interface) catch |err| switch (err) {
-        error.WriteFailed => std.log.err("paste: write to pty failed with {t}", .{pty_writer.err.?}),
-        error.Reported => {},
-    };
+    enqueuePaste(tab, pty, mem);
 }
 
 pub fn onDropFiles(window: *Window, hwnd: win32.HWND, hdrop: win32.HDROP) void {
@@ -121,53 +116,29 @@ pub fn onDropFiles(window: *Window, hwnd: win32.HWND, hdrop: win32.HDROP) void {
     const final = a.allocSentinel(u16, combined.items.len, 0) catch |e| util.oom(e);
     @memcpy(final[0..combined.items.len], combined.items);
 
-    var write_buf: [4096]u8 = undefined;
-    var pty_writer = pty.write.writerStreaming(std.Io.Threaded.global_single_threaded.io(), &write_buf);
-    pasteUtf16(tab, final.ptr, &pty_writer.interface) catch |err| switch (err) {
-        error.WriteFailed => std.log.err("drop: write to pty failed with {t}", .{pty_writer.err.?}),
-        error.Reported => {},
+    enqueuePaste(tab, pty, final.ptr);
+}
+
+fn enqueuePaste(tab: *Tab, pty: @import("child_process.zig").ChildProcess.Pty, utf16: [*:0]const u16) void {
+    var encoded: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer encoded.deinit();
+    pasteUtf16(tab, utf16, &encoded.writer) catch |err| {
+        std.log.err("paste: encoding failed: {s}", .{@errorName(err)});
+        return;
     };
+    // Enqueue the complete transaction atomically, including both markers.
+    pty.writeFlushAll(encoded.written()) catch |err|
+        std.log.err("paste: enqueue failed: {s}", .{@errorName(err)});
 }
 
 pub fn pasteUtf16(tab: *Tab, utf16: [*:0]const u16, writer: *std.Io.Writer) error{ WriteFailed, Reported }!void {
     const bracketed = tab.term.modes.get(.bracketed_paste);
-    var paste_state: paste_core.State = .{ .bracketed = bracketed };
-    try paste_state.begin(writer);
-
-    var i: usize = 0;
-    while (utf16[i] != 0) {
-        const cp: u21 = blk: {
-            if (std.unicode.utf16IsHighSurrogate(utf16[i])) {
-                const high = utf16[i];
-                i += 1;
-                if (utf16[i] == 0 or !std.unicode.utf16IsLowSurrogate(utf16[i])) {
-                    std.log.err("paste: lone high surrogate 0x{x} at index {}", .{ high, i - 1 });
-                    return error.Reported;
-                }
-                const pair = std.unicode.utf16DecodeSurrogatePair(&[2]u16{ high, utf16[i] }) catch {
-                    std.log.err("paste: bad surrogate pair 0x{x} 0x{x} at index {}", .{ high, utf16[i], i - 1 });
-                    return error.Reported;
-                };
-                i += 1;
-                break :blk pair;
-            }
-            if (std.unicode.utf16IsLowSurrogate(utf16[i])) {
-                std.log.err("paste: lone low surrogate 0x{x} at index {}", .{ utf16[i], i });
-                return error.Reported;
-            }
-            const c: u21 = @intCast(utf16[i]);
-            i += 1;
-            break :blk c;
-        };
-
-        paste_state.onCodepoint(writer, cp) catch |err| switch (err) {
-            error.WriteFailed => return error.WriteFailed,
-            else => {
-                std.log.err("paste: invalid codepoint U+{x} at index {}", .{ cp, i });
-                return error.Reported;
-            },
-        };
-    }
-    try paste_state.finish(writer);
+    paste_core.writeUtf16(writer, std.mem.span(utf16), bracketed) catch |err| switch (err) {
+        error.WriteFailed => return error.WriteFailed,
+        else => {
+            std.log.err("paste: invalid UTF-16: {s}", .{@errorName(err)});
+            return error.Reported;
+        },
+    };
     try writer.flush();
 }

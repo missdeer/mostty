@@ -559,6 +559,14 @@ struct InteractionTests {
         }
         expect(remaining.count == 2 && remaining.allSatisfy { $0.view.hasActiveSession },
                "window-close regression starts with two running sessions")
+        if let view = remaining.last?.view {
+            expect(view.testSession != nil, "hover regression uses a running sibling session")
+            NSCursor.pointingHand.set()
+            view.testUpdateURLHover(at: NSPoint(x: -100, y: -100))
+            expect(NSCursor.current == NSCursor.pointingHand,
+                   "a sibling pane's offscreen hover update preserves the URL cursor")
+            NSCursor.arrow.set()
+        }
         original.allowsClose = true
         interaction_test_confirmation(true, false)
         let tabIDs = model.tabs.map(\.id)

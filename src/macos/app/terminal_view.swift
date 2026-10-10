@@ -12,6 +12,8 @@ struct TerminalLauncher {
 /// through a CAMetalLayer, and captures keyboard / mouse / IME input. All bridge
 /// calls except the background reader happen on the main thread.
 final class MosttyTerminalView: NSView, NSTextInputClient {
+    // NSCursor is application-global; only its last owning pane may clear it.
+    private static weak var cursorOwner: MosttyTerminalView?
     private var tab: OpaquePointer?
     private var metalLayer: CAMetalLayer?
     private var commandQueue: MTLCommandQueue?
@@ -75,6 +77,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     var onFocus: (() -> Void)?
 #if MOSTTY_APP_TESTS
     var testSession: OpaquePointer? { tab }
+    func testUpdateURLHover(at point: NSPoint?) {
+        updateURLHover(at: point, updateCursor: point.map { bounds.contains($0) } ?? false)
+    }
 #endif
     var launcher: TerminalLauncher?
     var hasActiveSession: Bool {
@@ -345,7 +350,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard alive, dirty, let t = tab, let layer = metalLayer, let queue = commandQueue else { return }
         let mouse = window?.isKeyWindow == true
             ? window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) } : nil
-        updateURLHover(at: mouse)
+        updateURLHover(at: mouse, updateCursor: mouse.map { bounds.contains($0) } ?? false)
         dirty = false
         // Only the focused pane draws a blinking cursor.
         let focused = window?.firstResponder === self
@@ -536,13 +541,18 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         urlTrackingArea = area
     }
 
-    private func updateURLHover(at point: NSPoint?) {
+    private func updateURLHover(at point: NSPoint?, updateCursor: Bool = true) {
         guard let t = tab else { return }
         let cell = selecting || mostty_tab_mouse_enabled(t) ? nil : point.flatMap { viewportCell(at: $0) }
         let hit = mostty_tab_hover_url(t, cell != nil, cell?.col ?? 0, cell?.row ?? 0)
         if hit != hoveringURL { dirty = true }
-        if let point = point { cursor(hoveringURL: hit, at: point).set() }
-        else if hoveringURL { NSCursor.arrow.set() }
+        if updateCursor, let point = point, bounds.contains(point) {
+            cursor(hoveringURL: hit, at: point).set()
+            Self.cursorOwner = self
+        } else if updateCursor && Self.cursorOwner === self {
+            NSCursor.arrow.set()
+            Self.cursorOwner = nil
+        }
         hoveringURL = hit
     }
 

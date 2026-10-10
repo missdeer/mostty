@@ -201,7 +201,10 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
         null,
         win32.GetModuleHandleW(null),
         null,
-    ) orelse win32.panicWin32("CreateWindow", win32.GetLastError());
+    ) orelse {
+        std.log.err("window startup failed: {f}", .{win32.GetLastError()});
+        return error.WindowStartupFailed;
+    };
 
     if (global.renderer.initializeWindow(hwnd, global.config.gpu)) |failure| {
         const fallback = Renderer.recommendStartupFallback(global.config.renderer, true) orelse

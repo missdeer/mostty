@@ -15,4 +15,4 @@ swiftc -D MOSTTY_APP_TESTS -module-cache-path "$PWD/tmp/swift-module-cache" \
     "$WORK/layout-core.o" \
     -framework AppKit -framework Metal -framework QuartzCore \
     -o "$WORK/clipboard-tests"
-"$WORK/clipboard-tests"
+if [ "${1:-}" != "--compile-only" ]; then "$WORK/clipboard-tests"; fi

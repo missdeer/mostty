@@ -13,4 +13,4 @@ swiftc -D MOSTTY_APP_TESTS -module-cache-path "$PWD/tmp/swift-module-cache" \
     "$WORK/layout-core.o" \
     -framework AppKit -framework Metal -framework QuartzCore \
     -o "$WORK/scrollbar-tests"
-"$WORK/scrollbar-tests"
+if [ "${1:-}" != "--compile-only" ]; then "$WORK/scrollbar-tests"; fi

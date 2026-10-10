@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      gui:
+        description: Run GUI suites on the existing runner named by MOSTTY_WINDOWS_GUI_RUNNER
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ inputs.gui && vars.MOSTTY_WINDOWS_GUI_RUNNER || 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -32,13 +37,33 @@ jobs:
 
       - name: Install shader toolchain
         shell: pwsh
-        run: >-
-          winget install --id KhronosGroup.VulkanSDK --version 1.4.350.0 --exact
-          --silent --disable-interactivity --accept-package-agreements
-          --accept-source-agreements
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            winget install --source winget --id KhronosGroup.VulkanSDK --version 1.4.350.0 --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Warning "Vulkan SDK installation attempt $attempt failed with exit code $LASTEXITCODE"
+            if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+          }
+          throw 'Vulkan SDK installation failed after three attempts'
 
       - name: Build
         run: zig build -Doptimize=${{ matrix.optimize }} -Dcpu=${{ matrix.cpu }}
+
+      - name: Run unit tests
+        run: zig build test -Doptimize=${{ matrix.optimize }} -Dcpu=${{ matrix.cpu }} --summary all
+
+      - name: Run acceptance inventory
+        if: matrix.optimize == 'Debug' && matrix.cpu == 'baseline'
+        shell: pwsh
+        run: |
+          & tools/ci-tests.ps1 -Gui:('${{ inputs.gui && vars.MOSTTY_WINDOWS_GUI_RUNNER != '' }}' -eq 'true')
+
+      - name: Preserve test evidence
+        if: always() && matrix.optimize == 'Debug' && matrix.cpu == 'baseline'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-evidence
+          path: tmp/
 
       - name: Stage artifact
         shell: pwsh

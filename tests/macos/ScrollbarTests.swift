@@ -13,14 +13,33 @@ private final class ScrollWheelEvent: NSEvent {
 @main
 struct ScrollbarTests {
     static func main() {
+        exit(run())
+    }
+
+    private static func run() -> Int32 {
         _ = NSApplication.shared
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.finishLaunching()
+        guard CGPreflightPostEventAccess() else {
+            print("blocked: native scrollbar tracking requires pointer injection permission")
+            return 77
+        }
+        let originalMouse = CGEvent(source: nil)?.location
+        defer {
+            if let point = originalMouse {
+                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point,
+                        mouseButton: .left)?.post(tap: .cghidEventTap)
+            }
+        }
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 640, height: 400),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         let view = MosttyTerminalView(frame: window.contentView!.bounds)
         window.contentView = view
         defer { view.shutdown() }
         window.makeKeyAndOrderFront(nil)
-        view.setFrameSize(NSSize(width: 650, height: 400))
+        NSApp.activate(ignoringOtherApps: true)
+        // Keep the control inside the real window when dispatching events.
+        window.setContentSize(NSSize(width: 650, height: 400))
         view.resyncSurface()
         let tab = clipboard_test_created_tab()!
         let scroller = view.subviews.compactMap { $0 as? NSScroller }.first!
@@ -30,6 +49,14 @@ struct ScrollbarTests {
             print("\(condition ? "PASS" : "FAIL"): \(rule)")
             if !condition { failures += 1 }
         }
+        func pump(_ seconds: Double) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while let event = NSApp.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        }
+        pump(0.2)
+        expect(window.isKeyWindow, "scrollbar window accepts native input")
         func refresh(_ total: UInt64, _ offset: UInt64, _ visible: UInt64) {
             clipboard_test_scrollback(tab, total, offset, visible)
             view.viewDidMoveToWindow()
@@ -54,18 +81,42 @@ struct ScrollbarTests {
                abs(scroller.knobProportion - 0.1) < 0.001,
                "the knob represents the viewport's position and share of history")
         clipboard_test_mouse_mode(true)
-        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
-            NSEvent.mouseEvent(with: type, location: scroller.convert(point, to: nil), modifierFlags: [],
-                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                              context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        func gesture(from start: NSPoint, to end: NSPoint, drag: Bool) {
+            func screen(_ point: NSPoint) -> CGPoint {
+                let p = window.convertPoint(toScreen: scroller.convert(point, to: nil))
+                return CGPoint(x: p.x, y: NSScreen.screens[0].frame.maxY - p.y)
+            }
+            let first = screen(start), last = screen(end)
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: first,
+                    mouseButton: .left)?.post(tap: .cghidEventTap)
+            pump(0.1)
+            // The main thread enters NSScroller's native tracking loop. A
+            // producer posts real system events while that loop is running.
+            DispatchQueue.global().async {
+                CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: first,
+                        mouseButton: .left)?.post(tap: .cghidEventTap)
+                Thread.sleep(forTimeInterval: 0.1)
+                if drag {
+                    for step in 1...5 {
+                        let fraction = CGFloat(step) / 5
+                        let point = CGPoint(x: first.x + (last.x - first.x) * fraction,
+                                            y: first.y + (last.y - first.y) * fraction)
+                        CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: point,
+                                mouseButton: .left)?.post(tap: .cghidEventTap)
+                        Thread.sleep(forTimeInterval: 0.03)
+                    }
+                }
+                CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: last,
+                        mouseButton: .left)?.post(tap: .cghidEventTap)
+            }
+            pump(0.6)
         }
         func drag(to y: CGFloat) {
             let knob = scroller.rect(for: .knob)
             let start = NSPoint(x: knob.midX, y: knob.midY)
             let end = NSPoint(x: knob.midX, y: y)
-            NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
-            NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
-            scroller.mouseDown(with: event(.leftMouseDown, start))
+            gesture(from: start, to: end, drag: true)
+            print("DRAG: target=\(y) value=\(scroller.doubleValue) row=\(mostty_tab_scrollbar(tab).offset)")
         }
         let knobPoint = scroller.convert(NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY), to: view)
         expect(view.hitTest(knobPoint) === scroller, "native scrollbar hit testing isolates terminal mouse reporting")
@@ -85,8 +136,7 @@ struct ScrollbarTests {
                "native knob dragging stays synchronized with the resulting middle viewport")
         let slot = scroller.rect(for: .knobSlot)
         let trackPoint = NSPoint(x: slot.midX, y: (slot.minY + scroller.rect(for: .knob).minY) / 2)
-        NSApp.postEvent(event(.leftMouseUp, trackPoint), atStart: false)
-        scroller.mouseDown(with: event(.leftMouseDown, trackPoint))
+        gesture(from: trackPoint, to: trackPoint, drag: false)
         expect(mostty_tab_scrollbar(tab).offset < middle, "clicking above the knob moves toward older history")
         refresh(200, 90, 20)
         let wheel = ScrollWheelEvent()
@@ -95,7 +145,7 @@ struct ScrollbarTests {
         expect(mostty_tab_scrollbar(tab).offset == 87,
                "wheel events over the scrollbar scroll history even with terminal mouse mode enabled")
         expect(clipboard_test_mouse_count() == 0, "scrollbar drags, track clicks and wheel events emit no PTY mouse reports")
-        view.setFrameSize(NSSize(width: 800, height: 450))
+        window.setContentSize(NSSize(width: 800, height: 450))
         view.resyncSurface()
         expect(aligned(), "resizing keeps the drawable and reserved scrollbar strip aligned")
         let other = MosttyTerminalView(frame: view.frame)
@@ -109,6 +159,6 @@ struct ScrollbarTests {
         refresh(20, 0, 20)
         expect(!scroller.isEnabled && scroller.knobProportion == 1,
                "switching to a screen without history disables the existing control")
-        if failures > 0 { exit(1) }
+        return failures > 0 ? 1 : 0
     }
 }
