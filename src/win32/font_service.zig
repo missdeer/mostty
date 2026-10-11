@@ -202,6 +202,9 @@ pub fn cpuBand(self: *FontService, width: u32, height: u32) *gpu.CpuBandTexture.
 }
 
 test "unchanged CPU chrome reads reuse pixels and clear or resize refreshes them" {
+    const hr = win32.CoInitializeEx(null, win32.COINIT_MULTITHREADED);
+    if (hr < 0) return error.ComInitializationFailed;
+    defer win32.CoUninitialize();
     var common: RendererCommon = undefined;
     var service = FontService.init(&common, 96, .{}, true, null);
     defer service.deinit();
