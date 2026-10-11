@@ -1160,6 +1160,33 @@ test "URL hover changes rendered underline pixels and clears them on leave" {
     try std.testing.expectEqualSlices(u8, plain, tab.renderer.pixels);
 }
 
+test "256-byte host feeds preserve Unicode OSC DCS and alternate screen pixels" {
+    const whole = mostty_tab_create(640, 192, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(whole);
+    const sliced = mostty_tab_create(640, 192, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(sliced);
+    const bytes = ("x" ** 255) ++ "界e\u{301}👍\x1b]2;ordered title\x07" ++
+        "\x1b[?1049hother screen\x1b[?1049l\r\n\x1b[31mfi -> \x1b[0m" ++
+        "\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\" ++
+        "\x1bP0;1q\"1;1;2;12#1;2;100;0;0!2~-!2~\x1b\\AFTER";
+    mostty_tab_feed(whole, bytes, bytes.len);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const n = @min(256, bytes.len - offset);
+        mostty_tab_feed(sliced, bytes[offset..].ptr, n);
+        offset += n;
+    }
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    try std.testing.expect(mostty_tab_render(whole, false, true, &cols, &rows) != null);
+    try std.testing.expect(mostty_tab_render(sliced, false, true, &cols, &rows) != null);
+    try std.testing.expectEqualSlices(u8, whole.renderer.pixels, sliced.renderer.pixels);
+    try std.testing.expectEqualStrings("ordered title", sliced.pty.terminal.term.getTitle().?);
+    try std.testing.expectEqual(@as(u32, 1), sliced.pty.terminal.term.screens.active.kitty_images.images.count());
+    try std.testing.expectEqual(whole.pty.terminal.term.screens.active.cursor.x, sliced.pty.terminal.term.screens.active.cursor.x);
+    try std.testing.expectEqual(whole.pty.terminal.term.screens.active.cursor.y, sliced.pty.terminal.term.screens.active.cursor.y);
+}
+
 test "SGR blink toggles text and decorations independently of the cursor" {
     const tab = mostty_tab_create(320, 96, 1) orelse return error.TabCreateFailed;
     defer mostty_tab_destroy(tab);

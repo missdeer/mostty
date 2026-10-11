@@ -2,6 +2,97 @@ import AppKit
 import Metal
 import QuartzCore
 
+/// Main-thread-only PTY work. Reader semaphore slots are released only after
+/// an entire chunk is consumed or cancelled; EOF follows all preceding bytes.
+final class PTYFeedQueue {
+    struct Chunk { let bytes: [UInt8]; let complete: () -> Void }
+    private var chunks: [Chunk] = []
+    private var offset = 0
+    private var eof = false
+    private var cancelled = false
+    fileprivate var enqueued = false
+    let feed: (UnsafeBufferPointer<UInt8>) -> Void
+    let finish: () -> Void
+    init(feed: @escaping (UnsafeBufferPointer<UInt8>) -> Void, finish: @escaping () -> Void) {
+        self.feed = feed; self.finish = finish
+    }
+    func append(_ bytes: [UInt8], complete: @escaping () -> Void) {
+        guard !cancelled else { complete(); return }
+        chunks.append(Chunk(bytes: bytes, complete: complete))
+    }
+    func end() { if !cancelled { eof = true } }
+    var pending: Bool { !chunks.isEmpty || eof }
+    func step() {
+        if !chunks.isEmpty {
+            let n = min(256, chunks[0].bytes.count - offset)
+            chunks[0].bytes.withUnsafeBufferPointer { p in
+                feed(UnsafeBufferPointer(rebasing: p[offset..<(offset + n)]))
+            }
+            offset += n
+            if offset == chunks[0].bytes.count {
+                let done = chunks.removeFirst().complete
+                offset = 0
+                done()
+            }
+        } else if eof {
+            eof = false
+            finish()
+        }
+    }
+    func cancel() {
+        cancelled = true
+        let old = chunks
+        chunks.removeAll()
+        offset = 0; eof = false
+        for chunk in old { chunk.complete() }
+    }
+}
+
+/// One admission point across all windows/panes, yielding to the main queue
+/// between rounds. A single VT feed (including image decode) is indivisible.
+final class PTYFeedPump {
+    static let shared = PTYFeedPump()
+    private var queues: [PTYFeedQueue] = []
+    private var scheduled = false
+    private let now: () -> UInt64
+    private let schedule: (@escaping () -> Void) -> Void
+    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+         schedule: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }) {
+        self.now = now; self.schedule = schedule
+    }
+    func enqueue(_ queue: PTYFeedQueue) {
+        if queue.pending && !queue.enqueued {
+            queue.enqueued = true
+            queues.append(queue)
+        }
+        arm()
+    }
+    private func arm() {
+        guard !scheduled, !queues.isEmpty else { return }
+        scheduled = true
+        schedule { self.run() }
+    }
+    private func run() {
+        scheduled = false
+        let start = now()
+        let budget: UInt64 = 8_000_000
+        let quantum = budget / UInt64(max(1, min(4, queues.count)))
+        let count = queues.count
+        for _ in 0..<count {
+            if now() - start >= budget { break }
+            let queue = queues.removeFirst()
+            let turn = now()
+            while queue.pending {
+                queue.step()
+                let time = now()
+                if time - start >= budget || time - turn >= quantum { break }
+            }
+            if queue.pending { queues.append(queue) } else { queue.enqueued = false }
+        }
+        arm()
+    }
+}
+
 struct TerminalLauncher {
     let label: String
     let command: String
@@ -47,6 +138,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     // Caps how many PTY chunks may be queued on the main thread at once, so
     // sustained high-throughput output can't grow memory without bound.
     private let feedInFlight = DispatchSemaphore(value: 8)
+    private lazy var feedQueue = PTYFeedQueue(feed: { [weak self] bytes in
+        guard let self = self, self.alive, let tab = self.tab else { return }
+        mostty_tab_feed(tab, bytes.baseAddress, bytes.count)
+        self.dirty = true
+    }, finish: { [weak self] in self?.handleEOF() })
     private let stopLock = NSLock()
     private var stopFlag = false
 
@@ -233,6 +329,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         }
         alive = false
         setStop(true)
+        feedQueue.cancel()
         if readerThread != nil { readerDone.wait() }
         renderTimer?.invalidate(); renderTimer = nil
         blinkTimer?.invalidate(); blinkTimer = nil
@@ -256,7 +353,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
                 let n = mostty_tab_read(t, buf, cap)
                 if n == -2 { continue }
                 if n <= 0 {
-                    DispatchQueue.main.async { self.handleEOF() }
+                    DispatchQueue.main.async {
+                        guard self.alive else { return }
+                        self.feedQueue.end()
+                        PTYFeedPump.shared.enqueue(self.feedQueue)
+                    }
                     break
                 }
                 let bytes = Array(UnsafeBufferPointer(start: buf, count: Int(n)))
@@ -270,13 +371,13 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
                 }
                 if !acquired { break }
                 DispatchQueue.main.async {
-                    defer { self.feedInFlight.signal() }
-                    guard self.alive, let tab = self.tab else { return }
-                    bytes.withUnsafeBufferPointer { p in
-                        mostty_tab_feed(tab, p.baseAddress, bytes.count)
+                    guard self.alive else { self.feedInFlight.signal(); return }
+                    self.feedQueue.append(bytes) { [weak self] in
+                        guard let self = self else { return }
+                        self.feedInFlight.signal()
+                        if self.alive { self.updateTitle() }
                     }
-                    self.dirty = true
-                    self.updateTitle()
+                    PTYFeedPump.shared.enqueue(self.feedQueue)
                 }
             }
         }

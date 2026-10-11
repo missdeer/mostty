@@ -56,6 +56,65 @@ struct ClipboardTests {
             precondition(pasteboard.setString(text, forType: .string), "System pasteboard is unavailable")
         }
 
+        // Exercise the production main-thread pump with a deterministic clock
+        // and queued callbacks, rather than a separate budget calculator.
+        do {
+            var time: UInt64 = 0
+            var callbacks: [() -> Void] = []
+            let pump = PTYFeedPump(now: { time }, schedule: { callbacks.append($0) })
+            var output = Array(repeating: [UInt8](), count: 16)
+            var completed = Array(repeating: 0, count: 16)
+            var ended = Array(repeating: 0, count: 16)
+            var sources: [PTYFeedQueue] = []
+            for i in 0..<16 {
+                let queue = PTYFeedQueue(feed: { bytes in
+                    output[i].append(contentsOf: bytes)
+                    time += 2_000_000
+                }, finish: {
+                    expect(output[i].count == 600 && completed[i] == 2, "EOF follows all pane bytes and slot releases")
+                    ended[i] += 1
+                })
+                queue.append(Array(repeating: UInt8(i), count: 300)) { completed[i] += 1 }
+                queue.append(Array(repeating: UInt8(i + 16), count: 300)) { completed[i] += 1 }
+                queue.end()
+                sources.append(queue)
+                pump.enqueue(queue)
+                pump.enqueue(queue) // repeated notification must not duplicate work
+            }
+            expect(callbacks.count == 1, "all panes share one scheduled output round")
+            callbacks.removeFirst()()
+            expect(time == 8_000_000 && output.filter { !$0.isEmpty }.count == 4,
+                   "one global 8 ms deadline yields after four busy panes")
+            for _ in 0..<3 { callbacks.removeFirst()() }
+            expect(output.allSatisfy { $0.count == 256 }, "all 16 panes progress before an earlier pane gets a second turn")
+            var rounds = 0
+            while !callbacks.isEmpty && rounds < 100 {
+                callbacks.removeFirst()(); rounds += 1
+            }
+            expect(callbacks.isEmpty, "finite output leaves no queued pump callback")
+            for i in 0..<16 {
+                expect(output[i] == Array(repeating: UInt8(i), count: 300) + Array(repeating: UInt8(i + 16), count: 300),
+                       "pane byte order and complete output survive slicing")
+                expect(completed[i] == 2 && ended[i] == 1, "each chunk slot and EOF completes exactly once")
+            }
+            var released = 0
+            var cancelledEOF = 0
+            var consumed = 0
+            let cancelled = PTYFeedQueue(feed: { bytes in consumed += bytes.count; time += 8_000_000 },
+                                         finish: { cancelledEOF += 1 })
+            cancelled.append(Array(repeating: 1, count: 1024)) { released += 1 }
+            cancelled.end()
+            pump.enqueue(cancelled)
+            callbacks.removeFirst()()
+            expect(consumed == 256 && released == 0, "partial chunks keep their backpressure slot")
+            cancelled.cancel()
+            cancelled.cancel()
+            cancelled.append([2]) { released += 1 }
+            while !callbacks.isEmpty { callbacks.removeFirst()() }
+            expect(consumed == 256 && released == 2 && cancelledEOF == 0,
+                   "shutdown cancels remaining bytes/EOF and releases each slot once, including late delivery")
+        }
+
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         let view = MosttyTerminalView(frame: window.contentView!.bounds)

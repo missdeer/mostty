@@ -120,6 +120,16 @@ import).
 
 ## 2. Process & Threading Model
 
+On macOS, each PTY reader still owns at most eight admitted 64 KiB chunks
+(plus the chunk awaiting a semaphore slot). Main-thread delivery adds them to
+one shared `PTYFeedPump`: it rotates panes under a soft 8 ms round budget,
+using 256-byte VT feeds and 2–8 ms per-pane quanta. A chunk releases its slot
+only after complete consumption or cancellation. EOF is queued behind that
+pane's bytes, and shutdown cancels pending chunks before joining the reader.
+An indivisible image decode may exceed the budget. Input writing retains its
+independent ordered queue. macOS rendering also retains frame-cell storage
+between frames and releases that storage on successful surface resize.
+
 Mostty is a single-process, multi-thread program. A Windows tab owns a SplitLayout; each leaf owns a child HWND, ConPTY, TerminalSession, PTY ring and isolated drawing cache. The process FontService and GPU device/shaders are shared across pane surfaces.
 
 | Thread | Purpose | Notes |
