@@ -217,7 +217,13 @@ pub fn applyRasterResult(self: anytype, result: *glyph_worker.RasterResult) bool
     return true;
 }
 
+// Test-only resource boundary for GPU-free run-cache tests. Application builds
+// always use the real blank glyph and compile out this branch.
+pub var test_blank_slot: ?u32 = null;
 fn blankGlyphSlot(self: anytype, cache: *GlyphIndexCache, tex_cell_count: CellXY) u32 {
+    if (@import("builtin").is_test) {
+        if (test_blank_slot) |slot| return slot;
+    }
     return generateGlyph(self, cache, tex_cell_count, ' ', &.{}, .single, .regular);
 }
 

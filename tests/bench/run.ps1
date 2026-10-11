@@ -30,7 +30,14 @@ foreach ($side in @('base', 'head')) {
         [IO.File]::WriteAllText($cachePath, $cacheText)
     }
     $glyphPath = "$tree/src/win32/d3d11/glyph.zig"
-    [IO.File]::WriteAllText($glyphPath, [IO.File]::ReadAllText($glyphPath) + [IO.File]::ReadAllText("$root/tests/bench/windows-glyph.zig"))
+    $glyphText = [IO.File]::ReadAllText($glyphPath)
+    if (-not $glyphText.Contains('pub var test_blank_slot: ?u32 = null;')) {
+        $signature = 'fn blankGlyphSlot(self: anytype, cache: *GlyphIndexCache, tex_cell_count: CellXY) u32 {'
+        if ([regex]::Matches($glyphText, [regex]::Escape($signature)).Count -ne 1) { throw 'Blank glyph test boundary changed' }
+        $glyphText = $glyphText.Replace($signature, "$signature`n    if (@import(`"builtin`").is_test) { if (test_blank_slot) |slot| return slot; }")
+        $glyphText += "`npub var test_blank_slot: ?u32 = null;`n"
+    }
+    [IO.File]::WriteAllText($glyphPath, $glyphText + [IO.File]::ReadAllText("$root/tests/bench/windows-glyph.zig"))
     foreach ($part in @('mouse', 'misc')) {
         $path = "$tree/src/win32/wnd/$part.zig"
         $text = [IO.File]::ReadAllText($path)
@@ -57,5 +64,5 @@ $order = @('base', 'head', 'head', 'base', 'head', 'base', 'base', 'head')
 for ($i = 0; $i -lt $order.Count; $i++) {
     $side = $order[$i]
     & "$out/$side/zig-out/bin/runtime-bench.exe" *> "$out/$side-$i.log"
-    if ($LASTEXITCODE -ne 0) { throw "Benchmark assertion failed: $side trial $i" }
+    if ($LASTEXITCODE -ne 0) { Get-Content "$out/$side-$i.log" -Tail 100; throw "Benchmark assertion failed: $side trial $i" }
 }

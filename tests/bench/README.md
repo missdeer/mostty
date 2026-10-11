@@ -29,7 +29,7 @@ used only in the Linux analysis job; platform runners use shell or PowerShell.
 | Case | Equal input on both sides | Measured production boundary |
 | --- | --- | --- |
 | `ligature_keys` | 5,000 varied 32-byte runs, all 32 output keys | API microbenchmark only; does not guard production callers. No work-count claim or gate. |
-| `windows_ligature_runs` | 5,000 varied cached runs at the production length limit (12 cells) | Actual production `generateRun`, all output slot indices checked. A test-only counter inside `Key.initRun` observes real hash pairs; identical instrumentation is overlaid on base. Does not measure DirectWrite shaping or cold rasterization. |
+| `windows_ligature_runs` | 5,000 varied cached runs at the production length limit (12 cells) | Actual production `generateRun` reservation path, all output run-slot indices checked. A test-only counter inside `Key.initRun` observes real hash pairs. A test-only resource boundary supplies the blank atlas slot; blank glyph lookup/rasterization is excluded. Identical instrumentation/boundary is overlaid on base. Does not measure DirectWrite shaping or cold rasterization. |
 | `viewport_frames` | 100 builds of the same 120×40 Unicode/styled viewport | Real grid builders; base owns/frees frames, PR uses the renderer's retained-storage API. Same geometry and cell checksums. |
 | `multipart_scratch` | Four >1 MiB FileParts, each superseded by a new header | Real session/parser replacement path; includes repeated-large-transfer allocation churn as well as idle retained capacity. |
 | `plain_output_control` | 256 KiB of ordinary terminal output | Unchanged bulk VT path, final terminal text checksum. |
