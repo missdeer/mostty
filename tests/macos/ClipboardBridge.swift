@@ -123,21 +123,36 @@ func stubRead(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ c
 }
 @_cdecl("mostty_tab_feed")
 func stubFeed(_ tab: OpaquePointer?, _ pointer: UnsafePointer<UInt8>?, _ length: Int) {}
+var textBlinkVisible = false
+var cursorBlinkVisible = true
+@_cdecl("mostty_tab_blink_visible")
+func stubBlinkVisible(_ tab: OpaquePointer?, _ focused: Bool) -> Bool {
+    textBlinkVisible || (focused && cursorBlinkVisible)
+}
 @_cdecl("mostty_tab_write")
 func stubWrite(_ tab: OpaquePointer?, _ pointer: UnsafePointer<UInt8>?, _ length: Int) {
     writeTab = tab
     precondition(length <= 4096 - written.count)
     written.append(contentsOf: UnsafeBufferPointer(start: pointer, count: length))
 }
+private var renderedCols: UInt32 = 0
+private var renderedRows: UInt32 = 0
 @_cdecl("mostty_tab_set_surface")
 func stubSetSurface(_ tab: OpaquePointer?, _ width: UInt32, _ height: UInt32, _ scale: Float,
                     _ cols: UnsafeMutablePointer<UInt32>?, _ rows: UnsafeMutablePointer<UInt32>?) -> Bool {
-    cols?.pointee = width / 10; rows?.pointee = height / 20
+    renderedCols = width / 10; renderedRows = height / 20
+    cols?.pointee = renderedCols; rows?.pointee = renderedRows
     return true
 }
+var renderCalls = 0
+var renderTexture: MTLTexture?
 @_cdecl("mostty_tab_render")
 func stubRender(_ tab: OpaquePointer?, _ cursor: Bool, _ textBlinkOn: Bool,
-                _ cols: UnsafeMutablePointer<UInt32>?, _ rows: UnsafeMutablePointer<UInt32>?) -> UnsafeMutableRawPointer? { nil }
+                _ cols: UnsafeMutablePointer<UInt32>?, _ rows: UnsafeMutablePointer<UInt32>?) -> UnsafeMutableRawPointer? {
+    renderCalls += 1
+    cols?.pointee = renderedCols; rows?.pointee = renderedRows
+    return renderTexture.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+}
 @_cdecl("mostty_tab_title")
 func stubTitle(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ capacity: Int) -> Int {
     let bytes = Array(displayTitle.utf8.prefix(capacity))

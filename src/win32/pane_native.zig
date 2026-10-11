@@ -134,7 +134,8 @@ pub fn reflow(window: *state.Window) void {
             _ = win32.SetWindowPos(pane.hwnd.?, null, x, y, width, height, .{ .NOZORDER = 1, .NOACTIVATE = 1 });
             resizePane(window, pane, geom.computeGridCellCount(pane.hwnd.?, cs));
         }
-        const visible = window.tabs.items.len > 0 and pane.tab == window.activeTab() and rect != null;
+        const visible = window.paneVisible(pane);
+        if (!visible) pane.common.syncBlinkTimer(pane.hwnd.?, false);
         _ = win32.ShowWindow(pane.hwnd.?, if (visible) win32.SW_SHOWNA else win32.SW_HIDE);
     }
     window.requestRender();

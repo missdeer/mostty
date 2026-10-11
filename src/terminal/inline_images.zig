@@ -18,6 +18,23 @@ transparent: bool = false,
 transfer: std.ArrayList(u8) = .empty,
 transferring: bool = false,
 
+// Keep common small transfers warm without retaining a one-off large encoded
+// image for the lifetime of every pane. This is not a payload size limit.
+pub const retained_scratch_limit = 1024 * 1024;
+
+fn clearScratch(self: *InlineImages, buffer: *std.ArrayList(u8)) void {
+    if (buffer.capacity > retained_scratch_limit) {
+        buffer.deinit(self.allocator);
+        buffer.* = .empty;
+    } else buffer.clearRetainingCapacity();
+}
+
+pub fn discardTransfer(self: *InlineImages) void {
+    self.transferring = false;
+    self.clearScratch(&self.transfer);
+    self.clearScratch(&self.payload);
+}
+
 pub fn deinit(self: *InlineImages) void {
     self.payload.deinit(self.allocator);
     self.transfer.deinit(self.allocator);
@@ -32,6 +49,28 @@ pub fn feed(self: *InlineImages, stream: anytype, bytes: []const u8) void {
             stream.nextSlice(bytes[i..end]);
             i = end;
             continue;
+        }
+        if (self.state == .payload) {
+            // Image bodies are usually long runs without protocol controls.
+            // Preserve the state machine at every terminator, but append the
+            // ordinary bytes in one operation instead of one grow/check each.
+            var count = bytes.len - i;
+            // Scalar-byte searches use std's vectorized implementation. Bound
+            // each subsequent search by the earliest control already found.
+            inline for (.{ 0x07, 0x18, 0x1a, 0x1b }) |control| {
+                count = std.mem.indexOfScalar(u8, bytes[i..][0..count], control) orelse count;
+            }
+            if (count > 0) {
+                if (!self.discard) {
+                    const available = Sixel.max_bytes -| self.payload.items.len;
+                    self.payload.appendSlice(self.allocator, bytes[i..][0..@min(count, available)]) catch {
+                        self.discard = true;
+                    };
+                    if (count > available) self.discard = true;
+                }
+                i += count;
+                continue;
+            }
         }
         self.next(stream, bytes[i]);
         i += 1;
@@ -135,7 +174,9 @@ fn forwardPrefix(self: *InlineImages, stream: anytype, ch: u8) void {
 
 fn reset(self: *InlineImages) void {
     self.state = .normal;
-    self.payload.clearRetainingCapacity();
+    self.clearScratch(&self.payload);
+    // FilePart resets the OSC parser but still owns an unfinished transfer.
+    if (!self.transferring) self.clearScratch(&self.transfer);
 }
 
 fn finish(self: *InlineImages, term: *vt.Terminal) void {
@@ -155,7 +196,9 @@ fn complete(self: *InlineImages, term: *vt.Terminal) !void {
         .sixel, .iterm => try self.display(term, self.payload.items),
         .iterm_begin => {
             self.transferring = false;
-            self.transfer.clearRetainingCapacity();
+            // A replacement cancels the old transfer, but payload already
+            // contains the new header and must survive until it is copied.
+            self.clearScratch(&self.transfer);
             try self.transfer.appendSlice(self.allocator, self.payload.items);
             try self.transfer.append(self.allocator, ':');
             self.transferring = true;

@@ -55,7 +55,15 @@ struct ScrollbarTests {
                 NSApp.sendEvent(event)
             }
         }
-        pump(0.2)
+        // AppKit activation is asynchronous on hosted desktops. Wait for the
+        // native fixture's focus prerequisite instead of assuming 200 ms is
+        // enough. The assertion below still fails if focus is never acquired.
+        let focusDeadline = Date().addingTimeInterval(3)
+        repeat {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            pump(0.05)
+        } while !window.isKeyWindow && Date() < focusDeadline
         expect(window.isKeyWindow, "scrollbar window accepts native input")
         func refresh(_ total: UInt64, _ offset: UInt64, _ visible: UInt64) {
             clipboard_test_scrollback(tab, total, offset, visible)

@@ -119,8 +119,7 @@ pub fn setImagesEnabled(self: *Session, enabled: bool) void {
     self.images.enabled = enabled;
     if (!enabled) {
         self.images.discard = true;
-        self.images.transferring = false;
-        self.images.transfer.clearRetainingCapacity();
+        self.images.discardTransfer();
     }
     self.term.setKittyGraphicsSizeLimit(self.term.gpa(), if (enabled) 320 * 1000 * 1000 else 0);
 }
@@ -499,4 +498,215 @@ test "image interception preserves non-image strings and recovers after cancella
     const text = try session.term.plainString(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("hello", text);
+}
+
+test "large encoded scratch is reclaimed without losing multipart bytes" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.syncPixelSize(8, 6);
+    const limit = @import("inline_images.zig").retained_scratch_limit;
+    // Capacity is injected to avoid spending the test decoding a huge image.
+    // Actual protocol terminators and cancellation drive the reclamation.
+    try session.images.payload.ensureTotalCapacity(std.testing.allocator, limit + 1);
+    session.feed("\x1bPq#1;2;100;0;0~\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), session.images.payload.capacity);
+    try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07");
+    try session.images.transfer.ensureTotalCapacity(std.testing.allocator, limit + 1);
+    for ("\x1b]1337;FilePart=AAAA\x07") |byte| session.feed(&.{byte});
+    try std.testing.expect(session.images.transferring);
+    try std.testing.expectEqualStrings("inline=1:AAAA", session.images.transfer.items);
+    try std.testing.expect(session.images.transfer.capacity > limit);
+    session.feed("\x1b]1337;FilePart=BBBB\x18");
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(usize, 0), session.images.transfer.capacity);
+
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07");
+    try session.images.transfer.ensureTotalCapacity(std.testing.allocator, limit + 1);
+    session.setImagesEnabled(false);
+    try std.testing.expectEqual(@as(usize, 0), session.images.transfer.capacity);
+    session.setImagesEnabled(true);
+    session.feed("\x1bPq~\x1b\\");
+    const small_capacity = session.images.payload.capacity;
+    session.feed("\x1bPq~\x1b\\");
+    try std.testing.expect(small_capacity > 0 and small_capacity <= limit);
+    try std.testing.expectEqual(small_capacity, session.images.payload.capacity);
+}
+
+fn feedOversizedMultipart(session: *Session) void {
+    session.feed("\x1b]1337;MultipartFile=inline=1;width=9px\x07\x1b]1337;FilePart=");
+    const part = [_]u8{'A'} ** 4096;
+    for (0..InlineImages.retained_scratch_limit / part.len + 1) |_| session.feed(&part);
+    session.feed("\x07");
+}
+
+const ReplacementImageDecoder = struct {
+    fn decode(allocator: std.mem.Allocator, bytes: []const u8) vt.sys.DecodeError!vt.sys.Image {
+        // The superseded FilePart decodes to zeroes; only the new parts may
+        // reach this decoder. No platform image decoder is needed here.
+        if (!std.mem.eql(u8, bytes, "new")) return error.InvalidData;
+        return .{ .width = 1, .height = 1, .data = try allocator.dupe(u8, &.{ 11, 22, 33, 255 }) };
+    }
+};
+
+test "replacement MultipartFile reclaims real large parts and preserves its new header" {
+    const previous = InlineImages.decode_image;
+    InlineImages.decode_image = ReplacementImageDecoder.decode;
+    defer InlineImages.decode_image = previous;
+    for ([_]bool{ false, true }) |cancel| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 6);
+        feedOversizedMultipart(&session);
+        try std.testing.expect(session.images.transfer.items.len > InlineImages.retained_scratch_limit);
+        try std.testing.expect(session.images.transfer.capacity > InlineImages.retained_scratch_limit);
+        const header = "inline=1;width=2px;height=1px;preserveAspectRatio=0";
+        for ("\x1b]1337;MultipartFile=" ++ header ++ "\x07") |byte| session.feed(&.{byte});
+        try std.testing.expect(session.images.transferring);
+        try std.testing.expectEqualStrings(header ++ ":", session.images.transfer.items);
+        // Check immediately, while the new transfer is still unfinished.
+        try std.testing.expect(session.images.transfer.capacity <= InlineImages.retained_scratch_limit);
+        session.feed("\x1b]1337;FilePart=bm\x07\x1b]1337;FilePart=V3\x07");
+        session.feed(if (cancel) "\x1b]1337;FilePart=ignored\x18\x1b]1337;FileEnd\x07" else "\x1b]1337;FileEnd\x07");
+        try std.testing.expect(!session.images.transferring);
+        try std.testing.expectEqual(@as(usize, 0), session.images.transfer.items.len);
+        const storage = &session.term.screens.active.kitty_images;
+        try std.testing.expectEqual(@as(u32, if (cancel) 0 else 1), storage.images.count());
+        try std.testing.expectEqual(@as(u32, if (cancel) 0 else 1), storage.placements.count());
+        if (!cancel) {
+            var images = storage.images.valueIterator();
+            const image = images.next().?;
+            try std.testing.expectEqual(@as(u32, 2), image.width);
+            try std.testing.expectEqual(@as(u32, 1), image.height);
+            try std.testing.expectEqualSlices(u8, &.{ 11, 22, 33, 255, 11, 22, 33, 255 }, image.data.bytes().?);
+            try std.testing.expectEqual(@as(usize, 1), session.term.screens.active.cursor.y);
+        }
+    }
+}
+
+test "replacement MultipartFile allocation failure retires old scratch and permits a new transfer" {
+    const previous = InlineImages.decode_image;
+    InlineImages.decode_image = ReplacementImageDecoder.decode;
+    defer InlineImages.decode_image = previous;
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = counted.allocator(), .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.syncPixelSize(8, 6);
+    feedOversizedMultipart(&session);
+    const old_capacity = session.images.transfer.capacity;
+    try std.testing.expect(old_capacity > InlineImages.retained_scratch_limit);
+    // Finish reading the new header before failing its transfer allocation.
+    session.feed("\x1b]1337;MultipartFile=inline=1");
+    const freed = counted.freed_bytes;
+    counted.fail_index = counted.alloc_index;
+    counted.resize_fail_index = counted.resize_index;
+    session.feed("\x07");
+    try std.testing.expect(counted.has_induced_failure);
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(usize, 0), session.images.transfer.capacity);
+    try std.testing.expect(counted.freed_bytes - freed >= old_capacity);
+    counted.fail_index = std.math.maxInt(usize);
+    counted.resize_fail_index = std.math.maxInt(usize);
+    session.feed("\x1b]1337;FilePart=bmV3\x07\x1b]1337;FileEnd\x07");
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07\x1b]1337;FilePart=bmV3\x07\x1b]1337;FileEnd\x07ok");
+    try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ok", std.mem.trim(u8, text, "\n"));
+}
+
+test "bulk image bodies preserve terminators cancellation and parser recovery at every chunk size" {
+    const previous = InlineImages.decode_image;
+    InlineImages.decode_image = ReplacementImageDecoder.decode;
+    defer InlineImages.decode_image = previous;
+    const input = "\x1b]1337;MultipartFile=inline=1\x07\x1b]1337;FilePart=discarded\x1a" ++
+        "\x1b]1337;MultipartFile=inline=1\x1b\\\x1b]1337;FilePart=bm\x07\x1b]1337;FilePart=V3\x1b\\\x1b]1337;FileEnd\x07" ++
+        "\x1bPq#1;2;100;0;0~\x1b\\\x1b]2;title\x07ok";
+    for ([_]usize{ 1, 2, 3, 7, 256, input.len }) |stride| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 6);
+        var i: usize = 0;
+        while (i < input.len) {
+            const n = @min(stride, input.len - i);
+            session.feed(input[i..][0..n]);
+            i += n;
+        }
+        try std.testing.expectEqual(@as(u32, 2), session.term.screens.active.kitty_images.images.count());
+        try std.testing.expectEqual(@as(u32, 2), session.term.screens.active.kitty_images.placements.count());
+        try std.testing.expectEqualStrings("title", session.term.getTitle().?);
+        const text = try session.term.plainString(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings("ok", std.mem.trim(u8, text, "\n"));
+    }
+}
+
+test "bulk image payload OOM discards the image and resumes following text" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = failing.allocator(), .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    failing.fail_index = failing.alloc_index;
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07after");
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("after", text);
+}
+
+test "bulk Sixel ignores BEL without consuming payload capacity" {
+    const input = "\x1bPq#1\x07;2;10\x070;0;0!2\x07~\x07";
+    for ([_]usize{ 1, 2, 3, 7, input.len }) |stride| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 10, .rows = 4, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 6);
+        var offset: usize = 0;
+        while (offset < input.len) : (offset += stride) session.feed(input[offset..@min(offset + stride, input.len)]);
+        try std.testing.expectEqualStrings("#1;2;100;0;0!2~", session.images.payload.items);
+        session.feed("\x1b\\");
+        try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+        try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.placements.count());
+        var images = session.term.screens.active.kitty_images.images.valueIterator();
+        const image = images.next().?;
+        try std.testing.expectEqual(@as(u32, 2), image.width);
+        try std.testing.expectEqual(@as(u32, 6), image.height);
+        try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 0, 0, 255 } ** 12), image.data.bytes().?);
+    }
+}
+
+test "bulk append preserves the image payload byte limit" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.feed("\x1b]1337;MultipartFile=");
+    const limit = @import("sixel.zig").max_bytes;
+    // No decoder may inspect these bytes: exceeding the limit must discard
+    // this payload before completion, then return to ordinary VT input.
+    try session.images.payload.resize(std.testing.allocator, limit - 2);
+    session.feed("ABC");
+    try std.testing.expect(session.images.discard);
+    try std.testing.expectEqual(limit, session.images.payload.items.len);
+    session.feed("\x07ok");
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(usize, 0), session.images.payload.capacity);
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ok", text);
 }

@@ -9,6 +9,10 @@ pub const Half = enum(u2) { single, wide_left, wide_right };
 // with bold/italic as sparse syntax/prompt embellishments.
 pub const Style = enum(u2) { regular, bold, italic, bold_italic };
 
+// Test-only writes count actual run hash pairs, including production callers.
+// No counter access is compiled into application builds.
+pub var test_run_hash_calls: usize = 0;
+
 pub const Key = struct {
     hash_a: u64,
     hash_b: u64,
@@ -37,6 +41,7 @@ pub const Key = struct {
     }
 
     pub fn initRun(text: []const u8, offset: u8, style: Style) Key {
+        if (@import("builtin").is_test) test_run_hash_calls += 1;
         std.debug.assert(text.len > 1);
         std.debug.assert(offset < text.len);
 
@@ -56,7 +61,28 @@ pub const Key = struct {
             .run_len = @intCast(text.len),
         };
     }
+
+    pub fn atRunOffset(self: Key, offset: u8) Key {
+        std.debug.assert(offset < self.run_len);
+        var key = self;
+        key.run_offset = offset;
+        return key;
+    }
 };
+
+test "ligature offsets reuse hashes without aliasing cache entries" {
+    for ([_][]const u8{ "->", "===", "abcdefghijklmnop" }) |run| {
+        inline for (std.meta.tags(Style)) |style| {
+            const base = Key.initRun(run, 0, style);
+            for (0..run.len) |i| {
+                const offset: u8 = @intCast(i);
+                const key = base.atRunOffset(offset);
+                try std.testing.expectEqualDeep(Key.initRun(run, offset, style), key);
+                if (i != 0) try std.testing.expect(!std.meta.eql(base, key));
+            }
+        }
+    }
+}
 
 const Node = struct {
     prev: ?u32,

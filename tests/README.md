@@ -4,6 +4,10 @@ Use Zig **0.16.0**. Run commands from the repository root. Logs distinguish
 `pass`, `fail`, `blocked`, `skipped`, and `compile-only`; a green build does not
 claim that blocked hardware scenarios passed. Zig summaries retain individual
 skipped counts (for example the macOS-only config-path test on other hosts).
+The Linux aggregate runs in Debug and ReleaseFast. Runtime review additions
+join the existing shared and native aggregates; see
+[coverage and unresolved candidates](runtime-performance.md). No native test
+is replaced by a Linux mechanism test.
 
 | Suite | Entry point | CI / requirements |
 | --- | --- | --- |
@@ -11,6 +15,7 @@ skipped counts (for example the macOS-only config-path test on other hosts).
 | Shared terminal/session/images | `zig build test-core -Dcore-only` | Linux, Windows, macOS |
 | Grid, input, config, paste, selection, rendering helpers, write queue | `zig build test-macos-grid -Dcore-only` | Linux, Windows, macOS; no Apple frameworks |
 | All host unit suites | `zig build test --summary all` | Both native build workflows; Windows executes all 12 build configurations |
+| Runtime comparisons and evidence validation | [benchmark runners and methodology](bench/README.md) | Additional three-platform ReleaseFast base/PR CI; actual timings report-only, deterministic work gates and Linux analyzer contract tests required |
 | Cross-platform semantic analysis | `zig build check-macos-session -Dtarget=aarch64-macos` or `x86_64-macos` | Compile-only on Linux; never a native test pass |
 | Bundled themes | `swift tests/macos/bundle-themes.swift zig-out/Mostty.app` | macOS inventory |
 | Title notification / refresh / accessibility | `bash tests/macos/interactions.sh --titles-only` | macOS AppKit; no Metal, GUI session or pointer injection requirement |

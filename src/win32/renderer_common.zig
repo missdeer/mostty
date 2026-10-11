@@ -28,3 +28,21 @@ pub fn syncBlinkTimer(self: *RendererCommon, hwnd: win32.HWND, want: bool) void 
     }
     self.blink_timer_armed = want;
 }
+
+test "blink timer can rearm after pane suspension and redundant suspension is inert" {
+    const std = @import("std");
+    const hwnd = win32.CreateWindowExW(.{}, win32.L("STATIC"), win32.L("blink-test"), .{}, 0, 0, 1, 1, null, null, null, null) orelse return error.CreateWindowFailed;
+    defer _ = win32.DestroyWindow(hwnd);
+    var common: RendererCommon = .{ .cell_size = .{ .cx = 8, .cy = 16 }, .tab_bar_height = 0, .font_ligatures = true, .remote_or_software_adapter = false };
+    common.syncBlinkTimer(hwnd, true);
+    try std.testing.expect(common.blink_timer_armed);
+    // reflow uses this same transition before SW_HIDE; restored rendering
+    // must be able to arm again, using the existing wall-clock blink phase.
+    common.syncBlinkTimer(hwnd, false);
+    common.syncBlinkTimer(hwnd, false);
+    try std.testing.expect(!common.blink_timer_armed);
+    try std.testing.expectEqual(@as(win32.BOOL, 0), win32.KillTimer(hwnd, types.TIMER_TEXT_BLINK));
+    common.syncBlinkTimer(hwnd, true);
+    try std.testing.expect(common.blink_timer_armed);
+    common.syncBlinkTimer(hwnd, false);
+}

@@ -217,7 +217,13 @@ pub fn applyRasterResult(self: anytype, result: *glyph_worker.RasterResult) bool
     return true;
 }
 
+// Test-only resource boundary for GPU-free run-cache tests. Application builds
+// always use the real blank glyph and compile out this branch.
+pub var test_blank_slot: ?u32 = null;
 fn blankGlyphSlot(self: anytype, cache: *GlyphIndexCache, tex_cell_count: CellXY) u32 {
+    if (@import("builtin").is_test) {
+        if (test_blank_slot) |slot| return slot;
+    }
     return generateGlyph(self, cache, tex_cell_count, ' ', &.{}, .single, .regular);
 }
 
@@ -305,9 +311,10 @@ pub fn generateRun(
     var pending_count: usize = 0;
     var saw_new = false;
 
+    const run_key = GlyphIndexCache.Key.initRun(text, 0, style);
     for (text, 0..) |_, i| {
         const offset: u8 = @intCast(i);
-        const key = GlyphIndexCache.Key.initRun(text, offset, style);
+        const key = run_key.atRunOffset(offset);
         const res = cache.reserve(arena, key) catch com.oom(error.OutOfMemory);
         switch (res) {
             .ready => |idx| out.glyphs[i] = idx,
@@ -343,6 +350,18 @@ fn rollbackRunReservations(cache: *GlyphIndexCache, pending: []const RunPending)
     while (i > 0) {
         i -= 1;
         cache.unreserve(pending[i].index, pending[i].slot_gen);
+    }
+}
+
+test "production generateRun hashes once per run and preserves all cached offsets" {
+    const Fixture = @import("run_cache_fixture.zig");
+    for (std.meta.tags(GlyphIndexCache.Style)) |style| {
+        var fixture: Fixture = .{};
+        try fixture.init(std.testing.allocator, style);
+        defer fixture.deinit();
+        GlyphIndexCache.test_run_hash_calls = 0;
+        for (0..52) |i| _ = try fixture.run(i);
+        try std.testing.expectEqual(@as(usize, 52), GlyphIndexCache.test_run_hash_calls);
     }
 }
 

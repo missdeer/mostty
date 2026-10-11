@@ -21,7 +21,7 @@ const global = global_mod.global;
 
 const PTY_DRAIN_CHUNK_BYTES: usize = 256;
 const PTY_DRAIN_INITIAL_BUDGET_US: u64 = 2_000;
-const PTY_DRAIN_BACKLOG_BUDGET_US: u64 = 8_000;
+const DrainRound = @import("../../terminal/drain_round.zig");
 const PTY_DRAIN_CONTINUATION_MS: u32 = 1;
 
 // Bounded retries when a config reload hits a transiently-locked file (editor
@@ -35,6 +35,9 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         reloadConfig(hwnd);
     }
     if (wparam == types.TIMER_TEXT_BLINK) {
+        // KillTimer does not remove an already queued WM_TIMER. Hidden panes
+        // must not turn that stale message into a foreground repaint.
+        if (win32.IsWindowVisible(hwnd) == 0) return 0;
         const window = global_mod.windowFromHwnd(hwnd);
         window.requestRender();
     }
@@ -53,6 +56,13 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         drainPendingPtyTabs();
     }
     return 0;
+}
+
+test "queued blink from a hidden pane never requests a window render" {
+    const hwnd = win32.CreateWindowExW(.{}, win32.L("STATIC"), win32.L("hidden-blink-test"), .{}, 0, 0, 1, 1, null, null, null, null) orelse return error.CreateWindowFailed;
+    defer _ = win32.DestroyWindow(hwnd);
+    // No application window is installed: touching it would fail this test.
+    try std.testing.expectEqual(@as(?win32.LRESULT, 0), onTimer(hwnd, types.TIMER_TEXT_BLINK, 0));
 }
 
 // The watcher thread posts this for every change to the config directory.
@@ -687,7 +697,9 @@ fn drainPtyTab(window: *Window, tab: *Tab, budget_us: u64) void {
             std.log.info("pty drain: tab={} bytes={} chunks={} us={}", .{ tab.id, byte_count, chunk_count, drain_us });
         }
         window.notePtyBytes(@intCast(byte_count));
-        window.requestRender();
+        // Hidden output is still parsed in full. Title effects request their
+        // own chrome repaint; showing a pane always renders its latest state.
+        if (window.paneVisible(tab)) window.requestRender();
     }
     schedulePtyDrainContinuation(window, tab);
 }
@@ -705,9 +717,7 @@ fn schedulePtyDrainContinuation(window: *Window, tab: *Tab) void {
     // re-check for the race where the reader wrote while posted was still true
     // and therefore did not post its own wake-up. The clear must be seq_cst:
     // the following hasData() loads must not move before this store.
-    tab.pty_ring.posted.store(false, .seq_cst);
-    if (!tab.pty_ring.hasData()) return;
-    if (tab.pty_ring.posted.swap(true, .acq_rel)) return;
+    if (!DrainRound.clearAndRecheck(&tab.pty_ring)) return;
     armPtyDrainContinuation(window, tab);
 }
 
@@ -731,22 +741,100 @@ fn armPtyDrainContinuation(window: *Window, tab: *Tab) void {
 }
 
 fn drainPendingPtyTabs() void {
+    drainPendingPtyTabsWithClock(diag.qpcUsSince);
+}
+
+fn drainPendingPtyTabsWithClock(comptime elapsed: anytype) void {
     if (global.window == null) return;
     const window = &global.window.?;
+    const started = diag.qpcNow();
+    defer window.notePtyRound(diag.qpcUsSince(started));
+    var backlogged: usize = 0;
     for (window.panes.items) |tab| {
+        if (!tab.closing and tab.pty_ring.posted.load(.acquire) and tab.pty_ring.hasData()) backlogged += 1;
+    }
+    var round = DrainRound.init(window.panes.items.len, window.pty_drain_cursor, backlogged);
+    defer window.pty_drain_cursor = round.cursor;
+    while (round.next(elapsed(started))) |turn| {
+        const tab = window.panes.items[turn.index];
         if (tab.closing) continue;
         if (!tab.pty_ring.posted.load(.acquire)) continue;
         if (!tab.pty_ring.hasData()) {
             // Match schedulePtyDrainContinuation: clear, then re-check with a
             // StoreLoad barrier so a raced reader write cannot be stranded.
-            tab.pty_ring.posted.store(false, .seq_cst);
-            if (!tab.pty_ring.hasData()) continue;
-            if (tab.pty_ring.posted.swap(true, .acq_rel)) continue;
+            if (!DrainRound.clearAndRecheck(&tab.pty_ring)) continue;
             armPtyDrainContinuation(window, tab);
             continue;
         }
-        drainPtyTab(window, tab, PTY_DRAIN_BACKLOG_BUDGET_US);
+        drainPtyTab(window, tab, turn.budget);
     }
+    // A slow indivisible feed may consume the whole deadline. Unvisited
+    // panes still own posted=true and need a continuation, even if the pane
+    // that consumed the deadline emptied its ring.
+    if (round.visited < round.count) {
+        for (window.panes.items) |tab| {
+            if (!tab.closing and tab.pty_ring.posted.load(.acquire)) {
+                armPtyDrainContinuation(window, tab);
+            }
+        }
+    }
+}
+
+test "continuation skips closed and idle panes and rearms the unvisited tail" {
+    const hwnd = win32.CreateWindowExW(.{}, win32.L("STATIC"), win32.L("continuation-test"), .{}, 0, 0, 1, 1, null, null, null, null) orelse return error.CreateWindowFailed;
+    defer _ = win32.DestroyWindow(hwnd);
+    const saved = global.window;
+    defer global.window = saved;
+    global.window = .{ .hwnd = hwnd };
+    const window = &global.window.?;
+    defer window.panes.deinit(std.testing.allocator);
+    defer _ = win32.KillTimer(hwnd, types.TIMER_PTY_DRAIN);
+    var panes: [4]Tab = undefined;
+    var initialized: usize = 0;
+    defer for (panes[0..initialized]) |*pane| {
+        pane.session.deinit();
+        pane.pty_ring.deinit(std.testing.allocator);
+    };
+    for (&panes, 0..) |*pane, i| {
+        pane.* = .{ .id = @intCast(i + 1), .tab = undefined, .child_process = undefined, .session = undefined, .term = undefined };
+        pane.pty_ring = try @import("../pty_ring.zig").PtyRing.init(std.testing.allocator, &pane.reader_stop);
+        pane.session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .hooks = .{ .context = pane } }) catch |err| {
+            pane.pty_ring.deinit(std.testing.allocator);
+            return err;
+        };
+        pane.term = pane.session.term;
+        initialized += 1;
+        try window.panes.append(std.testing.allocator, pane);
+    }
+    panes[0].closing = true;
+    for (panes[2..]) |*pane| {
+        try std.testing.expect(pane.pty_ring.write("retained output"));
+        pane.pty_ring.posted.store(true, .release);
+    }
+    const Clock = struct {
+        var calls: usize = 0;
+        fn deadline(_: u64) u64 {
+            calls += 1;
+            return if (calls <= 3) 0 else DrainRound.budget_us;
+        }
+        fn immediate(_: u64) u64 {
+            return 0;
+        }
+    };
+    Clock.calls = 0;
+    drainPendingPtyTabsWithClock(Clock.deadline);
+    try std.testing.expect(!panes[2].pty_ring.hasData());
+    try std.testing.expect(panes[3].pty_ring.hasData());
+    try std.testing.expect(panes[3].pty_ring.posted.load(.acquire));
+    try std.testing.expect(window.pty_drain_timer_armed);
+    try std.testing.expectEqual(@as(usize, 3), window.pty_drain_cursor);
+    // Timer dispatch starts at the previously unvisited pane, even though
+    // the preceding pane emptied its ring and relinquished its posted edge.
+    window.pty_drain_timer_armed = false;
+    drainPendingPtyTabsWithClock(Clock.immediate);
+    try std.testing.expect(!panes[3].pty_ring.hasData());
+    try std.testing.expect(!panes[3].pty_ring.posted.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 30), window.diag_pty_bytes);
 }
 
 // PostMessage'd by the background-image decode worker. lParam owns a

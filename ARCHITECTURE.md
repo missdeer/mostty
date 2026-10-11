@@ -120,6 +120,16 @@ import).
 
 ## 2. Process & Threading Model
 
+On macOS, each PTY reader still owns at most eight admitted 64 KiB chunks
+(plus the chunk awaiting a semaphore slot). Main-thread delivery adds them to
+one shared `PTYFeedPump`: it rotates panes under a soft 8 ms round budget,
+using 256-byte VT feeds and 2–8 ms per-pane quanta. A chunk releases its slot
+only after complete consumption or cancellation. EOF is queued behind that
+pane's bytes, and shutdown cancels pending chunks before joining the reader.
+An indivisible image decode may exceed the budget. Input writing retains its
+independent ordered queue. macOS rendering also retains frame-cell storage
+between frames and releases that storage on successful surface resize.
+
 Mostty is a single-process, multi-thread program. A Windows tab owns a SplitLayout; each leaf owns a child HWND, ConPTY, TerminalSession, PTY ring and isolated drawing cache. The process FontService and GPU device/shaders are shared across pane surfaces.
 
 | Thread | Purpose | Notes |
@@ -139,8 +149,9 @@ Ownership rules:
   wparam=pane_id)`. The reader memcpy's `ReadFile` output into the ring;
   the UI thread drains bounded 256-byte slices for a small initial budget
   (~2 ms) and arms a short `TIMER_PTY_DRAIN` continuation while data
-  remains. Continuations use a larger backlog budget (~8 ms) so the UI
-  stays responsive without starving PTY throughput.
+  remains. Continuations share a window-wide soft ~8 ms deadline and rotate
+  the starting pane. A single pane retains an 8 ms quantum; multiple panes
+  share it down to 2 ms each. An indivisible feed can exceed the deadline.
   Notification is edge-triggered via an atomic `posted` bool: at most one
   wake-up chain is in flight per pane. When the ring is full the reader
   parks on the ring's auto-reset `wake_event`; the UI thread signals that
@@ -282,8 +293,9 @@ Handlers by family:
     into `Pane.session.feed` until the initial ~2 ms budget is spent,
     `SetEvent`s the ring's `wake_event` (resumes a full-ring writer), and
     — only if bytes were drained — increments the per-second PTY byte
-    counter and calls `requestRender`. If data remains, it arms
-    `TIMER_PTY_DRAIN`; timer continuations use an ~8 ms budget so large
+    counter and calls `requestRender` for visible output (title effects still
+    invalidate chrome independently). If data remains, it arms
+    `TIMER_PTY_DRAIN`; timer continuations share an ~8 ms window budget so large
     bursts yield back to the message pump without dropping to tiny
     throughput. The continuation timer is window-global and coalesced by
     `Window.pty_drain_timer_armed`; a later tab that also has backlog
@@ -348,6 +360,9 @@ The adapter rounds rectangle edges together to partition child HWNDs without
 pixel overlap. It resizes each pane’s VT and ConPTY to the same row/column pair,
 subtracting that pane’s scrollbar; hidden tabs retain their sessions and update
 geometry. Maximized-away panes keep their session and last size until restored.
+Hidden child panes cancel their SGR blink timer and clear its armed flag;
+queued hidden timer messages are ignored. Their first restored frame recomputes
+the existing wall-clock blink phase and rearms the timer if needed.
 
 ### 5.2 Reader thread (`child_process.zig:readConsoleThread`)
 
@@ -431,7 +446,8 @@ covering primary face. Named CoreText faces and OpenType feature descriptors
 are applied when fonts are built; style suppression uses the shared policy,
 with CoreGraphics emboldening/shearing for permitted missing styles.
 The renderer owns all font strings and settings across config reloads and
-rebuilds the cascades on font or backing-scale changes. Adjacent programming
+compares the owned font options before rebuilding on font changes. Backing-scale
+changes still rebuild cascades. Adjacent programming
 symbols with identical styles are shaped together when ligatures are enabled,
 stopping at cursor, row and paint boundaries.
 Each renderer retains up to 1024 shaped lines and their typographic metrics,
@@ -528,7 +544,7 @@ ReadFile bytes
   → SetEvent(pty_ring.wake_event)  (resumes a full-ring writer)
   → if bytes drained > 0:
        window.notePtyBytes(n)
-       window.requestRender()
+       if pane visible: window.requestRender()
   → if ring still has data: keep posted=true and arm coalesced TIMER_PTY_DRAIN
        (if SetTimer fails, PostMessage another WM_APP_CHILD_PROCESS_DATA)
     else clear posted=false and re-check for a write raced under posted=true

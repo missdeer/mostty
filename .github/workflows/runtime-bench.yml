@@ -1,0 +1,81 @@
+name: Runtime benchmarks
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: runtime-bench-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      BENCH_BASE: ${{ github.event.pull_request.base.sha || 'b128d906fc5ceee9446ae634a7a1d6d6a7baf2b1' }}
+      BENCH_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: runner.os == 'macOS'
+        with:
+          xcode-version: '26'
+      - name: Install existing Windows shader toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            winget install --source winget --id KhronosGroup.VulkanSDK --version 1.4.350.0 --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+          }
+          throw 'Shader toolchain installation failed'
+      - name: Compare on Linux or macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tests/bench/run.sh
+      - name: Compare on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/bench/run.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-bench-${{ runner.os }}
+          path: |
+            tmp/runtime-bench/*.log
+            tmp/runtime-bench/metadata.json
+          if-no-files-found: error
+  report:
+    needs: measure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-bench-*
+          path: tmp/benchmark-artifacts
+      - name: Validate mechanisms and report every workload
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests/bench -p 'test_*.py'
+          python3 tests/bench/report.py tmp/benchmark-artifacts tmp/benchmark-report | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-bench-comparison
+          path: tmp/benchmark-report/

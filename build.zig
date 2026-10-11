@@ -8,6 +8,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     };
     const vt = b.dependency("ghostty", dep_opts).module("ghostty-vt");
+    if (b.option(bool, "runtime-bench", "Build the opt-in runtime benchmark executable") orelse false) {
+        addRuntimeBench(b, target, optimize, vt);
+        return;
+    }
     const test_step = b.step("test", "Run unit tests");
     addLayoutTests(b, target, optimize, test_step);
     addCoreTests(b, target, optimize, vt, test_step);
@@ -20,6 +24,38 @@ pub fn build(b: *std.Build) void {
         .macos => buildMacos(b, target, optimize, vt, test_step),
         else => unreachable,
     }
+}
+
+fn addRuntimeBench(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, vt: *std.Build.Module) void {
+    const os = target.result.os.tag;
+    const tests = b.addTest(.{
+        .name = "runtime-bench",
+        .filters = &.{"runtime benchmark"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(switch (os) {
+                .windows => "src/mosttywindows.zig",
+                .macos => "src/mosttymacos.zig",
+                else => "src/runtime_bench.zig",
+            }),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    tests.root_module.addImport("vt", vt);
+    if (os == .windows) {
+        const shaders = buildShaders(b);
+        const z2d = b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d");
+        addWindowsImports(b, tests.root_module, vt, z2d, shaders, findVulkanInclude(b));
+        tests.root_module.linkSystemLibrary("opengl32", .{});
+        tests.root_module.linkSystemLibrary("gdi32", .{});
+        addShaderValidationDependencies(&tests.step, shaders);
+    } else if (os == .macos) {
+        tests.root_module.addImport("z2d", b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d"));
+        addMacosFrameworks(tests.root_module);
+        tests.root_module.linkSystemLibrary("c", .{});
+    }
+    const install = b.addInstallArtifact(tests, .{ .dest_dir = .{ .override = .bin } });
+    b.step("runtime-bench", "Build runtime benchmarks without timing compilation").dependOn(&install.step);
 }
 
 fn addLayoutTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {

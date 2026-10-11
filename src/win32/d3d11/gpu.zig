@@ -647,12 +647,15 @@ pub const CpuBandTexture = struct {
         // Destination for CopyPixels. Owned here so the consumer never has to
         // manage a buffer whose size is tied to this target's dimensions.
         pixels: []u8,
+        pixels_valid: bool = false,
+        pixel_copies: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {},
 
         pub fn stride(self: *const Cached) u32 {
             return self.width * 4;
         }
 
         pub fn clear(self: *Cached, rgba: [4]f32) void {
+            self.pixels_valid = false;
             var lock_ptr: ?*win32.IWICBitmapLock = null;
             const rect = win32.WICRect{ .X = 0, .Y = 0, .Width = @intCast(self.width), .Height = @intCast(self.height) };
             const hr = self.bitmap.Lock(&rect, @intFromEnum(win32.WICBitmapLockWrite), &lock_ptr);
@@ -678,9 +681,11 @@ pub const CpuBandTexture = struct {
             for (1..self.height) |y| @memcpy(bytes[y * pitch ..][0..first_row.len], first_row);
         }
 
-        /// Pull the freshly drawn band out of the WIC bitmap. Call after the
-        /// D2D EndDraw that produced it.
+        /// Pull the freshly drawn band out of the WIC bitmap. All painters
+        /// must clear before drawing; clear invalidates this owned snapshot.
+        /// Call after D2D EndDraw. Unchanged reads perform no WIC copy.
         pub fn readPixels(self: *Cached) []const u8 {
+            if (self.pixels_valid) return self.pixels;
             const s = self.stride();
             const hr = self.bitmap.IWICBitmapSource.CopyPixels(
                 null,
@@ -689,7 +694,8 @@ pub const CpuBandTexture = struct {
                 @ptrCast(self.pixels.ptr),
             );
             if (hr < 0) com.fatalHr("CopyPixels(cpu band)", hr);
-
+            self.pixels_valid = true;
+            if (@import("builtin").is_test) self.pixel_copies += 1;
             return self.pixels;
         }
     };

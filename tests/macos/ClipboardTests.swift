@@ -1,4 +1,5 @@
 import AppKit
+import Metal
 
 private final class MouseWheelEvent: NSEvent {
     var point = NSPoint.zero
@@ -56,6 +57,65 @@ struct ClipboardTests {
             precondition(pasteboard.setString(text, forType: .string), "System pasteboard is unavailable")
         }
 
+        // Exercise the production main-thread pump with a deterministic clock
+        // and queued callbacks, rather than a separate budget calculator.
+        do {
+            var time: UInt64 = 0
+            var callbacks: [() -> Void] = []
+            let pump = PTYFeedPump(now: { time }, schedule: { callbacks.append($0) })
+            var output = Array(repeating: [UInt8](), count: 16)
+            var completed = Array(repeating: 0, count: 16)
+            var ended = Array(repeating: 0, count: 16)
+            var sources: [PTYFeedQueue] = []
+            for i in 0..<16 {
+                let queue = PTYFeedQueue(feed: { bytes in
+                    output[i].append(contentsOf: bytes)
+                    time += 2_000_000
+                }, finish: {
+                    expect(output[i].count == 600 && completed[i] == 2, "EOF follows all pane bytes and slot releases")
+                    ended[i] += 1
+                })
+                queue.append(Array(repeating: UInt8(i), count: 300)) { completed[i] += 1 }
+                queue.append(Array(repeating: UInt8(i + 16), count: 300)) { completed[i] += 1 }
+                queue.end()
+                sources.append(queue)
+                pump.enqueue(queue)
+                pump.enqueue(queue) // repeated notification must not duplicate work
+            }
+            expect(callbacks.count == 1, "all panes share one scheduled output round")
+            callbacks.removeFirst()()
+            expect(time == 8_000_000 && output.filter { !$0.isEmpty }.count == 4,
+                   "one global 8 ms deadline yields after four busy panes")
+            for _ in 0..<3 { callbacks.removeFirst()() }
+            expect(output.allSatisfy { $0.count == 256 }, "all 16 panes progress before an earlier pane gets a second turn")
+            var rounds = 0
+            while !callbacks.isEmpty && rounds < 100 {
+                callbacks.removeFirst()(); rounds += 1
+            }
+            expect(callbacks.isEmpty, "finite output leaves no queued pump callback")
+            for i in 0..<16 {
+                expect(output[i] == Array(repeating: UInt8(i), count: 300) + Array(repeating: UInt8(i + 16), count: 300),
+                       "pane byte order and complete output survive slicing")
+                expect(completed[i] == 2 && ended[i] == 1, "each chunk slot and EOF completes exactly once")
+            }
+            var released = 0
+            var cancelledEOF = 0
+            var consumed = 0
+            let cancelled = PTYFeedQueue(feed: { bytes in consumed += bytes.count; time += 8_000_000 },
+                                         finish: { cancelledEOF += 1 })
+            cancelled.append(Array(repeating: 1, count: 1024)) { released += 1 }
+            cancelled.end()
+            pump.enqueue(cancelled)
+            callbacks.removeFirst()()
+            expect(consumed == 256 && released == 0, "partial chunks keep their backpressure slot")
+            cancelled.cancel()
+            cancelled.cancel()
+            cancelled.append([2]) { released += 1 }
+            while !callbacks.isEmpty { callbacks.removeFirst()() }
+            expect(consumed == 256 && released == 2 && cancelledEOF == 0,
+                   "shutdown cancels remaining bytes/EOF and releases each slot once, including late delivery")
+        }
+
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         let view = MosttyTerminalView(frame: window.contentView!.bounds)
@@ -65,6 +125,55 @@ struct ClipboardTests {
         view.setFrameSize(NSSize(width: 410, height: 200))
         view.resyncSurface()
         let firstTab = clipboard_test_created_tab()
+        window.makeFirstResponder(view)
+        cursorBlinkVisible = false
+        view.testClearDirty()
+        for _ in 0..<1000 { view.testBlinkTick() }
+        expect(!view.testDirty, "hidden cursor with no SGR blink schedules no raster work")
+        cursorBlinkVisible = true
+        view.testBlinkTick()
+        expect(view.testDirty, "visible focused cursor schedules its phase change")
+        window.makeFirstResponder(nil)
+        view.testClearDirty()
+        view.testBlinkTick()
+        expect(!view.testDirty, "unfocused non-blinking pane avoids redundant raster work")
+        textBlinkVisible = true
+        view.testBlinkTick()
+        expect(view.testDirty, "SGR blink still repaints an unfocused pane")
+        window.contentView = NSView()
+        view.testClearDirty()
+        view.testBlinkTick()
+        expect(!view.testDirty, "detached pane advances phase without scheduling raster")
+        window.contentView = view
+        expect(view.testDirty, "restoring a pane requests its current blink phase")
+        textBlinkVisible = false
+
+        cursorBlinkVisible = false
+        renderCalls = 0
+        var presentations = 0
+        var allowPresentation = false
+        view.testPresentTexture = { _ in presentations += 1; return allowPresentation }
+        view.testRenderTick() // bridge returns nil while no element blinks
+        expect(view.testDirty && renderCalls == 1 && presentations == 0,
+               "temporary bridge render failure preserves the pending non-blinking frame")
+        for _ in 0..<100 { view.testBlinkTick() }
+        expect(renderCalls == 1, "failure does not synchronously loop or retry from blink callbacks")
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                         width: 1, height: 1, mipmapped: false)
+        renderTexture = MTLCreateSystemDefaultDevice()?.makeTexture(descriptor: textureDescriptor)
+        expect(renderTexture != nil, "recovery fixture obtains a real Metal texture")
+        view.testRenderTick() // presentation allocation is still unavailable
+        expect(view.testDirty && renderCalls == 2 && presentations == 1,
+               "temporary presentation failure also retains dirty for the next timer tick")
+        allowPresentation = true
+        view.testRenderTick()
+        expect(!view.testDirty && renderCalls == 3 && presentations == 2,
+               "later successful presentation clears dirty without input output or blinking")
+        view.testRenderTick()
+        expect(renderCalls == 3 && presentations == 2, "recovery stops retrying once the frame was submitted")
+        view.testPresentTexture = nil
+        renderTexture = nil
+        cursorBlinkVisible = true
 
         let keypadCases: [(UInt16, String)] = [
             (82, "\u{1b}Op"), (83, "\u{1b}Oq"), (84, "\u{1b}Or"), (85, "\u{1b}Os"),
@@ -242,7 +351,11 @@ struct ClipboardTests {
         view.mouseMoved(with: mouse(.mouseMoved, 12))
         expect(clipboard_test_hovered_url(), "URL hover publishes the detected range to the renderer")
         expect(NSCursor.current == NSCursor.pointingHand, "URL hover sets the hand cursor")
+        view.testClearDirty()
+        for _ in 0..<1000 { view.mouseMoved(with: mouse(.mouseMoved, 12)) }
+        expect(!view.testDirty, "unchanged same-cell hover must not schedule rasterization")
         view.mouseMoved(with: mouse(.mouseMoved, -1))
+        expect(view.testDirty, "leaving a URL schedules removal of its underline")
         expect(!clipboard_test_hovered_url(), "outside-grid movement clears URL feedback")
         expect(NSCursor.current == NSCursor.arrow, "leaving URL restores the normal cursor")
         view.mouseMoved(with: mouse(.mouseMoved, 12))

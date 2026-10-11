@@ -2,6 +2,97 @@ import AppKit
 import Metal
 import QuartzCore
 
+/// Main-thread-only PTY work. Reader semaphore slots are released only after
+/// an entire chunk is consumed or cancelled; EOF follows all preceding bytes.
+final class PTYFeedQueue {
+    struct Chunk { let bytes: [UInt8]; let complete: () -> Void }
+    private var chunks: [Chunk] = []
+    private var offset = 0
+    private var eof = false
+    private var cancelled = false
+    fileprivate var enqueued = false
+    let feed: (UnsafeBufferPointer<UInt8>) -> Void
+    let finish: () -> Void
+    init(feed: @escaping (UnsafeBufferPointer<UInt8>) -> Void, finish: @escaping () -> Void) {
+        self.feed = feed; self.finish = finish
+    }
+    func append(_ bytes: [UInt8], complete: @escaping () -> Void) {
+        guard !cancelled else { complete(); return }
+        chunks.append(Chunk(bytes: bytes, complete: complete))
+    }
+    func end() { if !cancelled { eof = true } }
+    var pending: Bool { !chunks.isEmpty || eof }
+    func step() {
+        if !chunks.isEmpty {
+            let n = min(256, chunks[0].bytes.count - offset)
+            chunks[0].bytes.withUnsafeBufferPointer { p in
+                feed(UnsafeBufferPointer(rebasing: p[offset..<(offset + n)]))
+            }
+            offset += n
+            if offset == chunks[0].bytes.count {
+                let done = chunks.removeFirst().complete
+                offset = 0
+                done()
+            }
+        } else if eof {
+            eof = false
+            finish()
+        }
+    }
+    func cancel() {
+        cancelled = true
+        let old = chunks
+        chunks.removeAll()
+        offset = 0; eof = false
+        for chunk in old { chunk.complete() }
+    }
+}
+
+/// One admission point across all windows/panes, yielding to the main queue
+/// between rounds. A single VT feed (including image decode) is indivisible.
+final class PTYFeedPump {
+    static let shared = PTYFeedPump()
+    private var queues: [PTYFeedQueue] = []
+    private var scheduled = false
+    private let now: () -> UInt64
+    private let schedule: (@escaping () -> Void) -> Void
+    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+         schedule: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }) {
+        self.now = now; self.schedule = schedule
+    }
+    func enqueue(_ queue: PTYFeedQueue) {
+        if queue.pending && !queue.enqueued {
+            queue.enqueued = true
+            queues.append(queue)
+        }
+        arm()
+    }
+    private func arm() {
+        guard !scheduled, !queues.isEmpty else { return }
+        scheduled = true
+        schedule { self.run() }
+    }
+    private func run() {
+        scheduled = false
+        let start = now()
+        let budget: UInt64 = 8_000_000
+        let quantum = budget / UInt64(max(1, min(4, queues.count)))
+        let count = queues.count
+        for _ in 0..<count {
+            if now() - start >= budget { break }
+            let queue = queues.removeFirst()
+            let turn = now()
+            while queue.pending {
+                queue.step()
+                let time = now()
+                if time - start >= budget || time - turn >= quantum { break }
+            }
+            if queue.pending { queues.append(queue) } else { queue.enqueued = false }
+        }
+        arm()
+    }
+}
+
 struct TerminalLauncher {
     let label: String
     let command: String
@@ -47,6 +138,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     // Caps how many PTY chunks may be queued on the main thread at once, so
     // sustained high-throughput output can't grow memory without bound.
     private let feedInFlight = DispatchSemaphore(value: 8)
+    private lazy var feedQueue = PTYFeedQueue(feed: { [weak self] bytes in
+        guard let self = self, self.alive, let tab = self.tab else { return }
+        mostty_tab_feed(tab, bytes.baseAddress, bytes.count)
+        self.dirty = true
+    }, finish: { [weak self] in self?.handleEOF() })
     private let stopLock = NSLock()
     private var stopFlag = false
 
@@ -58,6 +154,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     private var hasSelection = false
     private var urlTrackingArea: NSTrackingArea?
     private var hoveringURL = false
+    private var hoverCell: (col: UInt32, row: UInt32)?
     private var scrollAccum = 0.0
     private var horizontalScrollAccum = 0.0
     private var scrollReporting = false
@@ -77,6 +174,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     var onExit: (() -> Void)?
     var onFocus: (() -> Void)?
 #if MOSTTY_APP_TESTS
+    var testDirty: Bool { dirty }
+    func testClearDirty() { dirty = false }
+    func testBlinkTick() { blinkTick() }
+    func testRenderTick() { renderTick() }
+    var testPresentTexture: ((MTLTexture) -> Bool)?
     var testSession: OpaquePointer? { tab }
     func testUpdateTitle(session: OpaquePointer? = nil) {
         // Title-only tests use the bridge double without starting PTY/Metal.
@@ -149,6 +251,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
             window.acceptsMouseMovedEvents = true
             setupIfNeeded()
             updateScroller()
+            dirty = true // restore the current blink phase even without output
         } else {
             updateURLHover(at: nil)
         }
@@ -230,6 +333,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         }
         alive = false
         setStop(true)
+        feedQueue.cancel()
         if readerThread != nil { readerDone.wait() }
         renderTimer?.invalidate(); renderTimer = nil
         blinkTimer?.invalidate(); blinkTimer = nil
@@ -253,7 +357,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
                 let n = mostty_tab_read(t, buf, cap)
                 if n == -2 { continue }
                 if n <= 0 {
-                    DispatchQueue.main.async { self.handleEOF() }
+                    DispatchQueue.main.async {
+                        guard self.alive else { return }
+                        self.feedQueue.end()
+                        PTYFeedPump.shared.enqueue(self.feedQueue)
+                    }
                     break
                 }
                 let bytes = Array(UnsafeBufferPointer(start: buf, count: Int(n)))
@@ -267,13 +375,13 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
                 }
                 if !acquired { break }
                 DispatchQueue.main.async {
-                    defer { self.feedInFlight.signal() }
-                    guard self.alive, let tab = self.tab else { return }
-                    bytes.withUnsafeBufferPointer { p in
-                        mostty_tab_feed(tab, p.baseAddress, bytes.count)
+                    guard self.alive else { self.feedInFlight.signal(); return }
+                    self.feedQueue.append(bytes) { [weak self] in
+                        guard let self = self else { return }
+                        self.feedInFlight.signal()
+                        if self.alive { self.updateTitle() }
                     }
-                    self.dirty = true
-                    self.updateTitle()
+                    PTYFeedPump.shared.enqueue(self.feedQueue)
                 }
             }
         }
@@ -338,19 +446,22 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     private func startBlink() {
         let timer = Timer(timeInterval: 0.53, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            // The cursor and SGR blinking text both need a frame on each toggle.
-            self.blinkOn.toggle()
-            self.dirty = true
+            self?.blinkTick()
         }
         RunLoop.main.add(timer, forMode: .common)
         blinkTimer = timer
     }
 
+    private func blinkTick() {
+        // Keep phase while hidden; restoration schedules a frame explicitly.
+        blinkOn.toggle()
+        guard let window = window, let tab = tab, alive else { return }
+        if mostty_tab_blink_visible(tab, window.firstResponder === self) { dirty = true }
+    }
+
     private func renderTick() {
         // Background tabs are detached from the window; skip rendering entirely
-        // so they don't rasterize at 60 Hz (the blink timer keeps dirty set, and
-        // an offscreen layer's nextDrawable can be nil, re-arming dirty forever).
+        // so they don't retry an unavailable offscreen drawable at 60 Hz.
         // The reader still feeds VT state; the next present happens when shown.
         guard window != nil else { return }
         syncSurfaceIfNeeded()
@@ -360,6 +471,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
             ? window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) } : nil
         updateURLHover(at: mouse, updateCursor: mouse.map { bounds.contains($0) } ?? false)
         dirty = false
+        var submitted = false
+        // Any temporary bridge, drawable, texture or command allocation
+        // failure keeps the frame pending. Retry only on the existing capped
+        // render timer; blink and new PTY output are not recovery signals.
+        defer { if !submitted { dirty = true } }
         // Only the focused pane draws a blinking cursor.
         let focused = window?.firstResponder === self
         let cursorOn = focused && blinkOn
@@ -367,10 +483,18 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard let texPtr = mostty_tab_render(t, cursorOn, blinkOn, &c, &r) else { return }
         cols = c; rows = r
         guard let src = Unmanaged<AnyObject>.fromOpaque(texPtr).takeUnretainedValue() as? MTLTexture else { return }
-        guard let drawable = layer.nextDrawable() else { dirty = true; return }
+        submitted = presentTexture(src, layer: layer, queue: queue)
+        if submitted { overlay?.needsDisplay = true }
+    }
+
+    private func presentTexture(_ src: MTLTexture, layer: CAMetalLayer, queue: MTLCommandQueue) -> Bool {
+#if MOSTTY_APP_TESTS
+        if let present = testPresentTexture { return present(src) }
+#endif
+        guard let drawable = layer.nextDrawable() else { return false }
         let dst = drawable.texture
-        guard src.width == dst.width, src.height == dst.height else { dirty = true; return }
-        guard let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() else { return }
+        guard src.width == dst.width, src.height == dst.height else { return false }
+        guard let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() else { return false }
         blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: src.width, height: src.height, depth: 1),
@@ -379,7 +503,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         blit.endEncoding()
         cmd.present(drawable)
         cmd.commit()
-        overlay?.needsDisplay = true
+        return true
     }
 
     private func syncSurfaceIfNeeded() {
@@ -557,7 +681,10 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard let t = tab else { return }
         let cell = selecting || mostty_tab_mouse_enabled(t) ? nil : point.flatMap { viewportCell(at: $0) }
         let hit = mostty_tab_hover_url(t, cell != nil, cell?.col ?? 0, cell?.row ?? 0)
-        if hit != hoveringURL { dirty = true }
+        // Moving between two links can change the underline while both hits
+        // are true. Pixel motion inside an unchanged cell needs no frame.
+        if hit != hoveringURL || (hit && (cell?.col != hoverCell?.col || cell?.row != hoverCell?.row)) { dirty = true }
+        hoverCell = cell
         if updateCursor, let point = point, bounds.contains(point) {
             cursor(hoveringURL: hit, at: point).set()
             Self.cursorOwner = self
@@ -583,7 +710,6 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     override func mouseMoved(with event: NSEvent) {
         if !selecting, wantsMouseReport(event) { reportMouse(event, action: 2, button: 7) }
         updateURLHover(at: convert(event.locationInWindow, from: nil))
-        dirty = true
     }
 
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
