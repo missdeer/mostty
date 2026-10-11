@@ -18,6 +18,23 @@ transparent: bool = false,
 transfer: std.ArrayList(u8) = .empty,
 transferring: bool = false,
 
+// Keep common small transfers warm without retaining a one-off large encoded
+// image for the lifetime of every pane. This is not a payload size limit.
+pub const retained_scratch_limit = 1024 * 1024;
+
+fn clearScratch(self: *InlineImages, buffer: *std.ArrayList(u8)) void {
+    if (buffer.capacity > retained_scratch_limit) {
+        buffer.deinit(self.allocator);
+        buffer.* = .empty;
+    } else buffer.clearRetainingCapacity();
+}
+
+pub fn discardTransfer(self: *InlineImages) void {
+    self.transferring = false;
+    self.clearScratch(&self.transfer);
+    self.clearScratch(&self.payload);
+}
+
 pub fn deinit(self: *InlineImages) void {
     self.payload.deinit(self.allocator);
     self.transfer.deinit(self.allocator);
@@ -135,7 +152,9 @@ fn forwardPrefix(self: *InlineImages, stream: anytype, ch: u8) void {
 
 fn reset(self: *InlineImages) void {
     self.state = .normal;
-    self.payload.clearRetainingCapacity();
+    self.clearScratch(&self.payload);
+    // FilePart resets the OSC parser but still owns an unfinished transfer.
+    if (!self.transferring) self.clearScratch(&self.transfer);
 }
 
 fn finish(self: *InlineImages, term: *vt.Terminal) void {

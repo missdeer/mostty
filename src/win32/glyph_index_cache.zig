@@ -56,7 +56,28 @@ pub const Key = struct {
             .run_len = @intCast(text.len),
         };
     }
+
+    pub fn atRunOffset(self: Key, offset: u8) Key {
+        std.debug.assert(offset < self.run_len);
+        var key = self;
+        key.run_offset = offset;
+        return key;
+    }
 };
+
+test "ligature offsets reuse hashes without aliasing cache entries" {
+    for ([_][]const u8{ "->", "===", "abcdefghijklmnop" }) |run| {
+        inline for (std.meta.tags(Style)) |style| {
+            const base = Key.initRun(run, 0, style);
+            for (0..run.len) |i| {
+                const offset: u8 = @intCast(i);
+                const key = base.atRunOffset(offset);
+                try std.testing.expectEqualDeep(Key.initRun(run, offset, style), key);
+                if (i != 0) try std.testing.expect(!std.meta.eql(base, key));
+            }
+        }
+    }
+}
 
 const Node = struct {
     prev: ?u32,

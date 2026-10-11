@@ -21,7 +21,7 @@ const global = global_mod.global;
 
 const PTY_DRAIN_CHUNK_BYTES: usize = 256;
 const PTY_DRAIN_INITIAL_BUDGET_US: u64 = 2_000;
-const PTY_DRAIN_BACKLOG_BUDGET_US: u64 = 8_000;
+const DrainRound = @import("../../terminal/drain_round.zig");
 const PTY_DRAIN_CONTINUATION_MS: u32 = 1;
 
 // Bounded retries when a config reload hits a transiently-locked file (editor
@@ -35,6 +35,9 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         reloadConfig(hwnd);
     }
     if (wparam == types.TIMER_TEXT_BLINK) {
+        // KillTimer does not remove an already queued WM_TIMER. Hidden panes
+        // must not turn that stale message into a foreground repaint.
+        if (win32.IsWindowVisible(hwnd) == 0) return 0;
         const window = global_mod.windowFromHwnd(hwnd);
         window.requestRender();
     }
@@ -53,6 +56,13 @@ pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.L
         drainPendingPtyTabs();
     }
     return 0;
+}
+
+test "queued blink from a hidden pane never requests a window render" {
+    const hwnd = win32.CreateWindowExW(.{}, win32.L("STATIC"), win32.L("hidden-blink-test"), .{}, 0, 0, 1, 1, null, null, null, null) orelse return error.CreateWindowFailed;
+    defer _ = win32.DestroyWindow(hwnd);
+    // No application window is installed: touching it would fail this test.
+    try std.testing.expectEqual(@as(?win32.LRESULT, 0), onTimer(hwnd, types.TIMER_TEXT_BLINK, 0));
 }
 
 // The watcher thread posts this for every change to the config directory.
@@ -687,7 +697,9 @@ fn drainPtyTab(window: *Window, tab: *Tab, budget_us: u64) void {
             std.log.info("pty drain: tab={} bytes={} chunks={} us={}", .{ tab.id, byte_count, chunk_count, drain_us });
         }
         window.notePtyBytes(@intCast(byte_count));
-        window.requestRender();
+        // Hidden output is still parsed in full. Title effects request their
+        // own chrome repaint; showing a pane always renders its latest state.
+        if (window.paneVisible(tab)) window.requestRender();
     }
     schedulePtyDrainContinuation(window, tab);
 }
@@ -733,7 +745,11 @@ fn armPtyDrainContinuation(window: *Window, tab: *Tab) void {
 fn drainPendingPtyTabs() void {
     if (global.window == null) return;
     const window = &global.window.?;
-    for (window.panes.items) |tab| {
+    const started = diag.qpcNow();
+    var round = DrainRound.init(window.panes.items.len, window.pty_drain_cursor);
+    defer window.pty_drain_cursor = round.cursor;
+    while (round.next(diag.qpcUsSince(started))) |turn| {
+        const tab = window.panes.items[turn.index];
         if (tab.closing) continue;
         if (!tab.pty_ring.posted.load(.acquire)) continue;
         if (!tab.pty_ring.hasData()) {
@@ -745,7 +761,17 @@ fn drainPendingPtyTabs() void {
             armPtyDrainContinuation(window, tab);
             continue;
         }
-        drainPtyTab(window, tab, PTY_DRAIN_BACKLOG_BUDGET_US);
+        drainPtyTab(window, tab, turn.budget);
+    }
+    // A slow indivisible feed may consume the whole deadline. Unvisited
+    // panes still own posted=true and need a continuation, even if the pane
+    // that consumed the deadline emptied its ring.
+    if (round.visited < round.count) {
+        for (window.panes.items) |tab| {
+            if (!tab.closing and tab.pty_ring.posted.load(.acquire)) {
+                armPtyDrainContinuation(window, tab);
+            }
+        }
     }
 }
 

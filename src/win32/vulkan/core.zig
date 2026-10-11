@@ -201,6 +201,7 @@ const Upload = struct { pool: vk.VkCommandPool, staging: Buffer, completion: u64
 pub const Core = struct {
     parent: ?*Core = null,
     uploads: std.ArrayListUnmanaged(Upload) = .empty,
+    uploads_head: usize = 0,
     acquired_frame: ?usize = null,
     swapchain_render_finished: [max_swapchain_images]vk.VkSemaphore = @splat(null),
     presentation: Presentation,
@@ -432,6 +433,7 @@ pub const Core = struct {
         var core: Core = undefined;
         core.parent = null;
         core.uploads = .empty;
+        core.uploads_head = 0;
         core.acquired_frame = null;
         core.swapchain_render_finished = @splat(null);
         core.presentation = presentation;
@@ -526,6 +528,7 @@ pub const Core = struct {
         core.last_waitable_present_id = 0;
         core.acquired_frame = null;
         core.uploads = .empty;
+        core.uploads_head = 0;
         errdefer core.deinit();
         if (core.presentation == .native_wsi) {
             const info = vk.VkWin32SurfaceCreateInfoKHR{ .sType = vk.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, .pNext = null, .flags = 0, .hinstance = cHandleFromInt(vk.HINSTANCE, @intFromPtr(win32.GetModuleHandleW(null))), .hwnd = cHandleFromInt(vk.HWND, @intFromPtr(hwnd)) };
@@ -576,7 +579,7 @@ pub const Core = struct {
     }
 
     fn releaseUploads(self: *Core) void {
-        for (self.uploads.items) |*pending| {
+        for (self.uploads.items[self.uploads_head..]) |*pending| {
             pending.staging.release(self);
             self.dp.destroy_command_pool(self.device, pending.pool, null);
         }
@@ -584,16 +587,22 @@ pub const Core = struct {
     }
 
     fn collectUploads(self: *Core) StartupError!void {
-        if (self.uploads.items.len == 0) return;
+        if (self.uploads_head == self.uploads.items.len) return;
         var completed: u64 = 0;
         if (self.dp.get_semaphore_counter_value(self.device, self.timeline, &completed) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
-        var i: usize = 0;
-        while (i < self.uploads.items.len) {
-            if (self.uploads.items[i].completion <= completed) {
-                var pending = self.uploads.swapRemove(i);
-                pending.staging.release(self);
-                self.dp.destroy_command_pool(self.device, pending.pool, null);
-            } else i += 1;
+        const count = @import("../../renderer/completion_prefix.zig").ready(self.uploads.items[self.uploads_head..], completed).count;
+        for (self.uploads.items[self.uploads_head..][0..count]) |*pending| {
+            pending.staging.release(self);
+            self.dp.destroy_command_pool(self.device, pending.pool, null);
+        }
+        self.uploads_head += count;
+        // Preserve timeline order and amortize compaction. Pending resources
+        // are never touched again until the first outstanding value completes.
+        if (self.uploads_head >= self.uploads.items.len - self.uploads_head) {
+            const remaining = self.uploads.items.len - self.uploads_head;
+            std.mem.copyForwards(Upload, self.uploads.items[0..remaining], self.uploads.items[self.uploads_head..]);
+            self.uploads.items.len = remaining;
+            self.uploads_head = 0;
         }
     }
 

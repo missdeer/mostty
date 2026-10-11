@@ -305,9 +305,10 @@ pub fn generateRun(
     var pending_count: usize = 0;
     var saw_new = false;
 
+    const run_key = GlyphIndexCache.Key.initRun(text, 0, style);
     for (text, 0..) |_, i| {
         const offset: u8 = @intCast(i);
-        const key = GlyphIndexCache.Key.initRun(text, offset, style);
+        const key = run_key.atRunOffset(offset);
         const res = cache.reserve(arena, key) catch com.oom(error.OutOfMemory);
         switch (res) {
             .ready => |idx| out.glyphs[i] = idx,

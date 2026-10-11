@@ -58,6 +58,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     private var hasSelection = false
     private var urlTrackingArea: NSTrackingArea?
     private var hoveringURL = false
+    private var hoverCell: (col: UInt32, row: UInt32)?
     private var scrollAccum = 0.0
     private var horizontalScrollAccum = 0.0
     private var scrollReporting = false
@@ -77,6 +78,8 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     var onExit: (() -> Void)?
     var onFocus: (() -> Void)?
 #if MOSTTY_APP_TESTS
+    var testDirty: Bool { dirty }
+    func testClearDirty() { dirty = false }
     var testSession: OpaquePointer? { tab }
     func testUpdateTitle(session: OpaquePointer? = nil) {
         // Title-only tests use the bridge double without starting PTY/Metal.
@@ -557,7 +560,10 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard let t = tab else { return }
         let cell = selecting || mostty_tab_mouse_enabled(t) ? nil : point.flatMap { viewportCell(at: $0) }
         let hit = mostty_tab_hover_url(t, cell != nil, cell?.col ?? 0, cell?.row ?? 0)
-        if hit != hoveringURL { dirty = true }
+        // Moving between two links can change the underline while both hits
+        // are true. Pixel motion inside an unchanged cell needs no frame.
+        if hit != hoveringURL || (hit && (cell?.col != hoverCell?.col || cell?.row != hoverCell?.row)) { dirty = true }
+        hoverCell = cell
         if updateCursor, let point = point, bounds.contains(point) {
             cursor(hoveringURL: hit, at: point).set()
             Self.cursorOwner = self
@@ -583,7 +589,6 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     override func mouseMoved(with event: NSEvent) {
         if !selecting, wantsMouseReport(event) { reportMouse(event, action: 2, button: 7) }
         updateURLHover(at: convert(event.locationInWindow, from: nil))
-        dirty = true
     }
 
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }

@@ -119,8 +119,7 @@ pub fn setImagesEnabled(self: *Session, enabled: bool) void {
     self.images.enabled = enabled;
     if (!enabled) {
         self.images.discard = true;
-        self.images.transferring = false;
-        self.images.transfer.clearRetainingCapacity();
+        self.images.discardTransfer();
     }
     self.term.setKittyGraphicsSizeLimit(self.term.gpa(), if (enabled) 320 * 1000 * 1000 else 0);
 }
@@ -499,4 +498,40 @@ test "image interception preserves non-image strings and recovers after cancella
     const text = try session.term.plainString(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("hello", text);
+}
+
+test "large encoded scratch is reclaimed without losing multipart bytes" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.syncPixelSize(8, 6);
+    const limit = @import("inline_images.zig").retained_scratch_limit;
+    // Capacity is injected to avoid spending the test decoding a huge image.
+    // Actual protocol terminators and cancellation drive the reclamation.
+    try session.images.payload.ensureTotalCapacity(std.testing.allocator, limit + 1);
+    session.feed("\x1bPq#1;2;100;0;0~\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), session.images.payload.capacity);
+    try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07");
+    try session.images.transfer.ensureTotalCapacity(std.testing.allocator, limit + 1);
+    for ("\x1b]1337;FilePart=AAAA\x07") |byte| session.feed(&.{byte});
+    try std.testing.expect(session.images.transferring);
+    try std.testing.expectEqualStrings("inline=1:AAAA", session.images.transfer.items);
+    try std.testing.expect(session.images.transfer.capacity > limit);
+    session.feed("\x1b]1337;FilePart=BBBB\x18");
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(usize, 0), session.images.transfer.capacity);
+
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07");
+    try session.images.transfer.ensureTotalCapacity(std.testing.allocator, limit + 1);
+    session.setImagesEnabled(false);
+    try std.testing.expectEqual(@as(usize, 0), session.images.transfer.capacity);
+    session.setImagesEnabled(true);
+    session.feed("\x1bPq~\x1b\\");
+    const small_capacity = session.images.payload.capacity;
+    session.feed("\x1bPq~\x1b\\");
+    try std.testing.expect(small_capacity > 0 and small_capacity <= limit);
+    try std.testing.expectEqual(small_capacity, session.images.payload.capacity);
 }

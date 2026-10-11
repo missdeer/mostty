@@ -73,6 +73,32 @@ pub const Pane = struct {
     input_layout: ?win32.HKL = null,
 };
 
+test "output visibility follows tab selection and pane maximize without closing sessions" {
+    var window: Window = .{ .hwnd = undefined };
+    defer window.tabs.deinit(std.testing.allocator);
+    var tab: Tab = .{ .id = 1, .window = &window, .layout = try SplitLayout.init(std.testing.allocator, 1) };
+    defer tab.layout.deinit();
+    var other: Tab = .{ .id = 3, .window = &window, .layout = try SplitLayout.init(std.testing.allocator, 3) };
+    defer other.layout.deinit();
+    try window.tabs.append(std.testing.allocator, &tab);
+    try window.tabs.append(std.testing.allocator, &other);
+    try tab.layout.setBounds(.{ .x = 0, .y = 0, .width = 100, .height = 100 }, .{ .width = 1, .height = 1 }, 0);
+    try tab.layout.split(1, 2, .columns);
+    var pane: Pane = undefined;
+    pane.tab = &tab;
+    pane.id = 1;
+    try std.testing.expect(window.paneVisible(&pane));
+    tab.layout.toggleMaximize();
+    try std.testing.expect(!window.paneVisible(&pane));
+    tab.layout.toggleMaximize();
+    try std.testing.expect(window.paneVisible(&pane));
+    window.active_index = 1;
+    try std.testing.expect(!window.paneVisible(&pane));
+    window.active_index = 0;
+    try std.testing.expect(window.paneVisible(&pane));
+    try std.testing.expectEqual(@as(usize, 2), tab.layout.count);
+}
+
 pub const Window = struct {
     hwnd: win32.HWND,
     // Mirrors `config.smart_ime`; refreshed on window creation and on reload.
@@ -137,6 +163,7 @@ pub const Window = struct {
     render_pending: bool = false,
     render_timer_armed: bool = false,
     pty_drain_timer_armed: bool = false,
+    pty_drain_cursor: usize = 0,
     last_render_tick_ms: u64 = 0,
     render_interval_ms: u32 = 16,
     remote_session: bool = false,
@@ -187,6 +214,10 @@ pub const Window = struct {
 
     pub fn activeTab(self: *Window) *Tab {
         return self.tabs.items[self.active_index];
+    }
+
+    pub fn paneVisible(self: *Window, pane: *const Pane) bool {
+        return self.tabs.items.len > 0 and pane.tab == self.activeTab() and pane.tab.layout.paneRect(pane.id) != null;
     }
 
     pub fn active(self: *Window) *Pane {

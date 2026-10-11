@@ -110,20 +110,49 @@ fn updateUrlHover(window: *state.Window, hwnd: win32.HWND, mouse_x: i32, mouse_y
         return;
     };
     const tab = global_mod.inputPane(hwnd);
-    if (window.hover_cell) |hc| {
-        if (hc.tab_id == tab.id and hc.col == cell.col and hc.row == cell.row) return;
-    }
+    if (hoverCellMatches(window, tab.id, cell.col, cell.row)) return;
     window.hover_cell = .{ .tab_id = tab.id, .col = cell.col, .row = cell.row };
     const new_hit = url_hover.detectAt(tab.term, cell.col, cell.row);
+    if (cacheUrlHoverResult(window, tab.id, new_hit)) window.requestRender();
+}
+
+fn hoverCellMatches(window: *const state.Window, id: types.TabId, col: u16, row: u16) bool {
+    const hc = window.hover_cell orelse return false;
+    return hc.tab_id == id and hc.col == col and hc.row == row;
+}
+
+fn cacheUrlHoverResult(window: *state.Window, id: types.TabId, new_hit: ?url_hover.Hit) bool {
     if (new_hit) |h| {
         if (window.hovered_url) |cur| {
-            if (cur.tab_id == tab.id and cur.hit.eql(&h)) return;
+            if (cur.tab_id == id and cur.hit.eql(&h)) return false;
         }
-        window.hovered_url = .{ .tab_id = tab.id, .hit = h };
-        window.requestRender();
-    } else {
-        clearUrlHover(window);
+        window.hovered_url = .{ .tab_id = id, .hit = h };
+        return true;
+    } else if (window.hovered_url != null) {
+        // A miss is a cached result too. Repaint revalidation still detects
+        // output/viewport changes under a stationary pointer.
+        window.hovered_url = null;
+        return true;
     }
+    return false;
+}
+
+test "negative URL hover remains cached until viewport revalidation or invalidation" {
+    var window: state.Window = undefined;
+    window.hover_cell = null;
+    window.hovered_url = null;
+    var detections: usize = 0;
+    for (0..1000) |_| {
+        if (hoverCellMatches(&window, 7, 3, 2)) continue;
+        detections += 1;
+        window.hover_cell = .{ .tab_id = 7, .col = 3, .row = 2 };
+        try std.testing.expect(!cacheUrlHoverResult(&window, 7, null));
+    }
+    try std.testing.expectEqual(@as(usize, 1), detections);
+    try std.testing.expect(!hoverCellMatches(&window, 8, 3, 2));
+    try std.testing.expect(!hoverCellMatches(&window, 7, 4, 2));
+    clearUrlHover(&window);
+    try std.testing.expect(!hoverCellMatches(&window, 7, 3, 2));
 }
 
 // True when the mouse (in client coordinates) currently sits on the linkified

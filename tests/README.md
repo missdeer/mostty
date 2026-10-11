@@ -4,6 +4,10 @@ Use Zig **0.16.0**. Run commands from the repository root. Logs distinguish
 `pass`, `fail`, `blocked`, `skipped`, and `compile-only`; a green build does not
 claim that blocked hardware scenarios passed. Zig summaries retain individual
 skipped counts (for example the macOS-only config-path test on other hosts).
+The Linux aggregate runs in Debug and ReleaseFast. Runtime review additions
+join the existing shared and native aggregates; see
+[coverage and unresolved candidates](runtime-performance.md). No native test
+is replaced by a Linux mechanism test.
 
 | Suite | Entry point | CI / requirements |
 | --- | --- | --- |

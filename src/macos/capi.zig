@@ -48,6 +48,8 @@ const Tab = struct {
     exit_code: ?i32 = null,
     mouse_last_cell: ?vt.Coordinate = null,
     selection_input: ?SelectionInput = null,
+    hover_cell: ?struct { col: u32, row: u32 } = null,
+    hover_detections: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 };
 
 // Process-wide configuration, loaded lazily and replaced by
@@ -173,6 +175,8 @@ fn createTab(pixel_width: u32, pixel_height: u32, scale: f32, launcher: ?*const 
     tab.exit_code = null;
     tab.mouse_last_cell = null;
     tab.selection_input = null;
+    tab.hover_cell = null;
+    if (builtin.is_test) tab.hover_detections = 0;
     return tab;
 }
 
@@ -218,6 +222,7 @@ export fn mostty_config_reload() bool {
 /// drawable and grid.
 export fn mostty_tab_apply_config(tab_opt: ?*Tab) bool {
     const tab = tab_opt orelse return false;
+    tab.hover_cell = null;
     const cfg = config();
     tab.renderer.paint = paintOptions(cfg);
     tab.pty.terminal.setImagesEnabled(cfg.images_enabled);
@@ -440,8 +445,16 @@ fn visibleSelection(tab: *Tab) ?GridModel.Selection {
 /// Refresh URL feedback against the current viewport; inactive clears it.
 export fn mostty_tab_hover_url(tab_opt: ?*Tab, active: bool, col: u32, row: u32) bool {
     const tab = tab_opt orelse return false;
+    if (active) {
+        if (tab.hover_cell) |cell| {
+            if (cell.col == col and cell.row == row) return tab.renderer.hovered_url != null;
+        }
+    }
     tab.renderer.hovered_url = null;
+    tab.hover_cell = null;
     if (!active or viewportPin(tab, col, row) == null) return false;
+    tab.hover_cell = .{ .col = col, .row = row };
+    if (builtin.is_test) tab.hover_detections += 1;
     tab.renderer.hovered_url = url_hover.detectAt(tab.pty.terminal.term, @intCast(col), @intCast(row));
     return tab.renderer.hovered_url != null;
 }
@@ -504,6 +517,7 @@ export fn mostty_tab_read(tab_opt: ?*Tab, buf: [*]u8, cap: usize) isize {
 /// Feed PTY bytes into the VT state machine. Main thread only.
 export fn mostty_tab_feed(tab_opt: ?*Tab, ptr: [*]const u8, len: usize) void {
     const tab = tab_opt orelse return;
+    if (len > 0) tab.hover_cell = null;
     tab.pty.terminal.feed(ptr[0..len]);
 }
 
@@ -524,6 +538,7 @@ export fn mostty_tab_set_surface(
     out_rows: *u32,
 ) bool {
     const tab = tab_opt orelse return false;
+    tab.hover_cell = null;
     tab.renderer.resize(pixel_width, pixel_height, if (scale > 0) scale else 1) catch return false;
     const grid = tab.renderer.gridSize();
     if (grid.cols == 0 or grid.rows == 0) return false;
@@ -699,6 +714,7 @@ export fn mostty_tab_cursor_visible(tab_opt: ?*Tab) bool {
 /// positive scrolls down toward the active area).
 export fn mostty_tab_scroll(tab_opt: ?*Tab, delta_rows: i32) void {
     const tab = tab_opt orelse return;
+    tab.hover_cell = null;
     tab.selection_input = null;
     tab.pty.terminal.term.scrollViewport(.{ .delta = @as(isize, delta_rows) });
 }
@@ -717,6 +733,7 @@ export fn mostty_tab_scrollbar(tab_opt: ?*Tab) Scrollbar {
 
 export fn mostty_tab_scroll_to_row(tab_opt: ?*Tab, row: u64) void {
     const tab = tab_opt orelse return;
+    tab.hover_cell = null;
     tab.selection_input = null;
     const sb = mostty_tab_scrollbar(tab);
     const max_offset = sb.total -| sb.visible;
@@ -728,6 +745,7 @@ export fn mostty_tab_scroll_to_row(tab_opt: ?*Tab, row: u64) void {
 
 export fn mostty_tab_scroll_to_bottom(tab_opt: ?*Tab) void {
     const tab = tab_opt orelse return;
+    tab.hover_cell = null;
     tab.selection_input = null;
     tab.pty.terminal.term.scrollViewport(.{ .bottom = {} });
 }
@@ -1073,6 +1091,26 @@ test "URL bridge detects wrapped URLs and refreshes the click target" {
     tab.pty.terminal.feed("\x1b[2J\x1b[Hplain text");
     try std.testing.expectEqual(@as(usize, 0), mostty_tab_url_at(tab, 3, 0, &out, out.len));
     try std.testing.expect(!mostty_tab_hover_url(tab, true, 3, 0));
+}
+
+test "hover caches positive and negative cells until content or viewport changes" {
+    const tab = mostty_tab_create(320, 96, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(tab);
+    const plain = "plain text";
+    mostty_tab_feed(tab, plain, plain.len);
+    for (0..1000) |_| try std.testing.expect(!mostty_tab_hover_url(tab, true, 2, 0));
+    try std.testing.expectEqual(@as(usize, 1), tab.hover_detections);
+    const link = "\x1b[2J\x1b[Hhttps://example.test/";
+    mostty_tab_feed(tab, link, link.len);
+    for (0..1000) |_| try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
+    try std.testing.expectEqual(@as(usize, 2), tab.hover_detections);
+    mostty_tab_scroll_to_bottom(tab);
+    try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
+    try std.testing.expectEqual(@as(usize, 3), tab.hover_detections);
+    _ = mostty_tab_hover_url(tab, false, 2, 0);
+    try std.testing.expect(tab.renderer.hovered_url == null);
+    try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
+    try std.testing.expectEqual(@as(usize, 4), tab.hover_detections);
 }
 
 test "hard-wrapped OSC8 URL opens and copies its complete target" {

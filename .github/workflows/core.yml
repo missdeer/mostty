@@ -10,6 +10,10 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseFast]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -20,10 +24,10 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p tmp/ci-core
-          zig build test -Dcore-only --global-cache-dir .zig-cache --summary all 2>&1 | tee tmp/ci-core/unit.log
+          zig build test -Dcore-only -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache --summary all 2>&1 | tee tmp/ci-core/unit.log
       - name: Preserve shared test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: core-test-evidence
+          name: core-test-evidence-${{ matrix.optimize }}
           path: tmp/ci-core/

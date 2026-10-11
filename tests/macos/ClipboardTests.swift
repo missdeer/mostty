@@ -242,7 +242,11 @@ struct ClipboardTests {
         view.mouseMoved(with: mouse(.mouseMoved, 12))
         expect(clipboard_test_hovered_url(), "URL hover publishes the detected range to the renderer")
         expect(NSCursor.current == NSCursor.pointingHand, "URL hover sets the hand cursor")
+        view.testClearDirty()
+        for _ in 0..<1000 { view.mouseMoved(with: mouse(.mouseMoved, 12)) }
+        expect(!view.testDirty, "unchanged same-cell hover must not schedule rasterization")
         view.mouseMoved(with: mouse(.mouseMoved, -1))
+        expect(view.testDirty, "leaving a URL schedules removal of its underline")
         expect(!clipboard_test_hovered_url(), "outside-grid movement clears URL feedback")
         expect(NSCursor.current == NSCursor.arrow, "leaving URL restores the normal cursor")
         view.mouseMoved(with: mouse(.mouseMoved, 12))

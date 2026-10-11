@@ -43,6 +43,29 @@ pub const FontOptions = struct {
     codepoint_maps: []const Config.CodepointMap = &.{},
     ligatures: bool = true,
     size: f32 = default_font_size,
+
+    fn eql(a: FontOptions, b: FontOptions) bool {
+        if (a.size != b.size or a.ligatures != b.ligatures or !std.meta.eql(a.synthetic, b.synthetic)) return false;
+        inline for (.{ "family", "family_bold", "family_italic", "family_bold_italic" }) |field| {
+            if (!std.mem.eql(u8, @field(a, field), @field(b, field))) return false;
+        }
+        inline for (.{ "fallback_families", "emoji_families" }) |field| {
+            const x = @field(a, field);
+            const y = @field(b, field);
+            if (x.len != y.len) return false;
+            for (x, y) |lhs, rhs| if (!std.mem.eql(u8, lhs, rhs)) return false;
+        }
+        for (a.styles, b.styles) |x, y| {
+            if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
+            if (x == .named and !std.mem.eql(u8, x.named, y.named)) return false;
+        }
+        if (a.features.len != b.features.len or a.codepoint_maps.len != b.codepoint_maps.len) return false;
+        for (a.features, b.features) |x, y| if (!std.meta.eql(x, y)) return false;
+        for (a.codepoint_maps, b.codepoint_maps) |x, y| {
+            if (x.range_start != y.range_start or x.range_end != y.range_end or !std.mem.eql(u8, x.family, y.family)) return false;
+        }
+        return true;
+    }
 };
 
 /// Window-level paint settings the host changes at runtime (config reload, and
@@ -339,6 +362,7 @@ pub fn deinit(self: *CoreTextRenderer) void {
 /// metrics changed, so the caller knows the grid must be re-derived. Rebuilds
 /// everything before publishing so a failure leaves the current fonts intact.
 pub fn reconfigure(self: *CoreTextRenderer, options: FontOptions) !bool {
+    if (self.families.options.eql(options)) return false;
     const size = if (options.size > 0) options.size else default_font_size;
     var families = try FamilySet.init(self.allocator, options);
     errdefer families.deinit();
@@ -1082,7 +1106,39 @@ test "font-size drives the cell metrics, and reconfigure adopts a new size" {
     try std.testing.expectEqual(large.metrics, small.metrics);
     try std.testing.expectEqual(@as(f32, 24), small.font_size);
     // Re-applying an unchanged config must not claim the grid moved.
+    const original_font = small.fonts.regular;
+    const original_family = small.families.options.family.ptr;
     try std.testing.expect(!try small.reconfigure(.{ .size = 24 }));
+    try std.testing.expectEqual(original_font, small.fonts.regular);
+    try std.testing.expectEqual(original_family, small.families.options.family.ptr);
+}
+
+test "font comparison checks owned strings and every configuration field" {
+    const base: FontOptions = .{};
+    var owned = try FamilySet.init(std.testing.allocator, base);
+    defer owned.deinit();
+    try std.testing.expect(owned.options.eql(base));
+    inline for (std.meta.fields(FontOptions)) |field| {
+        var changed = base;
+        if (field.type == []const u8) {
+            @field(changed, field.name) = "different";
+        } else if (field.type == []const []const u8) {
+            @field(changed, field.name) = &.{"different"};
+        } else if (field.type == [4]Config.FontStyle) {
+            changed.styles[2] = .{ .named = "different" };
+        } else if (field.type == Config.SyntheticStyle) {
+            changed.synthetic.bold = false;
+        } else if (field.type == []const Config.FontFeature) {
+            changed.features = &.{.{ .tag = 1, .value = 0 }};
+        } else if (field.type == []const Config.CodepointMap) {
+            changed.codepoint_maps = &.{.{ .range_start = 1, .range_end = 2, .family = "different" }};
+        } else if (field.type == bool) {
+            changed.ligatures = !base.ligatures;
+        } else if (field.type == f32) {
+            changed.size += 1;
+        } else @compileError("new font option needs equality coverage");
+        try std.testing.expect(!owned.options.eql(changed));
+    }
 }
 
 test "an unset per-style family synthesizes from the regular face" {
