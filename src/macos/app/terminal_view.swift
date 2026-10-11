@@ -177,6 +177,8 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     var testDirty: Bool { dirty }
     func testClearDirty() { dirty = false }
     func testBlinkTick() { blinkTick() }
+    func testRenderTick() { renderTick() }
+    var testPresentTexture: ((MTLTexture) -> Bool)?
     var testSession: OpaquePointer? { tab }
     func testUpdateTitle(session: OpaquePointer? = nil) {
         // Title-only tests use the bridge double without starting PTY/Metal.
@@ -459,8 +461,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     private func renderTick() {
         // Background tabs are detached from the window; skip rendering entirely
-        // so they don't rasterize at 60 Hz (the blink timer keeps dirty set, and
-        // an offscreen layer's nextDrawable can be nil, re-arming dirty forever).
+        // so they don't retry an unavailable offscreen drawable at 60 Hz.
         // The reader still feeds VT state; the next present happens when shown.
         guard window != nil else { return }
         syncSurfaceIfNeeded()
@@ -470,6 +471,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
             ? window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) } : nil
         updateURLHover(at: mouse, updateCursor: mouse.map { bounds.contains($0) } ?? false)
         dirty = false
+        var submitted = false
+        // Any temporary bridge, drawable, texture or command allocation
+        // failure keeps the frame pending. Retry only on the existing capped
+        // render timer; blink and new PTY output are not recovery signals.
+        defer { if !submitted { dirty = true } }
         // Only the focused pane draws a blinking cursor.
         let focused = window?.firstResponder === self
         let cursorOn = focused && blinkOn
@@ -477,10 +483,18 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         guard let texPtr = mostty_tab_render(t, cursorOn, blinkOn, &c, &r) else { return }
         cols = c; rows = r
         guard let src = Unmanaged<AnyObject>.fromOpaque(texPtr).takeUnretainedValue() as? MTLTexture else { return }
-        guard let drawable = layer.nextDrawable() else { dirty = true; return }
+        submitted = presentTexture(src, layer: layer, queue: queue)
+        if submitted { overlay?.needsDisplay = true }
+    }
+
+    private func presentTexture(_ src: MTLTexture, layer: CAMetalLayer, queue: MTLCommandQueue) -> Bool {
+#if MOSTTY_APP_TESTS
+        if let present = testPresentTexture { return present(src) }
+#endif
+        guard let drawable = layer.nextDrawable() else { return false }
         let dst = drawable.texture
-        guard src.width == dst.width, src.height == dst.height else { dirty = true; return }
-        guard let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() else { return }
+        guard src.width == dst.width, src.height == dst.height else { return false }
+        guard let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() else { return false }
         blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: src.width, height: src.height, depth: 1),
@@ -489,7 +503,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         blit.endEncoding()
         cmd.present(drawable)
         cmd.commit()
-        overlay?.needsDisplay = true
+        return true
     }
 
     private func syncSurfaceIfNeeded() {

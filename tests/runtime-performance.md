@@ -85,6 +85,14 @@ retire/compact path is shared with a resource-destructor mock checking exactly-o
 release across partial progress, compaction, append, and teardown. This does not
 replace native GPU lifetime validation.
 
+Blink gating must not remove render recovery: every pre-submit failure keeps
+the frame dirty and retries on the existing capped render timer, even with a
+hidden cursor and no SGR blink. The AppKit regression invokes the production
+render tick with a nil bridge result, then a real Metal texture plus failed
+presentation admission, then successful submission; it checks one attempt per
+tick and no further work after recovery. The presentation allocation boundary
+is injected; the test does not claim a physical GPU fault was induced.
+
 New shared tests are imported by `macos_grid_tests.zig` and the existing session
 root, so `zig build test` runs them on Linux, macOS and all 12 Windows build
 configurations. Native additions live in already imported Windows/macOS modules

@@ -1,4 +1,5 @@
 import AppKit
+import Metal
 
 private final class MouseWheelEvent: NSEvent {
     var point = NSPoint.zero
@@ -146,6 +147,33 @@ struct ClipboardTests {
         window.contentView = view
         expect(view.testDirty, "restoring a pane requests its current blink phase")
         textBlinkVisible = false
+
+        cursorBlinkVisible = false
+        renderCalls = 0
+        var presentations = 0
+        var allowPresentation = false
+        view.testPresentTexture = { _ in presentations += 1; return allowPresentation }
+        view.testRenderTick() // bridge returns nil while no element blinks
+        expect(view.testDirty && renderCalls == 1 && presentations == 0,
+               "temporary bridge render failure preserves the pending non-blinking frame")
+        for _ in 0..<100 { view.testBlinkTick() }
+        expect(renderCalls == 1, "failure does not synchronously loop or retry from blink callbacks")
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                         width: 1, height: 1, mipmapped: false)
+        renderTexture = MTLCreateSystemDefaultDevice()?.makeTexture(descriptor: textureDescriptor)
+        expect(renderTexture != nil, "recovery fixture obtains a real Metal texture")
+        view.testRenderTick() // presentation allocation is still unavailable
+        expect(view.testDirty && renderCalls == 2 && presentations == 1,
+               "temporary presentation failure also retains dirty for the next timer tick")
+        allowPresentation = true
+        view.testRenderTick()
+        expect(!view.testDirty && renderCalls == 3 && presentations == 2,
+               "later successful presentation clears dirty without input output or blinking")
+        view.testRenderTick()
+        expect(renderCalls == 3 && presentations == 2, "recovery stops retrying once the frame was submitted")
+        view.testPresentTexture = nil
+        renderTexture = nil
+        cursorBlinkVisible = true
 
         let keypadCases: [(UInt16, String)] = [
             (82, "\u{1b}Op"), (83, "\u{1b}Oq"), (84, "\u{1b}Or"), (85, "\u{1b}Os"),
