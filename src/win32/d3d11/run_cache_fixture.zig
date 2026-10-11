@@ -10,8 +10,8 @@ const Fixture = @This();
 renderer: Renderer = undefined,
 font: FontService = undefined,
 cache: Cache = undefined,
-expected: [26][32]u32 = undefined,
-text: [32]u8 = undefined,
+expected: [26][glyph.max_ligature_run_cells]u32 = undefined,
+text: [glyph.max_ligature_run_cells]u8 = undefined,
 style: Cache.Style = .regular,
 
 pub fn init(self: *Fixture, allocator: std.mem.Allocator, style: Cache.Style) !void {
@@ -45,7 +45,7 @@ pub fn run(self: *Fixture, iteration: usize) !u64 {
     self.text[0] = @intCast('a' + variant);
     std.mem.doNotOptimizeAway(&self.text);
     const result = glyph.generateRun(&self.renderer, &self.cache, .{ .x = 32, .y = 32 }, &self.text, self.style) orelse return error.MissingRun;
-    try std.testing.expectEqual(@as(u8, 32), result.len);
+    try std.testing.expectEqual(@as(u8, @intCast(self.text.len)), result.len);
     try std.testing.expectEqualSlices(u32, &self.expected[variant], result.glyphs[0..result.len]);
     var checksum: u64 = 0;
     for (result.glyphs[0..result.len]) |slot| checksum +%= slot;
