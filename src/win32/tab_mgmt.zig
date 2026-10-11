@@ -39,6 +39,40 @@ fn onTitleChanged(context: *anyopaque, term: *vt.Terminal) void {
     window.requestRender();
 }
 
+test "hidden PTY data is consumed without painting but OSC title still refreshes chrome" {
+    const hwnd = win32.CreateWindowExW(.{}, win32.L("STATIC"), win32.L("hidden-output-test"), .{}, 0, 0, 1, 1, null, null, null, null) orelse return error.CreateWindowFailed;
+    defer _ = win32.DestroyWindow(hwnd);
+    const saved = global.window;
+    defer global.window = saved;
+    global.window = .{ .hwnd = hwnd };
+    const window = &global.window.?;
+    defer window.tabs.deinit(std.testing.allocator);
+    defer window.panes.deinit(std.testing.allocator);
+    var active: state.Tab = .{ .id = 1, .window = window, .layout = undefined };
+    var hidden: state.Tab = .{ .id = 2, .window = window, .layout = undefined };
+    try window.tabs.append(std.testing.allocator, &active);
+    try window.tabs.append(std.testing.allocator, &hidden);
+    var pane: Tab = .{ .id = 2, .tab = &hidden, .child_process = undefined, .session = undefined, .term = undefined };
+    try pane.session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .hooks = .{ .context = &pane, .title_changed = onTitleChanged } });
+    defer pane.session.deinit();
+    pane.term = pane.session.term;
+    pane.pty_ring = try pty_ring_mod.PtyRing.init(std.testing.allocator, &pane.reader_stop);
+    defer pane.pty_ring.deinit(std.testing.allocator);
+    try window.panes.append(std.testing.allocator, &pane);
+    try std.testing.expect(pane.pty_ring.write("hidden output"));
+    pane.pty_ring.posted.store(true, .release);
+    _ = @import("wnd/misc.zig").onAppChildProcessData(hwnd, pane.id, 0);
+    try std.testing.expect(!pane.pty_ring.hasData());
+    try std.testing.expect(!window.render_pending);
+    try std.testing.expect(pane.pty_ring.write("\x1b]2;background title\x07"));
+    pane.pty_ring.posted.store(true, .release);
+    _ = @import("wnd/misc.zig").onAppChildProcessData(hwnd, pane.id, 0);
+    try std.testing.expect(!pane.pty_ring.hasData());
+    try std.testing.expect(!pane.pty_ring.posted.load(.acquire));
+    try std.testing.expectEqualStrings("background title", pane.title_buf[0..pane.title_len]);
+    try std.testing.expect(window.render_pending);
+}
+
 // Write a query response (CSI c, DECRQM, DSR, XTVERSION, kitty keyboard
 // query, size report, kitty graphics ACK, ...) back to the PTY. Without
 // this, tools like nvim/fzf/less hang waiting for the reply they parse off

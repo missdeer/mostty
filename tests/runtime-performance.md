@@ -24,7 +24,7 @@ finding has been experimentally ruled out by this Linux environment.
 | W3 cold wide glyph | Pending measurement/design | Synchronous first appearance preserved. A worker change must deliver both halves together without blank first-frame placeholders or lost epoch cancellation. |
 | W4 ligature hashing | Implemented | Hash a run once and derive offset keys. Shared test compares every offset/style with the original constructor and checks distinct offset identity. Both hashes and all key fields preserved. |
 | W5 D3D11 waitable admission | Pending native measurement | No change to waitable policy without native input/present and device-recovery evidence. |
-| M1 incremental raster/upload | Pending design/native pixels | Requires full-render pixel oracle for Unicode, ligatures, cursor, selection, reverse/palette, wallpaper and three image layers. Full bitmap remains. |
+| M1 incremental raster/upload | Partially implemented | Renderer retains frame-cell capacity between equal-sized frames, releasing it on successful surface resize. 1,000 changing Unicode/styled frames match owned frame results with zero storage allocations after warmup; failed growth preserves storage and can retry. Full raster and upload remain: they need a full-render pixel oracle covering cursor, selection, reverse/palette, wallpaper and all image layers. |
 | M2 Metal queue/wait/blit | Pending ownership design/native GPU | Existing wait ensures cross-queue order and source reuse safety. No wait/clear removed; discrete-GPU resource lifetime remains unproven here. |
 | M3 macOS render/blink/poll consolidation | Pending native behavior | Hidden-view render guard preserved. Timer redesign needs visibility, close, polling, cursor and SGR phase tests and idle traces. |
 | M4 macOS global output pump | Pending implementation/native tests | Per-pane semaphore backpressure remains. A shared pump must keep reader completion, EOF ordering and shutdown cancellation; not implemented in this increment. |
@@ -37,7 +37,7 @@ finding has been experimentally ruled out by this Linux environment.
 | R1 Vulkan backlog scanning | Partially implemented, native execution pending | Ordered completion prefix stops at first outstanding upload. Head cursor and half-full compaction amortize movement; teardown skips already retired entries. Shared test: 1,024 stalled polls inspect 1,024 entries, not 1,048,576. Timeline values and upload submission unchanged. |
 | R1 Vulkan upload batching | Pending native resource design | Per-upload staging/pool/submission remain. Reuse must respect timeline completion, atlas generation and close/device loss. |
 | R2 D3D12/Vulkan image retirement | Pending ownership/native GPU | Per-image synchronous retirement retained. Last-use fence/timeline ownership and bounded outstanding memory must be proven before delayed destruction. |
-| R3 D3D12 tabbar cache | Pending implementation/native pixels | Persistent GPU band needs resize/DPI/theme/font and shared FontService invalidation tests. Existing final backbuffer copy must remain. |
+| R3 D3D12 tabbar cache | Partially implemented | CPU band owns a cached WIC pixel snapshot; every painter clears before drawing, invalidating it. Native test checks 1,000 unchanged reads perform one CopyPixels and checks pixels after clear/resize. Per-frame staging/upload remains; a persistent GPU band still needs resource-state, resize/DPI/theme/font and device-recovery coverage. Existing final backbuffer copy remains. |
 | R4 GL/Vulkan cell generations | Pending measurement/design | Full per-slot copy retained until row-version restoration is verified over all frame slots, resize and font recovery. |
 | A1 production allocator A/B | Pending measurement | DebugAllocator retained; no claim that Release captures debug stacks. Compare reclaiming thread-safe allocators with live-allocation and cancellation regressions. |
 | A2 Windows font config ownership | Pending lifetime design | Existing borrowed UTF-16 generations retained; freeing after update alone could invalidate in-flight workers/renderers. |
@@ -49,6 +49,17 @@ impossible. GPU and protocol redesigns deliberately remain out of this first
 increment because their no-regression requirement cannot yet be established.
 
 ## Test execution and CI
+
+Follow-up behavioral coverage uses the production clear/recheck helper with
+controlled producer interleavings, and the actual Windows continuation dispatcher
+with a controlled clock, real PTY rings and terminal sessions. It checks skipping
+closed/idle panes, rearming the unvisited tail, and consuming it next round. A
+hidden-pane test sends ordinary bytes and OSC 2 through the real window data
+handler: both drain, only the title requests chrome. macOS hover tests invoke
+config, surface and all scroll entry points. The Vulkan collector's production
+retire/compact path is shared with a resource-destructor mock checking exactly-once
+release across partial progress, compaction, append, and teardown. This does not
+replace native GPU lifetime validation.
 
 New shared tests are imported by `macos_grid_tests.zig` and the existing session
 root, so `zig build test` runs them on Linux, macOS and all 12 Windows build

@@ -137,6 +137,7 @@ pub const Options = struct {
 pub const Frame = struct {
     allocator: std.mem.Allocator,
     cells: []Cell,
+    owns_cells: bool = true,
     cols: u32,
     rows: u32,
     pixel_width: u32,
@@ -144,7 +145,7 @@ pub const Frame = struct {
     background: Rgba,
 
     pub fn deinit(self: *Frame) void {
-        self.allocator.free(self.cells);
+        if (self.owns_cells) self.allocator.free(self.cells);
         self.* = undefined;
     }
 };
@@ -162,6 +163,22 @@ pub fn optionalRgba(value: ?u24) ?Rgba {
 
 pub fn build(
     allocator: std.mem.Allocator,
+    term: *vt.Terminal,
+    options: Options,
+) !Frame {
+    var cells: std.ArrayListUnmanaged(Cell) = .empty;
+    errdefer cells.deinit(allocator);
+    var frame = try buildRetained(allocator, &cells, term, options);
+    frame.cells = try cells.toOwnedSlice(allocator);
+    frame.owns_cells = true;
+    return frame;
+}
+
+/// The returned cells borrow `cells` until its next build/deinit. Graphemes
+/// still borrow the VT screen and must not survive a terminal mutation.
+pub fn buildRetained(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayListUnmanaged(Cell),
     term: *vt.Terminal,
     options: Options,
 ) !Frame {
@@ -183,9 +200,8 @@ pub fn build(
         .background = options.selection_background,
     };
 
-    var cells: std.ArrayListUnmanaged(Cell) = .empty;
-    errdefer cells.deinit(allocator);
     try cells.ensureTotalCapacity(allocator, @as(usize, cols) * rows);
+    cells.clearRetainingCapacity();
 
     const screen = term.screens.active;
     var row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
@@ -232,17 +248,18 @@ pub fn build(
             col += 1;
             cell_i += 1;
         }
-        try appendBlanks(allocator, &cells, row, col, cols, foreground, background, selection);
+        try appendBlanks(allocator, cells, row, col, cols, foreground, background, selection);
         row += 1;
     }
 
     while (row < rows) : (row += 1) {
-        try appendBlanks(allocator, &cells, row, 0, cols, foreground, background, selection);
+        try appendBlanks(allocator, cells, row, 0, cols, foreground, background, selection);
     }
 
     return .{
         .allocator = allocator,
-        .cells = try cells.toOwnedSlice(allocator),
+        .cells = cells.items,
+        .owns_cells = false,
         .cols = cols,
         .rows = rows,
         .pixel_width = pixel_width,
@@ -310,6 +327,64 @@ fn styleForCell(
 
 fn fromRgb(rgb: anytype) Rgba {
     return .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
+}
+
+test "retained frames reuse storage while rebuilding Unicode and paint state" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 8, .rows = 2, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counted.allocator();
+    var cells: std.ArrayListUnmanaged(Cell) = .empty;
+    defer cells.deinit(allocator);
+    const options: Options = .{ .metrics = .{ .cell_width = 9, .cell_height = 18 }, .pixel_width = 72, .pixel_height = 36 };
+    var warm = try buildRetained(allocator, &cells, session.term, options);
+    warm.deinit();
+    const allocations = counted.alloc_index;
+    const original = cells.items.ptr;
+    for (0..1000) |i| {
+        session.feed(if (i % 2 == 0) "\x1b[2J\x1b[HA界e\u{301}\x1b[31mB" else "\x1b[0m\x1b[2J\x1b[Hplain");
+        var actual = try buildRetained(allocator, &cells, session.term, options);
+        defer actual.deinit();
+        var expected = try build(std.testing.allocator, session.term, options);
+        defer expected.deinit();
+        try std.testing.expectEqualDeep(expected.cells, actual.cells);
+        try std.testing.expectEqual(expected.background, actual.background);
+        try std.testing.expectEqual(original, actual.cells.ptr);
+    }
+    try std.testing.expectEqual(allocations, counted.alloc_index);
+    try std.testing.expectEqual(@as(usize, 0), counted.deallocations);
+}
+
+test "retained frame growth failure preserves storage and can retry" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 8, .rows = 2, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counted.allocator();
+    var cells: std.ArrayListUnmanaged(Cell) = .empty;
+    defer cells.deinit(allocator);
+    var options: Options = .{ .metrics = .{ .cell_width = 1, .cell_height = 1 }, .pixel_width = 8, .pixel_height = 2 };
+    _ = try buildRetained(allocator, &cells, session.term, options);
+    const original = cells.items.ptr;
+    const capacity = cells.capacity;
+    try session.resize(120, 30);
+    options.pixel_width = 120;
+    options.pixel_height = 30;
+    counted.fail_index = counted.alloc_index;
+    counted.resize_fail_index = counted.resize_index;
+    try std.testing.expectError(error.OutOfMemory, buildRetained(allocator, &cells, session.term, options));
+    try std.testing.expectEqual(original, cells.items.ptr);
+    try std.testing.expectEqual(capacity, cells.capacity);
+    counted.fail_index = std.math.maxInt(usize);
+    counted.resize_fail_index = std.math.maxInt(usize);
+    var frame = try buildRetained(allocator, &cells, session.term, options);
+    defer frame.deinit();
+    try std.testing.expectEqual(@as(u32, 120), frame.cols);
+    try std.testing.expectEqual(@as(u32, 30), frame.rows);
+    try std.testing.expectEqual(@as(usize, 3600), frame.cells.len);
 }
 
 test "grid model preserves ordinary, wide, and styled VT cells" {

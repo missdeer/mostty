@@ -1111,6 +1111,20 @@ test "hover caches positive and negative cells until content or viewport changes
     try std.testing.expect(tab.renderer.hovered_url == null);
     try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
     try std.testing.expectEqual(@as(usize, 4), tab.hover_detections);
+    _ = mostty_tab_apply_config(tab);
+    try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
+    try std.testing.expectEqual(@as(usize, 5), tab.hover_detections);
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    try std.testing.expect(mostty_tab_set_surface(tab, 640, 192, 1, &cols, &rows));
+    try std.testing.expect(mostty_tab_hover_url(tab, true, 2, 0));
+    try std.testing.expectEqual(@as(usize, 6), tab.hover_detections);
+    mostty_tab_scroll(tab, -1);
+    _ = mostty_tab_hover_url(tab, true, 2, 0);
+    try std.testing.expectEqual(@as(usize, 7), tab.hover_detections);
+    mostty_tab_scroll_to_row(tab, 0);
+    _ = mostty_tab_hover_url(tab, true, 2, 0);
+    try std.testing.expectEqual(@as(usize, 8), tab.hover_detections);
 }
 
 test "hard-wrapped OSC8 URL opens and copies its complete target" {

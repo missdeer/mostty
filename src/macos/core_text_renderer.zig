@@ -306,6 +306,7 @@ selection: ?GridModel.Selection = null,
 hovered_url: ?url_hover.Hit = null,
 sprite_masks: std.AutoHashMapUnmanaged(u32, []u8) = .empty,
 shaping_cache: ShapingCache = .{},
+frame_cells: std.ArrayListUnmanaged(GridModel.Cell) = .empty,
 kitty_images: KittyImages = .{},
 background_image: BackgroundImage = .{},
 
@@ -346,6 +347,7 @@ pub fn init(options: Options) !CoreTextRenderer {
 }
 
 pub fn deinit(self: *CoreTextRenderer) void {
+    self.frame_cells.deinit(self.allocator);
     self.shaping_cache.deinit(self.allocator);
     self.background_image.deinit(self.allocator);
     self.kitty_images.deinit(self.allocator);
@@ -401,6 +403,9 @@ pub fn resize(self: *CoreTextRenderer, pixel_width: u32, pixel_height: u32, scal
 
     self.allocator.free(self.pixels);
     self.pixels = replacement;
+    // A resized surface must not retain the cell capacity of an old huge grid.
+    self.frame_cells.deinit(self.allocator);
+    self.frame_cells = .empty;
     if (replacement_fonts) |fonts| {
         self.shaping_cache.clear();
         self.fonts.deinit();
@@ -428,7 +433,7 @@ pub fn gridSize(self: *const CoreTextRenderer) GridModel.Size {
 pub fn render(self: *CoreTextRenderer, session: *TerminalSession, cursor: ?Cursor) !RenderResult {
     session.syncPixelSize(self.metrics.cell_width, self.metrics.cell_height);
     try self.kitty_images.sync(self.allocator, session.term);
-    var frame = try GridModel.build(self.allocator, session.term, .{
+    var frame = try GridModel.buildRetained(self.allocator, &self.frame_cells, session.term, .{
         .metrics = self.metrics,
         .pixel_width = self.pixel_width,
         .pixel_height = self.contentHeight(),

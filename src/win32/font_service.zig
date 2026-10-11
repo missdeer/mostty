@@ -201,6 +201,28 @@ pub fn cpuBand(self: *FontService, width: u32, height: u32) *gpu.CpuBandTexture.
     return self.cpu_band.getOrCreate(self.d2d_factory, self.wicFactory(), width, height);
 }
 
+test "unchanged CPU chrome reads reuse pixels and clear or resize refreshes them" {
+    var common: RendererCommon = undefined;
+    var service = FontService.init(&common, 96, .{}, true, null);
+    defer service.deinit();
+    const band = service.cpuBand(32, 8);
+    band.clear(.{ 1, 0, 0, 1 });
+    for (0..1000) |_| {
+        const pixels = band.readPixels();
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, pixels[0..4]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), band.pixel_copies);
+    band.clear(.{ 0, 1, 0, 1 });
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, band.readPixels()[0..4]);
+    try std.testing.expectEqual(@as(usize, 2), band.pixel_copies);
+    const resized = service.cpuBand(64, 16);
+    resized.clear(.{ 0, 0, 1, 1 });
+    const pixels = resized.readPixels();
+    try std.testing.expectEqual(@as(usize, 64 * 16 * 4), pixels.len);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, pixels[pixels.len - 4 ..]);
+    try std.testing.expectEqual(@as(usize, 1), resized.pixel_copies);
+}
+
 pub fn cellSizeForDpi(self: *FontService, dpi: u32) win32.SIZE {
     if (dpi == self.dpi) return self.common.cell_size;
     return font_mod.measureCellSize(&self.dwrite_factory.IDWriteFactory, dpi, self.effective_primary, self.font_size_pt);

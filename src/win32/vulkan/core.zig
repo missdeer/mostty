@@ -590,20 +590,12 @@ pub const Core = struct {
         if (self.uploads_head == self.uploads.items.len) return;
         var completed: u64 = 0;
         if (self.dp.get_semaphore_counter_value(self.device, self.timeline, &completed) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
-        const count = @import("../../renderer/completion_prefix.zig").ready(self.uploads.items[self.uploads_head..], completed).count;
-        for (self.uploads.items[self.uploads_head..][0..count]) |*pending| {
-            pending.staging.release(self);
-            self.dp.destroy_command_pool(self.device, pending.pool, null);
-        }
-        self.uploads_head += count;
-        // Preserve timeline order and amortize compaction. Pending resources
-        // are never touched again until the first outstanding value completes.
-        if (self.uploads_head >= self.uploads.items.len - self.uploads_head) {
-            const remaining = self.uploads.items.len - self.uploads_head;
-            std.mem.copyForwards(Upload, self.uploads.items[0..remaining], self.uploads.items[self.uploads_head..]);
-            self.uploads.items.len = remaining;
-            self.uploads_head = 0;
-        }
+        @import("../../renderer/completion_prefix.zig").collect(Upload, &self.uploads.items, &self.uploads_head, completed, self, struct {
+            fn release(core: *Core, pending: *Upload) void {
+                pending.staging.release(core);
+                core.dp.destroy_command_pool(core.device, pending.pool, null);
+            }
+        }.release);
     }
 
     pub fn frameReady(self: *Core) StartupError!bool {

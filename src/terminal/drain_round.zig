@@ -29,6 +29,46 @@ pub fn next(self: *Round, elapsed_us: u64) ?Turn {
     return .{ .index = index, .budget = @min(self.quantum, budget_us - elapsed_us) };
 }
 
+/// Called after an empty observation. The StoreLoad barrier and second read
+/// close the producer race; true means this consumer owns the replacement wake.
+pub fn clearAndRecheck(ring: anytype) bool {
+    ring.posted.store(false, .seq_cst);
+    if (!ring.hasData()) return false;
+    return !ring.posted.swap(true, .acq_rel);
+}
+
+test "clear and recheck never loses a producer edge or duplicates its wake" {
+    const Ring = struct {
+        posted: std.atomic.Value(bool) = .init(true),
+        data: bool = false,
+        race_after_clear: bool = false,
+        producer_wakes: usize = 0,
+        fn produce(self: *@This()) void {
+            self.data = true;
+            if (!self.posted.swap(true, .acq_rel)) self.producer_wakes += 1;
+        }
+        pub fn hasData(self: *@This()) bool {
+            if (self.race_after_clear) self.produce();
+            return self.data;
+        }
+    };
+    var before: Ring = .{};
+    // Producer writes after the caller observed empty, before the clear.
+    before.produce();
+    try std.testing.expectEqual(@as(usize, 0), before.producer_wakes);
+    try std.testing.expect(clearAndRecheck(&before));
+    try std.testing.expect(before.posted.load(.acquire));
+    var after: Ring = .{ .race_after_clear = true };
+    try std.testing.expect(!clearAndRecheck(&after));
+    try std.testing.expectEqual(@as(usize, 1), after.producer_wakes);
+    try std.testing.expect(after.posted.load(.acquire));
+    var later: Ring = .{};
+    try std.testing.expect(!clearAndRecheck(&later));
+    try std.testing.expect(!later.posted.load(.acquire));
+    later.produce();
+    try std.testing.expectEqual(@as(usize, 1), later.producer_wakes);
+}
+
 test "continuation deadline is window-wide and every backlogged pane progresses" {
     var served: [16]usize = @splat(0);
     var cursor: usize = 0;
