@@ -90,12 +90,22 @@ def main():
     results = [analyze(p) for p in directories]
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    lines = ["# Runtime benchmark comparison", "", "Timing is report-only. Labels describe consistency across four paired process trials, not statistical proof or an input-to-display latency claim.", "", "| Platform / case | Base median / p95 (ms) | PR median / p95 (ms) | PR/base | Observation |", "|---|---:|---:|---:|---|"]
+    lines = ["# Runtime benchmark comparison", "", "Timing is report-only. Labels describe consistency across four paired process trials, not statistical proof or an input-to-display latency claim.", "", "| Platform / case | Base median / p95 (ms) | PR median / p95 (ms) | Base / PR max (ms) | PR/base | Observation |", "|---|---:|---:|---:|---:|---|"]
     for result in results:
         os = result["metadata"]["os"].split()[0]
         for case in result["cases"]:
             a, b = case["time_ns"]["base"], case["time_ns"]["head"]
-            lines.append(f'| {os} / {case["case"]} | {a["median"]/1e6:.4f} / {a["p95"]/1e6:.4f} | {b["median"]/1e6:.4f} / {b["p95"]/1e6:.4f} | {case["head_base_ratio"]:.3f} | {case["timing_verdict"]} |')
+            lines.append(f'| {os} / {case["case"]} | {a["median"]/1e6:.4f} / {a["p95"]/1e6:.4f} | {b["median"]/1e6:.4f} / {b["p95"]/1e6:.4f} | {a["max"]/1e6:.4f} / {b["max"]/1e6:.4f} | {case["head_base_ratio"]:.3f} | {case["timing_verdict"]} |')
+    lines += ["", "| Platform / case / measured mechanism | Base median [min, max] | PR median [min, max] |", "|---|---:|---:|"]
+    for result in results:
+        os = result["metadata"]["os"].split()[0]
+        for case in result["cases"]:
+            if case["case"] in ("ligature_keys", "plain_output_control", "small_sixel_control") or case["case"].endswith("_dispatch"):
+                continue
+            for metric in case["metrics"]["base"]:
+                a, b = case["metrics"]["base"][metric], case["metrics"]["head"][metric]
+                lines.append(f'| {os} / {case["case"]} / {metric} | {a["median"]} [{a["min"]}, {a["max"]}] | {b["median"]} [{b["min"]}, {b["max"]}] |')
+    lines += ["", "`calls` means actual hash pairs for production ligature, actual detector probes for hover, total dispatches for output_total, and first-all-progress round for all_panes_progress. Frame/font/multipart calls are fixed workload operations. Allocation and retained-byte counters exclude uninstrumented system/GPU allocations."]
     lines += ["", "Raw samples, per-process ratios, n/min/max/MAD, checksums, units/s, allocation counts and retained bytes are in results.json and original logs. Retained bytes are allocator-owned scratch/frame storage, not RSS. Windows dispatch durations measure parsing admission, not real keyboard/GPU latency.", "", "A repeatable increase is a review signal; do not discard it or enable a strict timing gate without repeated runner history. Correctness, equal work, sample completeness and deterministic mechanism budgets are hard gates."]
     (args.output / "summary.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
