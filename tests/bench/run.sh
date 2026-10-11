@@ -17,12 +17,22 @@ for side in base head; do
   # Match the head's test-only hash instrumentation on every platform, even
   # for the API-only case. Never charge only one side for counter writes.
   cache="$tree/src/win32/glyph_index_cache.zig"
-  if ! rg -q -F 'pub var test_run_hash_calls: usize = 0;' "$cache"; then
+  cache_text=$(<"$cache")
+  if [[ "$cache_text" != *'pub var test_run_hash_calls: usize = 0;'* ]]; then
     signature='pub fn initRun(text: []const u8, offset: u8, style: Style) Key {'
-    [[ $(rg -F -c "$signature" "$cache") == 1 ]]
-    cache_text=$(<"$cache")
-    replacement="$signature"$'\n        if (@import("builtin").is_test) test_run_hash_calls += 1;'
-    printf '%s\npub var test_run_hash_calls: usize = 0;\n' "${cache_text/"$signature"/"$replacement"}" > "$cache"
+    matches=0
+    # Use Bash 3.2-compatible line output (the macOS system shell), without
+    # ripgrep or substitution rules that differ between Bash versions.
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      printf '%s\n' "$line"
+      if [[ "$line" == "    $signature" ]]; then
+        printf '%s\n' '        if (@import("builtin").is_test) test_run_hash_calls += 1;'
+        matches=$((matches + 1))
+      fi
+    done < "$cache" > "$cache.tmp"
+    [[ $matches == 1 ]]
+    printf '\npub var test_run_hash_calls: usize = 0;\n' >> "$cache.tmp"
+    mv "$cache.tmp" "$cache"
   fi
   if [[ $(uname -s) == Darwin ]]; then
     cat "$root/tests/bench/macos-capi.zig" >> "$tree/src/macos/capi.zig"
