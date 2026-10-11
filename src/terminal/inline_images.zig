@@ -50,6 +50,29 @@ pub fn feed(self: *InlineImages, stream: anytype, bytes: []const u8) void {
             i = end;
             continue;
         }
+        if (self.state == .payload) {
+            // Image bodies are usually long runs without protocol controls.
+            // Preserve the state machine at every terminator, but append the
+            // ordinary bytes in one operation instead of one grow/check each.
+            var count = bytes.len - i;
+            // Scalar-byte searches use std's vectorized implementation. Bound
+            // each subsequent search by the earliest control already found.
+            inline for (.{ 0x18, 0x1a, 0x1b }) |control| {
+                count = std.mem.indexOfScalar(u8, bytes[i..][0..count], control) orelse count;
+            }
+            if (self.kind != .sixel) count = std.mem.indexOfScalar(u8, bytes[i..][0..count], 0x07) orelse count;
+            if (count > 0) {
+                if (!self.discard) {
+                    const available = Sixel.max_bytes -| self.payload.items.len;
+                    self.payload.appendSlice(self.allocator, bytes[i..][0..@min(count, available)]) catch {
+                        self.discard = true;
+                    };
+                    if (count > available) self.discard = true;
+                }
+                i += count;
+                continue;
+            }
+        }
         self.next(stream, bytes[i]);
         i += 1;
     }

@@ -4,7 +4,8 @@ set -euo pipefail
 root=$(pwd)
 base=$(git rev-parse "${BENCH_BASE:?}^{commit}")
 head=$(git rev-parse "${BENCH_HEAD:-HEAD}^{commit}")
-out="$root/tmp/runtime-bench"
+out="$root/${BENCH_OUTPUT:-tmp/runtime-bench}"
+trap 'status=$?; if (( status != 0 )); then tail -100 "$out"/*-build.log; fi' EXIT
 mkdir -p "$out"
 for side in base head; do
   rev=$base; if [[ $side == head ]]; then rev=$head; fi

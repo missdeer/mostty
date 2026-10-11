@@ -622,3 +622,69 @@ test "replacement MultipartFile allocation failure retires old scratch and permi
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("ok", std.mem.trim(u8, text, "\n"));
 }
+
+test "bulk image bodies preserve terminators cancellation and parser recovery at every chunk size" {
+    const previous = InlineImages.decode_image;
+    InlineImages.decode_image = ReplacementImageDecoder.decode;
+    defer InlineImages.decode_image = previous;
+    const input = "\x1b]1337;MultipartFile=inline=1\x07\x1b]1337;FilePart=discarded\x1a" ++
+        "\x1b]1337;MultipartFile=inline=1\x1b\\\x1b]1337;FilePart=bm\x07\x1b]1337;FilePart=V3\x1b\\\x1b]1337;FileEnd\x07" ++
+        "\x1bPq#1;2;100;0;0~\x1b\\\x1b]2;title\x07ok";
+    for ([_]usize{ 1, 2, 3, 7, 256, input.len }) |stride| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 6);
+        var i: usize = 0;
+        while (i < input.len) {
+            const n = @min(stride, input.len - i);
+            session.feed(input[i..][0..n]);
+            i += n;
+        }
+        try std.testing.expectEqual(@as(u32, 2), session.term.screens.active.kitty_images.images.count());
+        try std.testing.expectEqual(@as(u32, 2), session.term.screens.active.kitty_images.placements.count());
+        try std.testing.expectEqualStrings("title", session.term.getTitle().?);
+        const text = try session.term.plainString(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings("ok", std.mem.trim(u8, text, "\n"));
+    }
+}
+
+test "bulk image payload OOM discards the image and resumes following text" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = failing.allocator(), .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    failing.fail_index = failing.alloc_index;
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07after");
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("after", text);
+}
+
+test "bulk append preserves the image payload byte limit" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.feed("\x1b]1337;MultipartFile=");
+    const limit = @import("sixel.zig").max_bytes;
+    // No decoder may inspect these bytes: exceeding the limit must discard
+    // this payload before completion, then return to ordinary VT input.
+    try session.images.payload.resize(std.testing.allocator, limit - 2);
+    session.feed("ABC");
+    try std.testing.expect(session.images.discard);
+    try std.testing.expectEqual(limit, session.images.payload.items.len);
+    session.feed("\x07ok");
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(usize, 0), session.images.payload.capacity);
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ok", text);
+}

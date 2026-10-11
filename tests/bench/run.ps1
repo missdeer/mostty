@@ -9,7 +9,7 @@ function GitValue([string[]]$Arguments) {
 $base = GitValue @('rev-parse', "$($env:BENCH_BASE)^{commit}")
 $headRef = if ($env:BENCH_HEAD) { $env:BENCH_HEAD } else { 'HEAD' }
 $head = GitValue @('rev-parse', "$headRef^{commit}")
-$out = Join-Path $root 'tmp/runtime-bench'
+$out = Join-Path $root $(if ($env:BENCH_OUTPUT) { $env:BENCH_OUTPUT } else { 'tmp/runtime-bench' })
 New-Item -ItemType Directory -Force $out | Out-Null
 foreach ($side in @('base', 'head')) {
     $revision = if ($side -eq 'base') { $base } else { $head }
@@ -19,6 +19,18 @@ foreach ($side in @('base', 'head')) {
     if ((Get-FileHash "$root/build.zig.zon").Hash -ne (Get-FileHash "$tree/build.zig.zon").Hash) { throw 'Dependency manifests differ; comparison is not valid' }
     Copy-Item "$root/build.zig" "$tree/build.zig"
     Copy-Item "$root/src/runtime_bench*.zig" "$tree/src/"
+    Copy-Item "$root/src/win32/d3d11/run_cache_fixture.zig" "$tree/src/win32/d3d11/"
+    $cachePath = "$tree/src/win32/glyph_index_cache.zig"
+    $cacheText = [IO.File]::ReadAllText($cachePath)
+    if (-not $cacheText.Contains('pub var test_run_hash_calls: usize = 0;')) {
+        $signature = 'pub fn initRun(text: []const u8, offset: u8, style: Style) Key {'
+        if ([regex]::Matches($cacheText, [regex]::Escape($signature)).Count -ne 1) { throw 'Run hash instrumentation point changed' }
+        $cacheText = $cacheText.Replace($signature, "$signature`n        if (@import(`"builtin`").is_test) test_run_hash_calls += 1;")
+        $cacheText += "`npub var test_run_hash_calls: usize = 0;`n"
+        [IO.File]::WriteAllText($cachePath, $cacheText)
+    }
+    $glyphPath = "$tree/src/win32/d3d11/glyph.zig"
+    [IO.File]::WriteAllText($glyphPath, [IO.File]::ReadAllText($glyphPath) + [IO.File]::ReadAllText("$root/tests/bench/windows-glyph.zig"))
     foreach ($part in @('mouse', 'misc')) {
         $path = "$tree/src/win32/wnd/$part.zig"
         $text = [IO.File]::ReadAllText($path)
@@ -37,7 +49,7 @@ foreach ($side in @('base', 'head')) {
     Push-Location $tree
     try {
         & zig build runtime-bench -Druntime-bench -Doptimize=ReleaseFast -Dcpu=baseline --global-cache-dir "$root/.zig-cache" *> "$out/$side-build.log"
-        if ($LASTEXITCODE -ne 0) { throw "Benchmark build failed: $side" }
+        if ($LASTEXITCODE -ne 0) { Get-Content "$out/$side-build.log" -Tail 100; throw "Benchmark build failed: $side" }
     } finally { Pop-Location }
 }
 $order = @('base', 'head', 'head', 'base', 'head', 'base', 'base', 'head')

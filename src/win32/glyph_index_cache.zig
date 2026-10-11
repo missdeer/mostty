@@ -9,6 +9,10 @@ pub const Half = enum(u2) { single, wide_left, wide_right };
 // with bold/italic as sparse syntax/prompt embellishments.
 pub const Style = enum(u2) { regular, bold, italic, bold_italic };
 
+// Test-only writes count actual run hash pairs, including production callers.
+// No counter access is compiled into application builds.
+pub var test_run_hash_calls: usize = 0;
+
 pub const Key = struct {
     hash_a: u64,
     hash_b: u64,
@@ -37,6 +41,7 @@ pub const Key = struct {
     }
 
     pub fn initRun(text: []const u8, offset: u8, style: Style) Key {
+        if (@import("builtin").is_test) test_run_hash_calls += 1;
         std.debug.assert(text.len > 1);
         std.debug.assert(offset < text.len);
 

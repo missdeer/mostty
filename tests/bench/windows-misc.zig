@@ -1,7 +1,13 @@
 test "runtime benchmark native multi-pane continuation" {
+    try runtimeBenchDrain(128 * 1024);
+    try runtimeBenchDrain(1024 * 1024);
+}
+
+fn runtimeBenchDrain(comptime byte_count: usize) !void {
     const B = @import("../../runtime_bench_support.zig");
-    var bytes: [128 * 1024]u8 = undefined;
-    for (&bytes, 0..) |*byte, i| byte.* = switch (i % 80) {
+    const bytes = try B.allocator().alloc(u8, byte_count);
+    defer B.allocator().free(bytes);
+    for (bytes, 0..) |*byte, i| byte.* = switch (i % 80) {
         78 => '\r',
         79 => '\n',
         else => @intCast('a' + i % 26),
@@ -30,7 +36,7 @@ test "runtime benchmark native multi-pane continuation" {
             pane.term = pane.session.term;
             initialized += 1;
             try window.panes.append(B.allocator(), pane);
-            try std.testing.expect(pane.pty_ring.write(&bytes));
+            try std.testing.expect(pane.pty_ring.write(bytes));
             pane.pty_ring.posted.store(true, .release);
         }
         var rounds: usize = 0;
@@ -65,8 +71,8 @@ test "runtime benchmark native multi-pane continuation" {
             checksum +%= std.hash.Wyhash.hash(0, output);
         }
         try std.testing.expect(all_progress_round > 0);
-        for (dispatch_times[0..rounds]) |ns| B.emit("windows_dispatch", sample, ns, 1, 0, 0, 0, 1);
-        B.emit("windows_all_panes_progress", sample, all_progress_ns, panes.len, 0, 0, 0, all_progress_round);
-        B.emit("windows_output_total", sample, elapsed, bytes.len * panes.len, checksum, 0, 0, all_progress_round);
+        for (dispatch_times[0..rounds], 0..) |ns, index| B.emitWithIndex(if (byte_count == 128 * 1024) "windows_dispatch" else "windows_saturated_dispatch", sample, ns, 1, 0, 0, 0, 1, index);
+        B.emit(if (byte_count == 128 * 1024) "windows_all_panes_progress" else "windows_saturated_all_panes_progress", sample, all_progress_ns, panes.len, 0, 0, 0, all_progress_round);
+        B.emit(if (byte_count == 128 * 1024) "windows_output_total" else "windows_saturated_output_total", sample, elapsed, bytes.len * panes.len, checksum, 0, 0, rounds);
     }
 }

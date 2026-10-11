@@ -347,6 +347,18 @@ fn rollbackRunReservations(cache: *GlyphIndexCache, pending: []const RunPending)
     }
 }
 
+test "production generateRun hashes once per run and preserves all cached offsets" {
+    const Fixture = @import("run_cache_fixture.zig");
+    for (std.meta.tags(GlyphIndexCache.Style)) |style| {
+        var fixture: Fixture = .{};
+        try fixture.init(std.testing.allocator, style);
+        defer fixture.deinit();
+        GlyphIndexCache.test_run_hash_calls = 0;
+        for (0..52) |i| _ = try fixture.run(i);
+        try std.testing.expectEqual(@as(usize, 52), GlyphIndexCache.test_run_hash_calls);
+    }
+}
+
 fn submitRunRasterJob(
     self: anytype,
     text: []const u8,

@@ -14,8 +14,8 @@ test "runtime benchmark ligature keys" {
         for (0..5000) |iteration| {
             text[0] = @intCast('a' + iteration % 26);
             std.mem.doNotOptimizeAway(&text);
-            // Adapter mirrors generateRun: only the new revision has offset
-            // derivation. Both construct exactly the same 32 cache keys.
+            // API microbenchmark only. Production generateRun is measured
+            // separately on Windows; this adapter cannot guard its callers.
             const base = Key.initRun(&text, 0, .regular);
             for (0..text.len) |offset| {
                 const key = if (@hasDecl(Key, "atRunOffset")) base.atRunOffset(@intCast(offset)) else Key.initRun(&text, @intCast(offset), .regular);
@@ -23,7 +23,7 @@ test "runtime benchmark ligature keys" {
                 checksum +%= key.hash_a ^ key.hash_b ^ key.run_offset;
             }
         }
-        B.emit("ligature_keys", sample, B.now() - start, 5000 * text.len, checksum, 0, 0, 5000 * @as(usize, if (@hasDecl(Key, "atRunOffset")) 1 else text.len));
+        B.emit("ligature_keys", sample, B.now() - start, 5000 * text.len, checksum, 0, 0, 0);
     }
 }
 
@@ -75,5 +75,42 @@ test "runtime benchmark multipart scratch throughput and retention" {
         const elapsed = B.now() - start;
         const checksum = std.hash.Wyhash.hash(0, session.images.transfer.items);
         B.emit("multipart_scratch", sample, elapsed, 4 * 257 * part.len, checksum, counted.allocations - allocations, session.images.transfer.capacity + session.images.payload.capacity, 4);
+    }
+}
+
+test "runtime benchmark plain output control" {
+    var data: [4096]u8 = undefined;
+    for (&data, 0..) |*byte, i| byte.* = if (i % 80 == 79) '\n' else 'x';
+    for (0..B.warmup + B.samples) |sample| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = B.allocator(), .stream_allocator = B.allocator(), .cols = 80, .rows = 24, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        const start = B.now();
+        for (0..64) |_| session.feed(&data);
+        const elapsed = B.now() - start;
+        const output = try session.term.plainString(B.allocator());
+        defer B.allocator().free(output);
+        B.emit("plain_output_control", sample, elapsed, 64 * data.len, std.hash.Wyhash.hash(0, output), 0, 0, 64);
+    }
+}
+
+test "runtime benchmark small Sixel control" {
+    for (0..B.warmup + B.samples) |sample| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = B.allocator(), .stream_allocator = B.allocator(), .cols = 80, .rows = 24, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 16);
+        const start = B.now();
+        for (0..100) |_| session.feed("\x1bPq#1;2;100;0;0~\x1b\\");
+        const elapsed = B.now() - start;
+        const storage = &session.term.screens.active.kitty_images;
+        try std.testing.expectEqual(@as(u32, 100), storage.images.count());
+        try std.testing.expectEqual(@as(u32, 100), storage.placements.count());
+        var checksum: u64 = 0;
+        var images = storage.images.valueIterator();
+        while (images.next()) |image| checksum +%= std.hash.Wyhash.hash(0, image.data.bytes().?);
+        B.emit("small_sixel_control", sample, elapsed, 100, checksum, 0, 0, 100);
     }
 }

@@ -25,6 +25,14 @@ def analyze(directory):
             records.append(row)
     assert records, f"no benchmark records in {directory}"
     cases = sorted({r["case"] for r in records})
+    expected = {"ligature_keys", "viewport_frames", "multipart_scratch", "plain_output_control", "small_sixel_control"}
+    if meta["os"].startswith("Darwin"):
+        expected.add("macos_font_config")
+    if meta["os"].startswith("Microsoft"):
+        expected.update({"windows_hover", "windows_ligature_runs"})
+        expected.update(prefix + suffix for prefix in ("windows_", "windows_saturated_")
+                        for suffix in ("dispatch", "all_panes_progress", "output_total"))
+    assert set(cases) == expected, ("missing or unexpected workloads", cases, expected)
     results = []
     for case in cases:
         rows = {side: [r for r in records if r["case"] == case and r["side"] == side] for side in ("base", "head")}
@@ -34,8 +42,15 @@ def analyze(directory):
             for trial in trials:
                 samples = [r["sample"] for r in group if r["trial"] == trial]
                 assert set(samples) == set(range(meta["samples_per_process"])), (case, side, trial, samples)
-                if case != "windows_dispatch":
+                if not case.endswith("_dispatch"):
                     assert len(samples) == meta["samples_per_process"], (case, side, trial)
+                else:
+                    for sample in range(meta["samples_per_process"]):
+                        indices = [r["dispatch"] for r in group if r["trial"] == trial and r["sample"] == sample]
+                        assert sorted(indices) == list(range(len(indices))), (case, "duplicate or missing dispatch", indices)
+                        total_case = case.removesuffix("dispatch") + "output_total"
+                        totals = [r["calls"] for r in records if r["case"] == total_case and r["trial"] == trial and r["sample"] == sample]
+                        assert totals == [len(indices)], (case, "dispatch count mismatch", totals, indices)
         assert {r["units"] for r in rows["base"]} == {r["units"] for r in rows["head"]}, (case, "different work")
         assert {r["checksum"] for r in rows["base"]} == {r["checksum"] for r in rows["head"]}, (case, "output differs")
         if case in ("viewport_frames", "macos_font_config"):
@@ -44,8 +59,8 @@ def analyze(directory):
             assert all(r["retained_bytes"] <= 1024 * 1024 for r in rows["head"]), "scratch retention regression"
         if case == "windows_hover":
             assert all(r["calls"] == 1 for r in rows["head"]), "same-cell probe regression"
-        if case == "ligature_keys":
-            assert all(r["calls"] == 5000 for r in rows["head"]), "run-key construction regression"
+        if case == "windows_ligature_runs":
+            assert all(r["calls"] == 5000 for r in rows["head"]), "production run hash regression"
         summary = {s: stats([r["ns"] for r in group]) for s, group in rows.items()}
         ratios = []
         for a, b in ((0, 1), (3, 2), (5, 4), (6, 7)):
@@ -58,7 +73,8 @@ def analyze(directory):
         consistent = all(r > 1 for r in ratios) or all(r < 1 for r in ratios)
         signal = consistent and abs(ratio - 1) > 3 * noise
         verdict = ("repeatable increase" if ratio > 1 else "repeatable decrease") if signal else "no clear change above observed noise"
-        metrics = {s: {k: stats([r[k] for r in group]) for k in ("allocations", "retained_bytes", "calls")} for s, group in rows.items()}
+        fields = ("allocations", "retained_bytes", "calls") if case in ("viewport_frames", "multipart_scratch", "macos_font_config") else ("calls",)
+        metrics = {s: {k: stats([r[k] for r in group]) for k in fields} for s, group in rows.items()}
         results.append(dict(case=case, time_ns=summary, head_base_ratio=ratio, paired_ratios=ratios,
                             observed_noise=noise, timing_verdict=verdict, metrics=metrics,
                             units=rows["base"][0]["units"], units_per_second={s: rows[s][0]["units"] * 1e9 / summary[s]["median"] for s in rows}))
