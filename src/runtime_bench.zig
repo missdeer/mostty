@@ -16,7 +16,7 @@ test "runtime benchmark ligature keys" {
             std.mem.doNotOptimizeAway(&text);
             // API microbenchmark only. Production generateRun is measured
             // separately on Windows; this adapter cannot guard its callers.
-            const base = Key.initRun(&text, 0, .regular);
+            const base = if (@hasDecl(Key, "atRunOffset")) Key.initRun(&text, 0, .regular) else undefined;
             for (0..text.len) |offset| {
                 const key = if (@hasDecl(Key, "atRunOffset")) base.atRunOffset(@intCast(offset)) else Key.initRun(&text, @intCast(offset), .regular);
                 std.mem.doNotOptimizeAway(key);

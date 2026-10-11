@@ -14,6 +14,16 @@ for side in base head; do
   cmp "$root/build.zig.zon" "$tree/build.zig.zon" # Never compare different dependency pins.
   cp "$root/build.zig" "$tree/build.zig"
   cp "$root"/src/runtime_bench*.zig "$tree/src/"
+  # Match the head's test-only hash instrumentation on every platform, even
+  # for the API-only case. Never charge only one side for counter writes.
+  cache="$tree/src/win32/glyph_index_cache.zig"
+  if ! rg -q -F 'pub var test_run_hash_calls: usize = 0;' "$cache"; then
+    signature='pub fn initRun(text: []const u8, offset: u8, style: Style) Key {'
+    [[ $(rg -F -c "$signature" "$cache") == 1 ]]
+    cache_text=$(<"$cache")
+    replacement="$signature"$'\n        if (@import("builtin").is_test) test_run_hash_calls += 1;'
+    printf '%s\npub var test_run_hash_calls: usize = 0;\n' "${cache_text/"$signature"/"$replacement"}" > "$cache"
+  fi
   if [[ $(uname -s) == Darwin ]]; then
     cat "$root/tests/bench/macos-capi.zig" >> "$tree/src/macos/capi.zig"
     printf '\ncomptime { _ = @import("runtime_bench.zig"); }\npub fn runtimeBenchAllocator() @import("std").mem.Allocator { return @import("std").heap.c_allocator; }\n' >> "$tree/src/mosttymacos.zig"

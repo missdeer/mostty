@@ -11,7 +11,9 @@ byte-for-byte. Both executables are built once in ReleaseFast with baseline CPU
 features before measurement starts. Compilation time is not a sample. The
 native fixtures are appended inside their owning modules so they call the
 actual private production paths, without exposing application APIs for tests.
-The hover insertion point must match exactly once or setup fails.
+The hover and hash-counter insertion points must match exactly once or setup
+fails. Counter instrumentation is identical on both sides on all platforms;
+timings include its writes and are not uninstrumented application timings.
 
 Run `BENCH_BASE=<commit> bash tests/bench/run.sh` on Linux/macOS, or set
 `BENCH_BASE` then run `tests/bench/run.ps1` on Windows, in a checkout with Zig
