@@ -124,6 +124,28 @@ struct ClipboardTests {
         view.setFrameSize(NSSize(width: 410, height: 200))
         view.resyncSurface()
         let firstTab = clipboard_test_created_tab()
+        window.makeFirstResponder(view)
+        cursorBlinkVisible = false
+        view.testClearDirty()
+        for _ in 0..<1000 { view.testBlinkTick() }
+        expect(!view.testDirty, "hidden cursor with no SGR blink schedules no raster work")
+        cursorBlinkVisible = true
+        view.testBlinkTick()
+        expect(view.testDirty, "visible focused cursor schedules its phase change")
+        window.makeFirstResponder(nil)
+        view.testClearDirty()
+        view.testBlinkTick()
+        expect(!view.testDirty, "unfocused non-blinking pane avoids redundant raster work")
+        textBlinkVisible = true
+        view.testBlinkTick()
+        expect(view.testDirty, "SGR blink still repaints an unfocused pane")
+        window.contentView = NSView()
+        view.testClearDirty()
+        view.testBlinkTick()
+        expect(!view.testDirty, "detached pane advances phase without scheduling raster")
+        window.contentView = view
+        expect(view.testDirty, "restoring a pane requests its current blink phase")
+        textBlinkVisible = false
 
         let keypadCases: [(UInt16, String)] = [
             (82, "\u{1b}Op"), (83, "\u{1b}Oq"), (84, "\u{1b}Or"), (85, "\u{1b}Os"),

@@ -123,6 +123,12 @@ func stubRead(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ c
 }
 @_cdecl("mostty_tab_feed")
 func stubFeed(_ tab: OpaquePointer?, _ pointer: UnsafePointer<UInt8>?, _ length: Int) {}
+var textBlinkVisible = false
+var cursorBlinkVisible = true
+@_cdecl("mostty_tab_blink_visible")
+func stubBlinkVisible(_ tab: OpaquePointer?, _ focused: Bool) -> Bool {
+    textBlinkVisible || (focused && cursorBlinkVisible)
+}
 @_cdecl("mostty_tab_write")
 func stubWrite(_ tab: OpaquePointer?, _ pointer: UnsafePointer<UInt8>?, _ length: Int) {
     writeTab = tab

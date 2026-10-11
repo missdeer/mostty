@@ -82,6 +82,7 @@ bool mostty_tab_app_cursor_keys(MosttyTab *tab);
 bool mostty_tab_app_keypad(MosttyTab *tab);
 bool mostty_tab_bracketed_paste(MosttyTab *tab);
 bool mostty_tab_cursor_visible(MosttyTab *tab);
+bool mostty_tab_blink_visible(MosttyTab *tab, bool focused);
 
 bool mostty_tab_mouse_enabled(MosttyTab *tab);
 /* action: press=0, release=1, motion=2; button: left/middle/right=0/1/2,

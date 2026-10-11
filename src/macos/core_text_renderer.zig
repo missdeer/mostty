@@ -300,6 +300,7 @@ pixels: []u8,
 metal: MetalBackend,
 paint: Paint,
 text_blink_on: bool = true,
+has_text_blink: bool = false,
 /// Host-driven mouse selection in viewport coordinates; null when nothing is
 /// selected.
 selection: ?GridModel.Selection = null,
@@ -500,7 +501,9 @@ fn rasterize(
 
     const viewport = graphics.Rect.init(0, self.pixel_height - frame.rows * self.metrics.cell_height, frame.cols * self.metrics.cell_width, frame.rows * self.metrics.cell_height);
     self.kitty_images.draw(context, .below_background, viewport, self.pixel_height);
+    self.has_text_blink = false;
     for (frame.cells) |*draw_cell| {
+        self.has_text_blink = self.has_text_blink or (draw_cell.style.blink and !draw_cell.style.invisible);
         // The cursor block is drawn into the cell itself, which keeps it aligned
         // with the glyph grid. `cursor-color` / `cursor-text` win when set;
         // otherwise it falls back to inverse video. Either way it is an explicit

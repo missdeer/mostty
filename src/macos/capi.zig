@@ -710,6 +710,15 @@ export fn mostty_tab_cursor_visible(tab_opt: ?*Tab) bool {
     return tab.pty.terminal.term.modes.get(.cursor_visible);
 }
 
+/// Uses the last raster's viewport blink flag; output/scroll/config already
+/// dirty the host and refresh that flag on their next render.
+export fn mostty_tab_blink_visible(tab_opt: ?*Tab, focused: bool) bool {
+    const tab = tab_opt orelse return false;
+    const term = tab.pty.terminal.term;
+    return tab.renderer.has_text_blink or
+        (focused and term.modes.get(.cursor_visible) and term.screens.active.viewportIsBottom());
+}
+
 /// Scroll the viewport by `delta_rows` (negative scrolls up into history,
 /// positive scrolls down toward the active area).
 export fn mostty_tab_scroll(tab_opt: ?*Tab, delta_rows: i32) void {
@@ -1198,6 +1207,7 @@ test "SGR blink toggles text and decorations independently of the cursor" {
     try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
     const visible = try std.testing.allocator.dupe(u8, tab.renderer.pixels);
     defer std.testing.allocator.free(visible);
+    try std.testing.expect(mostty_tab_blink_visible(tab, false));
     try std.testing.expect(mostty_tab_render(tab, true, false, &cols, &rows) != null);
     const cw = tab.renderer.metrics.cell_width;
     const ch = tab.renderer.metrics.cell_height;
@@ -1230,7 +1240,11 @@ test "SGR blink toggles text and decorations independently of the cursor" {
     for ([_]bool{ false, true }) |phase| {
         try std.testing.expect(mostty_tab_render(tab, false, phase, &cols, &rows) != null);
         try std.testing.expectEqualSlices(u8, visible, tab.renderer.pixels);
+        try std.testing.expect(!mostty_tab_blink_visible(tab, true));
     }
+    tab.pty.terminal.feed("\x1b[?25h");
+    try std.testing.expect(mostty_tab_blink_visible(tab, true));
+    try std.testing.expect(!mostty_tab_blink_visible(tab, false));
 }
 
 test "config colors decide the rendered defaults and palette entries" {

@@ -176,6 +176,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 #if MOSTTY_APP_TESTS
     var testDirty: Bool { dirty }
     func testClearDirty() { dirty = false }
+    func testBlinkTick() { blinkTick() }
     var testSession: OpaquePointer? { tab }
     func testUpdateTitle(session: OpaquePointer? = nil) {
         // Title-only tests use the bridge double without starting PTY/Metal.
@@ -248,6 +249,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
             window.acceptsMouseMovedEvents = true
             setupIfNeeded()
             updateScroller()
+            dirty = true // restore the current blink phase even without output
         } else {
             updateURLHover(at: nil)
         }
@@ -442,13 +444,17 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     private func startBlink() {
         let timer = Timer(timeInterval: 0.53, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            // The cursor and SGR blinking text both need a frame on each toggle.
-            self.blinkOn.toggle()
-            self.dirty = true
+            self?.blinkTick()
         }
         RunLoop.main.add(timer, forMode: .common)
         blinkTimer = timer
+    }
+
+    private func blinkTick() {
+        // Keep phase while hidden; restoration schedules a frame explicitly.
+        blinkOn.toggle()
+        guard let window = window, let tab = tab, alive else { return }
+        if mostty_tab_blink_visible(tab, window.firstResponder === self) { dirty = true }
     }
 
     private func renderTick() {
