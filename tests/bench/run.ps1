@@ -64,5 +64,9 @@ $order = @('base', 'head', 'head', 'base', 'head', 'base', 'base', 'head')
 for ($i = 0; $i -lt $order.Count; $i++) {
     $side = $order[$i]
     & "$out/$side/zig-out/bin/runtime-bench.exe" *> "$out/$side-$i.log"
-    if ($LASTEXITCODE -ne 0) { Get-Content "$out/$side-$i.log" -Tail 100; throw "Benchmark assertion failed: $side trial $i" }
+    $benchmarkExit = $LASTEXITCODE
+    if ($benchmarkExit -ne 0) {
+        Get-Content "$out/$side-$i.log" -Tail 100
+        throw ("Benchmark assertion failed: $side trial $i; exit {0} (0x{1:X8})" -f $benchmarkExit, ($benchmarkExit -band 0xffffffffL))
+    }
 }
