@@ -93,6 +93,12 @@ presentation admission, then successful submission; it checks one attempt per
 tick and no further work after recovery. The presentation allocation boundary
 is injected; the test does not claim a physical GPU fault was induced.
 
+Multipart replacement also retires the superseded transfer's large capacity
+before copying the new header, without clearing that header's payload. Tests
+feed more than 1 MiB through actual FilePart messages, replace the transfer,
+then check the new header, decoded pixels/placement, cancellation, and an
+injected replacement-allocation failure followed by successful recovery.
+
 New shared tests are imported by `macos_grid_tests.zig` and the existing session
 root, so `zig build test` runs them on Linux, macOS and all 12 Windows build
 configurations. Native additions live in already imported Windows/macOS modules

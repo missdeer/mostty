@@ -535,3 +535,90 @@ test "large encoded scratch is reclaimed without losing multipart bytes" {
     try std.testing.expect(small_capacity > 0 and small_capacity <= limit);
     try std.testing.expectEqual(small_capacity, session.images.payload.capacity);
 }
+
+fn feedOversizedMultipart(session: *Session) void {
+    session.feed("\x1b]1337;MultipartFile=inline=1;width=9px\x07\x1b]1337;FilePart=");
+    const part = [_]u8{'A'} ** 4096;
+    for (0..InlineImages.retained_scratch_limit / part.len + 1) |_| session.feed(&part);
+    session.feed("\x07");
+}
+
+const ReplacementImageDecoder = struct {
+    fn decode(allocator: std.mem.Allocator, bytes: []const u8) vt.sys.DecodeError!vt.sys.Image {
+        // The superseded FilePart decodes to zeroes; only the new parts may
+        // reach this decoder. No platform image decoder is needed here.
+        if (!std.mem.eql(u8, bytes, "new")) return error.InvalidData;
+        return .{ .width = 1, .height = 1, .data = try allocator.dupe(u8, &.{ 11, 22, 33, 255 }) };
+    }
+};
+
+test "replacement MultipartFile reclaims real large parts and preserves its new header" {
+    const previous = InlineImages.decode_image;
+    InlineImages.decode_image = ReplacementImageDecoder.decode;
+    defer InlineImages.decode_image = previous;
+    for ([_]bool{ false, true }) |cancel| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 6);
+        feedOversizedMultipart(&session);
+        try std.testing.expect(session.images.transfer.items.len > InlineImages.retained_scratch_limit);
+        try std.testing.expect(session.images.transfer.capacity > InlineImages.retained_scratch_limit);
+        const header = "inline=1;width=2px;height=1px;preserveAspectRatio=0";
+        for ("\x1b]1337;MultipartFile=" ++ header ++ "\x07") |byte| session.feed(&.{byte});
+        try std.testing.expect(session.images.transferring);
+        try std.testing.expectEqualStrings(header ++ ":", session.images.transfer.items);
+        // Check immediately, while the new transfer is still unfinished.
+        try std.testing.expect(session.images.transfer.capacity <= InlineImages.retained_scratch_limit);
+        session.feed("\x1b]1337;FilePart=bm\x07\x1b]1337;FilePart=V3\x07");
+        session.feed(if (cancel) "\x1b]1337;FilePart=ignored\x18\x1b]1337;FileEnd\x07" else "\x1b]1337;FileEnd\x07");
+        try std.testing.expect(!session.images.transferring);
+        try std.testing.expectEqual(@as(usize, 0), session.images.transfer.items.len);
+        const storage = &session.term.screens.active.kitty_images;
+        try std.testing.expectEqual(@as(u32, if (cancel) 0 else 1), storage.images.count());
+        try std.testing.expectEqual(@as(u32, if (cancel) 0 else 1), storage.placements.count());
+        if (!cancel) {
+            var images = storage.images.valueIterator();
+            const image = images.next().?;
+            try std.testing.expectEqual(@as(u32, 2), image.width);
+            try std.testing.expectEqual(@as(u32, 1), image.height);
+            try std.testing.expectEqualSlices(u8, &.{ 11, 22, 33, 255, 11, 22, 33, 255 }, image.data.bytes().?);
+            try std.testing.expectEqual(@as(usize, 1), session.term.screens.active.cursor.y);
+        }
+    }
+}
+
+test "replacement MultipartFile allocation failure retires old scratch and permits a new transfer" {
+    const previous = InlineImages.decode_image;
+    InlineImages.decode_image = ReplacementImageDecoder.decode;
+    defer InlineImages.decode_image = previous;
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = counted.allocator(), .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    session.syncPixelSize(8, 6);
+    feedOversizedMultipart(&session);
+    const old_capacity = session.images.transfer.capacity;
+    try std.testing.expect(old_capacity > InlineImages.retained_scratch_limit);
+    // Finish reading the new header before failing its transfer allocation.
+    session.feed("\x1b]1337;MultipartFile=inline=1");
+    const freed = counted.freed_bytes;
+    counted.fail_index = counted.alloc_index;
+    counted.resize_fail_index = counted.resize_index;
+    session.feed("\x07");
+    try std.testing.expect(counted.has_induced_failure);
+    try std.testing.expect(!session.images.transferring);
+    try std.testing.expectEqual(@as(usize, 0), session.images.transfer.capacity);
+    try std.testing.expect(counted.freed_bytes - freed >= old_capacity);
+    counted.fail_index = std.math.maxInt(usize);
+    counted.resize_fail_index = std.math.maxInt(usize);
+    session.feed("\x1b]1337;FilePart=bmV3\x07\x1b]1337;FileEnd\x07");
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    session.feed("\x1b]1337;MultipartFile=inline=1\x07\x1b]1337;FilePart=bmV3\x07\x1b]1337;FileEnd\x07ok");
+    try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ok", std.mem.trim(u8, text, "\n"));
+}

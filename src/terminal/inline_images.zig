@@ -174,7 +174,9 @@ fn complete(self: *InlineImages, term: *vt.Terminal) !void {
         .sixel, .iterm => try self.display(term, self.payload.items),
         .iterm_begin => {
             self.transferring = false;
-            self.transfer.clearRetainingCapacity();
+            // A replacement cancels the old transfer, but payload already
+            // contains the new header and must survive until it is copied.
+            self.clearScratch(&self.transfer);
             try self.transfer.appendSlice(self.allocator, self.payload.items);
             try self.transfer.append(self.allocator, ':');
             self.transferring = true;
