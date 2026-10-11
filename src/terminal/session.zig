@@ -667,6 +667,28 @@ test "bulk image payload OOM discards the image and resumes following text" {
     try std.testing.expectEqualStrings("after", text);
 }
 
+test "bulk Sixel ignores BEL without consuming payload capacity" {
+    const input = "\x1bPq#1\x07;2;10\x070;0;0!2\x07~\x07";
+    for ([_]usize{ 1, 2, 3, 7, input.len }) |stride| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 10, .rows = 4, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.syncPixelSize(8, 6);
+        var offset: usize = 0;
+        while (offset < input.len) : (offset += stride) session.feed(input[offset..@min(offset + stride, input.len)]);
+        try std.testing.expectEqualStrings("#1;2;100;0;0!2~", session.images.payload.items);
+        session.feed("\x1b\\");
+        try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+        try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.placements.count());
+        var images = session.term.screens.active.kitty_images.images.valueIterator();
+        const image = images.next().?;
+        try std.testing.expectEqual(@as(u32, 2), image.width);
+        try std.testing.expectEqual(@as(u32, 6), image.height);
+        try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 0, 0, 255 } ** 12), image.data.bytes().?);
+    }
+}
+
 test "bulk append preserves the image payload byte limit" {
     var context: u8 = 0;
     var session: Session = undefined;

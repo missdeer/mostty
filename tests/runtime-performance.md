@@ -98,6 +98,20 @@ before copying the new header, without clearing that header's payload. Tests
 feed more than 1 MiB through actual FilePart messages, replace the transfer,
 then check the new header, decoded pixels/placement, cancellation, and an
 injected replacement-allocation failure followed by successful recovery.
+Bulk payload appends preserve BEL/ST/CAN/SUB behavior, size limits, fragmented
+protocol input and OOM recovery. BEL inside Sixel remains ignored rather than
+occupying scratch capacity. The optimization addresses the repeated allocation
+growth observed by the new large-transfer benchmark while retaining immediate
+release of superseded large storage.
+
+The additional [runtime benchmark workflow](bench/README.md) compares the base
+and PR in ReleaseFast on the same Linux, Windows and macOS runner. It preserves
+all cases, including regressions, in raw artifacts and reports median/p95/noise
+and allocation/retention evidence. Production Windows `generateRun` has a
+test-only actual hash-call counter and an all-style regression; its API
+microbenchmark is explicitly not a production gate. Windows small and saturated
+PTY cases report dispatch counts, durations, first-all-pane progress and total
+throughput. These do not establish real keyboard-to-present latency.
 
 New shared tests are imported by `macos_grid_tests.zig` and the existing session
 root, so `zig build test` runs them on Linux, macOS and all 12 Windows build
