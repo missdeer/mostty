@@ -80,6 +80,9 @@ trace; run cold and warm cases separately and alternate A/B order.
   and PresentMon: main-dispatch duration, input-to-present p50/p95/p99/max,
   per-pane bytes and final screen/scrollback checksum, SetEvent/QPC samples,
   wakeups and Present count. Count title changes separately from plain output.
+  `MOSTTY_DIAG=1` now includes continuation-round count and maximum dispatch
+  microseconds in the existing periodic diagnostics. Compare with logging off;
+  synchronous diagnostic I/O is not a zero-cost latency probe.
 * Both hosts: stationary and same-cell hover over blank, 4 KiB non-URL token,
   Unicode/OSC8 URL; output/scroll/resize underneath the pointer. Verify live
   click target, cursor ownership and underline pixels.

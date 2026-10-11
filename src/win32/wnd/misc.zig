@@ -746,7 +746,12 @@ fn drainPendingPtyTabs() void {
     if (global.window == null) return;
     const window = &global.window.?;
     const started = diag.qpcNow();
-    var round = DrainRound.init(window.panes.items.len, window.pty_drain_cursor);
+    defer window.notePtyRound(diag.qpcUsSince(started));
+    var backlogged: usize = 0;
+    for (window.panes.items) |tab| {
+        if (!tab.closing and tab.pty_ring.posted.load(.acquire) and tab.pty_ring.hasData()) backlogged += 1;
+    }
+    var round = DrainRound.init(window.panes.items.len, window.pty_drain_cursor, backlogged);
     defer window.pty_drain_cursor = round.cursor;
     while (round.next(diag.qpcUsSince(started))) |turn| {
         const tab = window.panes.items[turn.index];

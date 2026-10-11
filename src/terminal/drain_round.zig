@@ -7,9 +7,14 @@ pub const budget_us: u64 = 8_000;
 count: usize,
 visited: usize = 0,
 cursor: usize,
+quantum: u64,
 
-pub fn init(count: usize, cursor: usize) Round {
-    return .{ .count = count, .cursor = if (count == 0) 0 else cursor % count };
+pub fn init(count: usize, cursor: usize, backlogged: usize) Round {
+    return .{
+        .count = count,
+        .cursor = if (count == 0) 0 else cursor % count,
+        .quantum = budget_us / @as(u64, @intCast(std.math.clamp(backlogged, 1, 4))),
+    };
 }
 
 pub const Turn = struct { index: usize, budget: u64 };
@@ -21,15 +26,14 @@ pub fn next(self: *Round, elapsed_us: u64) ?Turn {
     self.visited += 1;
     // Keep the original single-pane throughput budget; share it among up to
     // four panes, then rotate the starting pane across timer dispatches.
-    const quantum = budget_us / @as(u64, @intCast(@min(self.count, 4)));
-    return .{ .index = index, .budget = @min(quantum, budget_us - elapsed_us) };
+    return .{ .index = index, .budget = @min(self.quantum, budget_us - elapsed_us) };
 }
 
 test "continuation deadline is window-wide and every backlogged pane progresses" {
     var served: [16]usize = @splat(0);
     var cursor: usize = 0;
     for (0..4) |_| {
-        var round = Round.init(served.len, cursor);
+        var round = Round.init(served.len, cursor, served.len);
         var elapsed: u64 = 0;
         while (round.next(elapsed)) |turn| {
             served[turn.index] += 1;
@@ -43,15 +47,22 @@ test "continuation deadline is window-wide and every backlogged pane progresses"
 }
 
 test "empty, removed panes and slow indivisible feed cannot extend a round" {
-    var empty = Round.init(0, 9);
+    var empty = Round.init(0, 9, 0);
     try std.testing.expect(empty.next(0) == null);
-    var single = Round.init(1, 15);
+    var single = Round.init(1, 15, 1);
     try std.testing.expectEqual(budget_us, single.next(0).?.budget);
     try std.testing.expect(single.next(1) == null);
-    var shrunk = Round.init(3, 15);
+    var shrunk = Round.init(3, 15, 3);
     try std.testing.expectEqual(@as(usize, 0), shrunk.next(0).?.index);
     try std.testing.expect(shrunk.next(budget_us + 1000) == null);
     try std.testing.expectEqual(@as(usize, 1), shrunk.cursor);
-    var late = Round.init(4, 0);
+    var late = Round.init(4, 0, 4);
     try std.testing.expectEqual(@as(u64, 1), late.next(budget_us - 1).?.budget);
+}
+
+test "idle panes do not reduce the active producer's throughput quantum" {
+    var round = Round.init(16, 0, 1);
+    for (0..15) |_| _ = round.next(0).?; // empty panes consume no feed budget
+    try std.testing.expectEqual(budget_us, round.next(0).?.budget);
+    try std.testing.expect(round.next(budget_us) == null);
 }

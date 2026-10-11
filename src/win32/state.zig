@@ -169,6 +169,8 @@ pub const Window = struct {
     remote_session: bool = false,
     diag_last_tick_ms: u64 = 0,
     diag_pty_bytes: u64 = 0,
+    diag_pty_rounds: u64 = 0,
+    diag_pty_round_max_us: u64 = 0,
     diag_renders: u64 = 0,
     // QPC microseconds accumulated by paint.zig's renderWindow timing wrap.
     // Reset every 1s flush along with diag_renders. busy_us / 10_000 = busy %.
@@ -299,6 +301,11 @@ pub const Window = struct {
         self.diag_pty_bytes += len;
     }
 
+    pub fn notePtyRound(self: *Window, elapsed_us: u64) void {
+        self.diag_pty_rounds += 1;
+        self.diag_pty_round_max_us = @max(self.diag_pty_round_max_us, elapsed_us);
+    }
+
     fn logDiagnostics(self: *Window, now: u64) void {
         if (self.diag_last_tick_ms == 0) {
             self.diag_last_tick_ms = now;
@@ -324,6 +331,9 @@ pub const Window = struct {
             },
         );
         self.diag_last_tick_ms = now;
+        std.log.info("pty continuation stats: {} round(s), max {} us", .{ self.diag_pty_rounds, self.diag_pty_round_max_us });
+        self.diag_pty_rounds = 0;
+        self.diag_pty_round_max_us = 0;
         self.diag_renders = 0;
         self.diag_pty_bytes = 0;
         self.diag_render_us = 0;
