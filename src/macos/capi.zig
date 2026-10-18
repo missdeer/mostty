@@ -57,9 +57,38 @@ const Tab = struct {
 // the host's reload path), so no lock is needed. A reload frees the arena the
 // config's strings live in, so callers copy values out instead of borrowing.
 var loaded_config: ?Config = null;
+var cli_font: f32 = -1;
+var cli_opacity: f32 = -1;
+var cli_blur: i32 = -1;
+
+fn applyCli(cfg: *Config) void {
+    if (cli_font >= 1) cfg.font_size_pt = cli_font;
+    if (cli_opacity >= 0) cfg.background_opacity = cli_opacity;
+    if (cli_blur >= 0) cfg.background_blur = cli_blur != 0;
+}
+
+export fn mostty_config_apply_cli(font: f32, opacity: f32, blur: i32) void {
+    cli_font = font;
+    cli_opacity = opacity;
+    cli_blur = blur;
+    if (loaded_config) |*cfg| applyCli(cfg);
+}
+
+export fn mostty_config_validate_file(path_opt: ?[*:0]const u8) i32 {
+    const path = if (path_opt) |path| std.mem.span(path) else Config.defaultPath(allocator) orelse return 2;
+    defer if (path_opt == null) allocator.free(path);
+    const valid = Config.validateFile(allocator, path) catch |err| {
+        std.log.err("config: {s}: {t}", .{ path, err });
+        return 2;
+    };
+    return if (valid) 0 else 1;
+}
 
 fn config() *Config {
-    if (loaded_config == null) loaded_config = Config.loadDefault(allocator);
+    if (loaded_config == null) {
+        loaded_config = Config.loadDefault(allocator);
+        applyCli(&loaded_config.?);
+    }
     return &loaded_config.?;
 }
 
@@ -167,6 +196,7 @@ fn createTab(pixel_width: u32, pixel_height: u32, scale: f32, launcher: ?*const 
         .working_directory = working_directory,
         .command = command,
         .env = cfg.env,
+        .shell_integration = cfg.shell_integration,
         .images_enabled = cfg.images_enabled,
         .cell_width = tab.renderer.metrics.cell_width,
         .cell_height = tab.renderer.metrics.cell_height,
@@ -208,7 +238,8 @@ fn launcherCommand(launcher: ?*const Config.Launcher) std.mem.Allocator.Error!?[
 /// mid-save holding the file), leaving the previous config in place so a
 /// transient failure never resets the terminal to defaults.
 export fn mostty_config_reload() bool {
-    const reloaded = Config.loadDefaultChecked(allocator) catch return false;
+    var reloaded = Config.loadDefaultChecked(allocator) catch return false;
+    applyCli(&reloaded);
     // Publish before freeing: Config owns an arena, and the old value must not
     // be reachable once its strings are gone.
     var previous = loaded_config;
@@ -525,6 +556,23 @@ export fn mostty_tab_feed(tab_opt: ?*Tab, ptr: [*]const u8, len: usize) void {
 export fn mostty_tab_write(tab_opt: ?*Tab, ptr: [*]const u8, len: usize) void {
     const tab = tab_opt orelse return;
     tab.pty.write(ptr[0..len]) catch |err| std.log.warn("PTY input enqueue failed: {s}", .{@errorName(err)});
+}
+
+export fn mostty_tab_input(tab_opt: ?*Tab, ptr: [*]const u8, len: usize) bool {
+    const tab = tab_opt orelse return false;
+    if (tab.exit_code != null) return false;
+    tab.pty.write(ptr[0..len]) catch return false;
+    return true;
+}
+
+export fn mostty_tab_pwd(tab_opt: ?*Tab, buf: [*]u8, cap: usize) usize {
+    const tab = tab_opt orelse return 0;
+    return copyText(tab.pty.terminal.term.getPwd() orelse "", buf, cap);
+}
+
+export fn mostty_tab_at_prompt(tab_opt: ?*Tab) bool {
+    const tab = tab_opt orelse return false;
+    return tab.pty.terminal.term.cursorIsAtPrompt();
 }
 
 /// Resize the drawable and propagate the new grid to PTY + VT. Writes the

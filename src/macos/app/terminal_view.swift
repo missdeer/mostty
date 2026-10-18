@@ -192,6 +192,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     }
 #endif
     var launcher: TerminalLauncher?
+    var hasStartedSession: Bool { tab != nil }
     var hasActiveSession: Bool {
         guard alive, !terminated, let tab = tab else { return false }
         var code: Int32 = 0
@@ -557,6 +558,22 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     }
 
     private func writeString(_ s: String) { writeBytes(Array(s.utf8)) }
+
+    var workingDirectory: String? {
+        guard let tab = tab else { return nil }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let count = mostty_tab_pwd(tab, &buffer, buffer.count)
+        return TerminalDirectory.localPath(String(decoding: buffer.prefix(count), as: UTF8.self))
+    }
+
+    var atPrompt: Bool { tab.map { mostty_tab_at_prompt($0) } ?? false }
+
+    func inputText(_ text: String) -> Bool {
+        guard let tab = tab, hasActiveSession else { return false }
+        let bytes = Array(text.utf8)
+        if bytes.isEmpty { return true }
+        return bytes.withUnsafeBufferPointer { mostty_tab_input(tab, $0.baseAddress, $0.count) }
+    }
 
     private func scrollToBottomOnInput() {
         guard let t = tab else { return }

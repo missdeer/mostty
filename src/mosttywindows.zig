@@ -6,6 +6,7 @@ pub const std_options: std.Options = .{
 };
 
 pub const WndProc = dispatch.WndProc;
+var cli_logging = false;
 
 fn logFn(
     comptime level: std.log.Level,
@@ -13,6 +14,7 @@ fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    if (cli_logging) return std.log.defaultLog(level, scope, format, args);
     diag.log(level, scope, format, args);
 }
 
@@ -51,6 +53,8 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
     var args = try process_args.iterateAllocator(global.gpa.allocator());
     defer args.deinit();
     var cmdline = try Cmdline.parse(&args);
+    cli_logging = cmdline.validate_config;
+    if (try cmdline.runAction(global.gpa.allocator())) return;
     switch (cmdline.renderer) {
         .invalid => |value| {
             if (!confirmInvalidRendererFallback(value)) return error.RendererFallbackDeclined;

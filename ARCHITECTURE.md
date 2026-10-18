@@ -1064,6 +1064,19 @@ funnels through `reloadConfig` so `light:A, dark:B` themes flip live.
 
 ## 9. Key Data Flows (cross-reference)
 
+The macOS PTY launch path prepares shell integration arguments and environment
+before `fork` (`macos/shell_integration.zig`). Bundled scripts preserve user startup
+files and emit standard OSC title, directory and semantic prompt sequences. The
+VT core owns that state; the C ABI copies the raw directory report to Swift,
+which accepts local hosts and decodes the URI before inheriting a directory.
+
+`macos/app/automation.swift` is the common main-thread entry point for AppleScript
+and App Intents. Both resolve stable pane IDs against the live model and reuse its
+tab, split, focus and close operations. Input enqueue errors propagate to automation
+callers. `Mostty.sdef` is installed into the bundle, and App Intents metadata is
+generated from Swift compiler constants by Apple's metadata processor.
+
+
 ### 9.1 PTY → screen → frame
 
 ```

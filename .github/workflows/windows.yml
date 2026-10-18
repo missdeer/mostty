@@ -87,6 +87,7 @@ jobs:
           Copy-Item zig-out/bin/Mostty.exe dist/
           if (Test-Path zig-out/bin/Mostty.pdb) { Copy-Item zig-out/bin/Mostty.pdb dist/ }
           Copy-Item zig-out/bin/themes dist/themes -Recurse
+          Copy-Item zig-out/share dist/share -Recurse
           New-Item -ItemType Directory -Force -Path dist/conpty | Out-Null
           Copy-Item "$conptyExtractDir/runtimes/win-x64/native/conpty.dll" dist/conpty/
           Copy-Item "$conptyExtractDir/build/native/runtimes/x64/OpenConsole.exe" dist/conpty/

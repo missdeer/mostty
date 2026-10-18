@@ -65,6 +65,7 @@ equivalent configuration overrides; use its config file.
 
 ## Hot reload
 
+
 The file is watched live. Saving it re-applies changes without a restart:
 
 - **Font** changes rebuild the renderer and reflow every tab.
@@ -525,6 +526,15 @@ appears; use the native Zoom command to change it later.
 On macOS, prompt before closing a tab or window with a running session, or
 quitting the application. Default: `true`. Naturally exited sessions close
 without prompting. Set `confirm-close-surface = false` to disable confirmation.
+
+### `shell-integration`
+
+Enables bundled integration for supported interactive shells on macOS. Default:
+`true`. Set it to `false` or `none` to disable injection for newly opened sessions.
+Existing sessions are unaffected. It enables title and directory reporting and
+semantic prompt markers; tabs and splits inherit the active pane's reported local
+directory unless the launcher specifies one. Apple's Bash 3.2 requires manual
+sourcing. See [integration resources](resources/README.md) for setup details.
 
 ### `fullscreen`
 

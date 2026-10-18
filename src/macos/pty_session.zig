@@ -6,6 +6,7 @@ const vt = @import("vt");
 const Config = @import("../config.zig");
 const TerminalSession = @import("../terminal/session.zig");
 const WriteQueue = @import("../terminal/write_queue.zig");
+const ShellIntegration = @import("shell_integration.zig");
 
 const c = std.c;
 const posix = std.posix;
@@ -50,6 +51,8 @@ pub const Options = struct {
     // Config `env = NAME=VALUE` entries. Each one replaces the inherited
     // variable of the same name, matching the Windows ConPTY child.
     env: []const Config.EnvEntry = &.{},
+    shell_integration: bool = false,
+    integration_resources: ?[]const u8 = null,
     hooks: ?Hooks = null,
     images_enabled: bool = true,
     cell_width: u32 = 0,
@@ -96,7 +99,13 @@ pub fn init(self: *PtySession, options: Options) !void {
     // NAME=VALUE strings built for config overrides.
     var environment_arena = std.heap.ArenaAllocator.init(options.terminal_allocator);
     defer environment_arena.deinit();
-    const environment = try childEnvironment(environment_arena.allocator(), options.env);
+    const env_allocator = environment_arena.allocator();
+    const resources = if (options.shell_integration)
+        options.integration_resources orelse try ShellIntegration.bundledResources(env_allocator, options.io)
+    else
+        null;
+    const launch = try ShellIntegration.prepare(env_allocator, shell, options.command, options.env, resources);
+    const environment = try childEnvironment(env_allocator, launch.env);
 
     var exec_pipe = try createExecPipe();
     errdefer closeFd(exec_pipe[0]);
@@ -114,7 +123,7 @@ pub fn init(self: *PtySession, options: Options) !void {
 
     if (pid == 0) {
         closeFd(exec_pipe[0]);
-        execShell(shell, options.command, options.working_directory, environment.ptr, exec_pipe[1]);
+        execShell(shell, launch.argv.ptr, options.working_directory, environment.ptr, exec_pipe[1]);
     }
 
     closeFd(exec_pipe[1]);
@@ -352,7 +361,7 @@ fn createExecPipe() ![2]c.fd_t {
 
 fn execShell(
     shell: [:0]const u8,
-    command: ?[:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
     working_directory: ?[:0]const u8,
     environment: [*:null]const ?[*:0]const u8,
     error_fd: c.fd_t,
@@ -360,15 +369,6 @@ fn execShell(
     // Best-effort: a missing/invalid configured directory must not stop the
     // tab from opening, so on failure we fall through to the inherited CWD.
     if (working_directory) |dir| _ = c.chdir(dir.ptr);
-
-    const login_arg: [:0]const u8 = "-l";
-    const command_arg: [:0]const u8 = "-lc";
-    var login_argv = [_:null]?[*:0]const u8{ shell.ptr, login_arg.ptr };
-    var command_argv = [_:null]?[*:0]const u8{ shell.ptr, command_arg.ptr, null };
-    const argv: [*:null]const ?[*:0]const u8 = if (command) |value| blk: {
-        command_argv[2] = value.ptr;
-        break :blk &command_argv;
-    } else &login_argv;
 
     _ = c.execve(shell.ptr, argv, environment);
     var exec_errno: c_int = @intFromEnum(posix.errno(-1));
@@ -778,4 +778,77 @@ test "macOS PTY reports an exec failure without leaving a child session" {
         .rows = 24,
         .shell = "/definitely/not/a/shell",
     }));
+}
+
+test "bundled zsh integration preserves startup files and reports live directory and prompt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena.allocator());
+    const resources = try std.fs.path.join(arena.allocator(), &.{ root, "resources", "mostty" });
+    const zdotdir = try std.fs.path.join(arena.allocator(), &.{ root, "tests", "macos", "shell-startup" });
+    var session: PtySession = undefined;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 120,
+        .rows = 24,
+        .shell = "/bin/zsh",
+        .working_directory = "/",
+        .shell_integration = true,
+        .integration_resources = resources,
+        .env = &.{.{ .name = "ZDOTDIR", .value = zdotdir }},
+    });
+    defer session.deinit();
+    try waitForIntegratedPrompt(&session, "/");
+    try session.write("printf '\\n%s\\n' \"$MOSTTY_STARTUP\"; cd /usr; false\r");
+    try waitForIntegratedPrompt(&session, "/usr");
+    try expectChildOutputLine(&session, "env:profile:rc");
+    try std.testing.expect(session.terminal.term.cursorIsAtPrompt());
+}
+
+fn waitForIntegratedPrompt(session: *PtySession, path: []const u8) !void {
+    var buffer: [8192]u8 = undefined;
+    // Bound a broken integration to ten seconds rather than hanging CI.
+    for (0..200) |_| {
+        if (session.terminal.term.getPwd()) |pwd| {
+            if (std.mem.endsWith(u8, pwd, path) and session.terminal.term.cursorIsAtPrompt()) return;
+        }
+        var fds = [_]posix.pollfd{.{ .fd = session.master_fd, .events = posix.POLL.IN, .revents = 0 }};
+        if (try posix.poll(&fds, 50) == 0) continue;
+        const count = posix.read(session.master_fd, &buffer) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (count == 0) return error.UnexpectedShellExit;
+        session.terminal.feed(buffer[0..count]);
+    }
+    return error.ShellIntegrationTimeout;
+}
+
+test "bundled system Bash manual integration preserves ENV and reports command completion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena.allocator());
+    const resources = try std.fs.path.join(arena.allocator(), &.{ root, "resources", "mostty" });
+    var session: PtySession = undefined;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 120,
+        .rows = 24,
+        .shell = "/bin/bash",
+        .working_directory = "/",
+        .shell_integration = true,
+        .integration_resources = resources,
+        .env = &.{.{ .name = "ENV", .value = "/original-env-marker" }},
+    });
+    defer session.deinit();
+    try session.write("source \"$MOSTTY_RESOURCES_DIR/shell-integration/bash/mostty.bash\"\r");
+    try waitForIntegratedPrompt(&session, "/");
+    try session.write("printf '\\n%s\\n' \"$ENV\"; cd /usr; false\r");
+    try waitForIntegratedPrompt(&session, "/usr");
+    try expectChildOutputLine(&session, "/original-env-marker");
+    try std.testing.expect(session.terminal.term.cursorIsAtPrompt());
 }

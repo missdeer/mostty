@@ -2,6 +2,7 @@ import AppKit
 
 final class PaneItem: Identifiable {
     let id: UInt32
+    let automationID = UUID().uuidString
     var title = "Terminal"
     let view = MosttyTerminalView(frame: .zero)
 
@@ -269,6 +270,7 @@ final class AppModel {
     }
 
     func newTab(launcher: TerminalLauncher? = nil) {
+        let launcher = inheritingDirectory(launcher)
         guard let id = nextPaneID(), let item = TabItem(first: id) else {
             showError("Unable to Open Tab", detail: "The terminal layout could not be created.")
             return
@@ -307,6 +309,7 @@ final class AppModel {
     }
 
     func splitSelected(_ axis: UInt32, launcher: TerminalLauncher? = nil) {
+        let launcher = inheritingDirectory(launcher)
         guard let tab = selectedTab, let active = tab.activePane else { return }
         tab.host.arrange()
         guard mostty_layout_can_split(tab.layout, active.id, axis), let id = nextPaneID() else {
@@ -342,6 +345,16 @@ final class AppModel {
         guard let tab = selectedTab, mostty_layout_direction(tab.layout, direction) else { return }
         tab.host.arrange()
         focusActivePane()
+    }
+
+    private func inheritingDirectory(_ launcher: TerminalLauncher?) -> TerminalLauncher? {
+        guard launcher?.directory.isEmpty ?? true,
+              let directory = selectedTab?.activePane?.view.workingDirectory else { return launcher }
+        // Preserve the configured default launcher's command when only its
+        // directory is inherited from the active shell.
+        let source = launcher ?? launchers.first
+        if let source = source, !source.directory.isEmpty { return source }
+        return TerminalLauncher(label: source?.label ?? "", command: source?.command ?? "", directory: directory)
     }
 
     func togglePaneMaximize() {
@@ -978,6 +991,8 @@ final class ContentView: NSView {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
+    @objc var terminals: [MosttyScriptTerminal] { TerminalAutomation.terminals.map(MosttyScriptTerminal.init) }
+    func application(_ sender: NSApplication, delegateHandlesKey key: String) -> Bool { key == "terminals" }
     private var mainWindow: NSWindow?
     private let themeMenu = NSMenu(title: "Theme")
 
@@ -1150,6 +1165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 @main
 struct MosttyApp {
     static func main() {
+        if let status = MosttyCommandLine.run() { exit(status) }
+        setenv("TERM_PROGRAM_VERSION", Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", 1)
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate

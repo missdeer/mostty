@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="Mostty Terminology">
+  <suite name="Mostty Suite" code="Msty" description="Control Mostty tabs and terminal panes.">
+    <class name="application" code="capp" description="The Mostty application.">
+      <cocoa class="NSApplication"/>
+      <property name="name" code="pnam" type="text" access="r"/>
+      <property name="version" code="vers" type="text" access="r"/>
+      <element type="terminal" access="r"><cocoa key="terminals"/></element>
+    </class>
+    <class name="terminal" code="Mtrm" plural="terminals" description="A live terminal pane. IDs remain stable until the app quits.">
+      <cocoa class="MosttyScriptTerminal"/>
+      <property name="id" code="ID  " type="text" access="r"/>
+      <property name="name" code="pnam" type="text" access="r"/>
+      <property name="working directory" code="Mcwd" type="text" access="r"><cocoa key="workingDirectory"/></property>
+      <property name="at prompt" code="Mprm" type="boolean" access="r"><cocoa key="atPrompt"/></property>
+      <property name="selected" code="Msel" type="boolean" access="r"/>
+    </class>
+    <command name="new tab" code="MstyMnew" description="Open a terminal tab; omit directory to inherit the active directory.">
+      <cocoa class="MosttyScriptCommand"/>
+      <parameter name="working directory" code="Mcwd" type="text" optional="yes"><cocoa key="directory"/></parameter>
+      <parameter name="command" code="Mcmd" type="text" optional="yes"><cocoa key="command"/></parameter>
+      <result type="terminal"/>
+    </command>
+    <command name="focus terminal" code="MstyMfoc">
+      <cocoa class="MosttyScriptCommand"/>
+      <direct-parameter type="text" optional="yes" description="Terminal ID; defaults to the active terminal."/>
+    </command>
+    <command name="close terminal" code="MstyMcls">
+      <cocoa class="MosttyScriptCommand"/>
+      <direct-parameter type="text" optional="yes" description="Terminal ID; honors close confirmation."/>
+    </command>
+    <command name="split terminal" code="MstyMspl">
+      <cocoa class="MosttyScriptCommand"/>
+      <direct-parameter type="text" optional="yes" description="Terminal ID; defaults to the active terminal."/>
+      <parameter name="direction" code="Mdir" type="text" optional="yes" description="right (default) or down"><cocoa key="direction"/></parameter>
+      <result type="terminal"/>
+    </command>
+    <command name="input text" code="MstyMinp" description="Send literal text; include a carriage return to submit a command.">
+      <cocoa class="MosttyScriptCommand"/>
+      <direct-parameter type="text"/>
+      <parameter name="to terminal" code="Mtid" type="text" optional="yes" description="Terminal ID; defaults to the active terminal."><cocoa key="terminalID"/></parameter>
+    </command>
+  </suite>
+</dictionary>

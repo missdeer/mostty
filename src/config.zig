@@ -271,6 +271,10 @@ maximize: bool = false,
 fullscreen: bool = false,
 // macOS prompts before closing a running session unless explicitly disabled.
 confirm_close_surface: bool = true,
+// macOS injects the bundled integration into supported interactive shells.
+shell_integration: bool = true,
+// Reloads retain warn-and-default behavior; CLI validation checks this count.
+diagnostic_count: usize = 0,
 
 // Render-throttle frame interval (ms). Two independent caps because the
 // "right" cadence differs: local D3D presents are nearly free at 60 FPS,
@@ -375,6 +379,7 @@ pub fn loadPath(gpa: std.mem.Allocator, path: []const u8) Config {
 }
 
 pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8) Config {
+    var diagnostic_count: usize = 0;
     var arena = std.heap.ArenaAllocator.init(gpa);
     const a = arena.allocator();
 
@@ -406,6 +411,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var maximize = defaults.maximize;
     var fullscreen = defaults.fullscreen;
     var confirm_close_surface = defaults.confirm_close_surface;
+    var shell_integration = defaults.shell_integration;
     var render_interval_local_ms = defaults.render_interval_local_ms;
     var render_interval_remote_ms = defaults.render_interval_remote_ms;
     var gpu = defaults.gpu;
@@ -424,10 +430,12 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     // config's own explicit color keys (phase 2) always win regardless of line
     // order — matching Ghostty's "theme provides defaults, config overrides".
     {
+        var theme_line_no: usize = 0;
         var it = std.mem.splitScalar(u8, input, '\n');
         while (it.next()) |raw_line| {
+            theme_line_no += 1;
             const line = std.mem.trim(u8, raw_line, " \t\r");
-            if (line.len == 0) continue;
+            if (line.len == 0 or line[0] == '#') continue;
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
             const key = std.mem.trim(u8, line[0..eq], " \t");
             if (!std.mem.eql(u8, key, "theme")) continue;
@@ -436,7 +444,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             if (resolved.len != 0) {
                 theme_name = a.dupe(u8, resolved) catch oom();
             }
-            applyThemeFile(gpa, &theme, value);
+            if (!applyThemeFile(gpa, &theme, value, source_name, theme_line_no)) diagnostic_count += 1;
         }
     }
 
@@ -445,7 +453,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     // instead of the hard-coded ThemeColors defaults.
     if (theme_name == null) {
         theme_name = a.dupe(u8, default_theme_name) catch oom();
-        applyThemeFile(gpa, &theme, default_theme_name);
+        _ = applyThemeFile(gpa, &theme, default_theme_name, source_name, 0);
     }
 
     // Phase 2: everything else. Color keys overwrite the theme baseline.
@@ -454,18 +462,19 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     while (it.next()) |raw_line| {
         line_no += 1;
         const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0) continue;
+        if (line.len == 0 or line[0] == '#') continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
-            std.log.warn("config: {s}:{}: missing '=' in '{s}'", .{ source_name, line_no, line });
+            reportDiagnostic(&diagnostic_count, "config: {s}:{}: missing '=' in '{s}'", .{ source_name, line_no, line });
             continue;
         };
         const key = std.mem.trim(u8, line[0..eq], " \t");
         const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
 
+        const color_result = applyColorKey(&theme, &overrides, key, value);
         if (std.mem.eql(u8, key, "theme")) {
             // Handled in phase 1.
-        } else if (applyColorKey(&theme, &overrides, key, value)) {
-            // Recognized color key (palette/background/foreground/cursor-*/selection-*).
+        } else if (color_result != .unknown) {
+            if (color_result == .invalid) reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid color '{s}'", .{ source_name, line_no, value });
         } else if (isKnownUnsupportedKey(key)) {
             // Known Ghostty key with no mostty equivalent: ignore silently so
             // ported configs don't spam warnings.
@@ -493,7 +502,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             family_bold_italic = a.dupe(u8, value) catch oom();
         } else if (std.mem.eql(u8, key, "font-synthetic-style")) {
             synthetic = parseSyntheticStyle(value) orelse {
-                std.log.warn("config: {s}:{}: invalid font-synthetic-style '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid font-synthetic-style '{s}'", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "font-style")) {
@@ -506,22 +515,22 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             style_bold_italic = parseFontStyle(a, value);
         } else if (std.mem.eql(u8, key, "font-size")) {
             const n = std.fmt.parseFloat(f32, value) catch {
-                std.log.warn("config: {s}:{}: invalid font-size '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid font-size '{s}'", .{ source_name, line_no, value });
                 continue;
             };
             if (!validFontSize(n)) {
-                std.log.warn("config: {s}:{}: font-size must be finite and in [1,256] (got {d})", .{ source_name, line_no, n });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: font-size must be finite and in [1,256] (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             font_size_pt = n;
         } else if (std.mem.eql(u8, key, "font-ligatures")) {
             font_ligatures = parseStrictBool(value) orelse {
-                std.log.warn("config: {s}:{}: invalid font-ligatures '{s}' (expect true/false)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid font-ligatures '{s}' (expect true/false)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "font-feature")) {
-            parseFontFeatures(a, value, &font_features) catch {
-                std.log.warn("config: {s}:{}: invalid font-feature '{s}'", .{ source_name, line_no, value });
+            parseFontFeatures(a, value, &font_features, &diagnostic_count, source_name, line_no) catch {
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid font-feature '{s}'", .{ source_name, line_no, value });
             };
         } else if (std.mem.eql(u8, key, "tabbar-font-family")) {
             // Only the primary family drives the tab bar; the rest of any
@@ -537,23 +546,23 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             }
         } else if (std.mem.eql(u8, key, "tabbar-font-size")) {
             const n = std.fmt.parseFloat(f32, value) catch {
-                std.log.warn("config: {s}:{}: invalid tabbar-font-size '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid tabbar-font-size '{s}'", .{ source_name, line_no, value });
                 continue;
             };
             if (!validFontSize(n)) {
-                std.log.warn("config: {s}:{}: tabbar-font-size must be finite and in [1,256] (got {d})", .{ source_name, line_no, n });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: tabbar-font-size must be finite and in [1,256] (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             tabbar_font_size_pt = n;
         } else if (std.mem.eql(u8, key, "render-interval-local-ms")) {
             const n = parseRenderIntervalMs(value) orelse {
-                std.log.warn("config: {s}:{}: invalid render-interval-local-ms '{s}' (expect 1..1000)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid render-interval-local-ms '{s}' (expect 1..1000)", .{ source_name, line_no, value });
                 continue;
             };
             render_interval_local_ms = n;
         } else if (std.mem.eql(u8, key, "render-interval-remote-ms")) {
             const n = parseRenderIntervalMs(value) orelse {
-                std.log.warn("config: {s}:{}: invalid render-interval-remote-ms '{s}' (expect 1..1000)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid render-interval-remote-ms '{s}' (expect 1..1000)", .{ source_name, line_no, value });
                 continue;
             };
             render_interval_remote_ms = n;
@@ -561,32 +570,32 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             gpu = if (value.len == 0) null else a.dupe(u8, value) catch oom();
         } else if (std.mem.eql(u8, key, "renderer")) {
             renderer = std.meta.stringToEnum(RendererBackend, value) orelse {
-                std.log.warn("config: {s}:{}: invalid renderer '{s}' (expect d3d11, d3d12, opengl, pure-opengl, vulkan, or native-vulkan)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid renderer '{s}' (expect d3d11, d3d12, opengl, pure-opengl, vulkan, or native-vulkan)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "background-opacity")) {
             const n = std.fmt.parseFloat(f32, value) catch {
-                std.log.warn("config: {s}:{}: invalid background-opacity '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-opacity '{s}'", .{ source_name, line_no, value });
                 continue;
             };
             if (!(n >= 0.0 and n <= 1.0)) {
-                std.log.warn("config: {s}:{}: background-opacity must be in [0,1] (got {d})", .{ source_name, line_no, n });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: background-opacity must be in [0,1] (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             background_opacity = n;
         } else if (std.mem.eql(u8, key, "background-blur")) {
             background_blur = parseBool(value) orelse {
-                std.log.warn("config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "images-enabled")) {
             images_enabled = parseStrictBool(value) orelse {
-                std.log.warn("config: {s}:{}: invalid images-enabled '{s}' (expect true/false)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid images-enabled '{s}' (expect true/false)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "smart-ime")) {
             smart_ime = parseSmartIme(value) orelse {
-                std.log.warn("config: {s}:{}: invalid smart-ime '{s}' (expect false, tab, or pane)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid smart-ime '{s}' (expect false, tab, or pane)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "background-image")) {
@@ -594,62 +603,67 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
             background_image = if (value.len == 0) &.{} else a.dupe(u8, value) catch oom();
         } else if (std.mem.eql(u8, key, "background-image-opacity")) {
             const n = std.fmt.parseFloat(f32, value) catch {
-                std.log.warn("config: {s}:{}: invalid background-image-opacity '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-image-opacity '{s}'", .{ source_name, line_no, value });
                 continue;
             };
             if (!(n >= 0.0)) {
-                std.log.warn("config: {s}:{}: background-image-opacity must be >= 0 (got {d})", .{ source_name, line_no, n });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: background-image-opacity must be >= 0 (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             background_image_opacity = n;
         } else if (std.mem.eql(u8, key, "background-image-position")) {
             background_image_position = parseBackgroundImagePosition(value) orelse {
-                std.log.warn("config: {s}:{}: invalid background-image-position '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-image-position '{s}'", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "background-image-fit")) {
             background_image_fit = parseBackgroundImageFit(value) orelse {
-                std.log.warn("config: {s}:{}: invalid background-image-fit '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-image-fit '{s}'", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "background-image-repeat")) {
             background_image_repeat = parseStrictBool(value) orelse {
-                std.log.warn("config: {s}:{}: invalid background-image-repeat '{s}' (expect true/false)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-image-repeat '{s}' (expect true/false)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "maximize")) {
             maximize = parseStrictBool(value) orelse {
-                std.log.warn("config: {s}:{}: invalid maximize '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid maximize '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "fullscreen")) {
             fullscreen = parseFullscreen(value) orelse {
-                std.log.warn("config: {s}:{}: invalid fullscreen '{s}' (expect true/false or non-native*)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid fullscreen '{s}' (expect true/false or non-native*)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "confirm-close-surface")) {
             confirm_close_surface = parseStrictBool(value) orelse {
-                std.log.warn("config: {s}:{}: invalid confirm-close-surface '{s}' (expect true/false)", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid confirm-close-surface '{s}' (expect true/false)", .{ source_name, line_no, value });
+                continue;
+            };
+        } else if (std.mem.eql(u8, key, "shell-integration")) {
+            shell_integration = if (std.mem.eql(u8, value, "none")) false else parseStrictBool(value) orelse {
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid shell-integration '{s}' (expect true/false/none)", .{ source_name, line_no, value });
                 continue;
             };
         } else if (std.mem.eql(u8, key, "font-codepoint-map")) {
             parseCodepointMap(a, value, &codepoint_maps) catch {
-                std.log.warn("config: {s}:{}: invalid font-codepoint-map '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid font-codepoint-map '{s}'", .{ source_name, line_no, value });
             };
         } else if (std.mem.eql(u8, key, "launcher")) {
             const launcher = parseLauncher(a, value) orelse {
-                std.log.warn("config: {s}:{}: invalid launcher '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid launcher '{s}'", .{ source_name, line_no, value });
                 continue;
             };
             launchers.append(a, launcher) catch oom();
         } else if (std.mem.eql(u8, key, "env")) {
             const entry = parseEnvEntry(a, value) orelse {
-                std.log.warn("config: {s}:{}: invalid env '{s}'", .{ source_name, line_no, value });
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid env '{s}'", .{ source_name, line_no, value });
                 continue;
             };
             envs.append(a, entry) catch oom();
         } else {
-            std.log.warn("config: {s}:{}: unknown key '{s}'", .{ source_name, line_no, key });
+            reportDiagnostic(&diagnostic_count, "config: {s}:{}: unknown key '{s}'", .{ source_name, line_no, key });
         }
     }
 
@@ -698,11 +712,13 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .maximize = maximize,
         .fullscreen = fullscreen,
         .confirm_close_surface = confirm_close_surface,
+        .shell_integration = shell_integration,
         .render_interval_local_ms = render_interval_local_ms,
         .render_interval_remote_ms = render_interval_remote_ms,
         .gpu = gpu,
         .renderer = renderer,
         .arena = arena,
+        .diagnostic_count = diagnostic_count,
     };
 }
 
@@ -882,19 +898,35 @@ fn parseSyntheticStyle(value: []const u8) ?SyntheticStyle {
     return out;
 }
 
+fn reportDiagnostic(count: *usize, comptime format: []const u8, args: anytype) void {
+    count.* += 1;
+    std.log.warn(format, args);
+}
+
+pub fn validateFile(gpa: std.mem.Allocator, path: []const u8) !bool {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(runtimeIo(), path, gpa, .limited(1024 * 1024));
+    defer gpa.free(bytes);
+    var parsed = parse(gpa, bytes, path);
+    defer parsed.deinit();
+    return parsed.diagnostic_count == 0;
+}
+
 // Parses Ghostty's loose `font-feature` syntax: `liga`, `+liga`, `-liga`,
 // `"liga" off`, `liga=2`, or comma-separated combinations of those forms.
 fn parseFontFeatures(
     a: std.mem.Allocator,
     value: []const u8,
     out: *std.ArrayListUnmanaged(FontFeature),
+    diagnostic_count: *usize,
+    source_name: []const u8,
+    line_no: usize,
 ) error{OutOfMemory}!void {
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |raw_item| {
         const item = std.mem.trim(u8, raw_item, " \t");
         if (item.len == 0) continue;
         const feature = parseFontFeatureItem(item) orelse {
-            std.log.warn("config: invalid font-feature item '{s}'; skipping", .{item});
+            reportDiagnostic(diagnostic_count, "config: {s}:{}: invalid font-feature item '{s}'; skipping", .{ source_name, line_no, item });
             continue;
         };
         try out.append(a, feature);
@@ -1027,19 +1059,17 @@ pub fn u24ToRgb(c: u24) vt.color.RGB {
     };
 }
 
-// Applies one color key to `theme`. Returns true if `key` was a recognized
-// color key (even when the value was malformed — it still belongs to the color
-// namespace and must not fall through to the unknown-key warning).
+// Distinguishes malformed color values from keys outside the color namespace.
 // When `overrides` is non-null, also records the value there so a later
 // theme hot-switch can replay it on top of a freshly-loaded theme.
-fn applyColorKey(theme: *ThemeColors, overrides: ?*ColorOverrides, key: []const u8, value: []const u8) bool {
+fn applyColorKey(theme: *ThemeColors, overrides: ?*ColorOverrides, key: []const u8, value: []const u8) enum { unknown, valid, invalid } {
     if (std.mem.eql(u8, key, "palette")) {
-        const eq = std.mem.indexOfScalar(u8, value, '=') orelse return true;
-        const idx = std.fmt.parseInt(u8, std.mem.trim(u8, value[0..eq], " \t"), 10) catch return true;
-        const rgb = parseHex(std.mem.trim(u8, value[eq + 1 ..], " \t")) orelse return true;
+        const eq = std.mem.indexOfScalar(u8, value, '=') orelse return .invalid;
+        const idx = std.fmt.parseInt(u8, std.mem.trim(u8, value[0..eq], " \t"), 10) catch return .invalid;
+        const rgb = parseHex(std.mem.trim(u8, value[eq + 1 ..], " \t")) orelse return .invalid;
         theme.palette[idx] = u24ToRgb(rgb);
         if (overrides) |o| o.palette[idx] = u24ToRgb(rgb);
-        return true;
+        return .valid;
     }
     const Slot = struct {
         theme_dst: *?u24,
@@ -1058,23 +1088,23 @@ fn applyColorKey(theme: *ThemeColors, overrides: ?*ColorOverrides, key: []const 
             if (parseHex(value)) |c| {
                 theme.foreground = c;
                 if (overrides) |o| o.foreground = c;
-            }
-            return true;
+            } else return .invalid;
+            return .valid;
         }
         if (std.mem.eql(u8, key, "background")) {
             if (parseHex(value)) |c| {
                 theme.background = c;
                 if (overrides) |o| o.background = c;
-            }
-            return true;
+            } else return .invalid;
+            return .valid;
         }
-        return false;
+        return .unknown;
     };
     if (parseHex(value)) |c| {
         slot.theme_dst.* = c;
         if (slot.override_dst) |dst| dst.* = c;
-    }
-    return true;
+    } else return .invalid;
+    return .valid;
 }
 
 // Ghostty theme/color-doc keys that mostty has no feature for. Ignored silently
@@ -1097,26 +1127,27 @@ fn isKnownUnsupportedKey(key: []const u8) bool {
 // baseline. Handles Ghostty's `light:A, dark:B` syntax (mostty is a dark-chrome
 // app, so the dark variant wins). Does NOT recurse: `theme`/`config-file` keys
 // inside a theme file are ignored.
-fn applyThemeFile(gpa: std.mem.Allocator, theme: *ThemeColors, value: []const u8) void {
+fn applyThemeFile(gpa: std.mem.Allocator, theme: *ThemeColors, value: []const u8, source_name: []const u8, line_no: usize) bool {
     const name = resolveThemeName(value, systemPrefersDark());
-    if (name.len == 0) return;
+    if (name.len == 0) return true;
 
     const path: []const u8 = if (std.fs.path.isAbsolute(name))
         gpa.dupe(u8, name) catch oom()
     else
         findThemeFile(gpa, name) orelse {
-            std.log.warn("config: theme '{s}' not found in the user or bundled themes directory", .{name});
-            return;
+            std.log.warn("config: {s}:{}: theme '{s}' not found in the user or bundled themes directory", .{ source_name, line_no, name });
+            return false;
         };
     defer gpa.free(path);
 
     const bytes = std.Io.Dir.cwd().readFileAlloc(runtimeIo(), path, gpa, .limited(64 * 1024)) catch |err| {
-        std.log.warn("config: theme read '{s}' failed: {s}", .{ path, @errorName(err) });
-        return;
+        std.log.warn("config: {s}:{}: theme read '{s}' failed: {s}", .{ source_name, line_no, path, @errorName(err) });
+        return false;
     };
     defer gpa.free(bytes);
 
     parseThemeFileBytes(theme, bytes);
+    return true;
 }
 
 // Pure parser: folds a theme file's color keys into `theme`. Strips UTF-8 BOM,
@@ -1411,6 +1442,25 @@ test "omitted settings and a missing config file retain field defaults" {
             try std.testing.expectEqualDeep(@field(defaults, field), @field(cfg, field));
         }
     }
+}
+
+test "validation rejects malformed values while normal parsing retains defaults" {
+    var invalid = parse(std.testing.allocator, "font-size = invalid\nbackground = not-a-color\npalette = 256=#112233\nunknown-option = true\nfont-feature = bad\n", "validation-test");
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(usize, 5), invalid.diagnostic_count);
+    try std.testing.expectEqual((Config{}).font_size_pt, invalid.font_size_pt);
+    var valid = parse(std.testing.allocator, "font-size = 14\nbackground = #112233\nshell-integration = none\n", "validation-test");
+    defer valid.deinit();
+    try std.testing.expectEqual(@as(usize, 0), valid.diagnostic_count);
+    try std.testing.expect(!valid.shell_integration);
+}
+
+test "comments are ignored without consuming color literals or applying commented settings" {
+    var cfg = parse(std.testing.allocator, "\xEF\xBB\xBF  # a comment without an equals sign\n# font-size = invalid\n# theme = /missing-commented-theme\nfont-size = 14\nbackground = #112233\n", "comments-test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(usize, 0), cfg.diagnostic_count);
+    try std.testing.expectEqual(@as(?f32, 14), cfg.font_size_pt);
+    try std.testing.expectEqual(@as(u24, 0x112233), cfg.theme.background);
 }
 
 test "close confirmation defaults on and only valid configuration disables it" {

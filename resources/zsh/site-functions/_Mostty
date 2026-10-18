@@ -1,0 +1,18 @@
+#compdef Mostty mostty
+local -a options
+options=(
+  '--help[Show help]'
+  '--font-size[Font size]:points:'
+  '--background-opacity[Background opacity]:opacity:'
+  '--background-blur[Enable background blur]:enabled:(true false)'
+  '+list-themes[List theme names]'
+  '+validate-config[Validate configuration]'
+  '--config-file[Configuration to validate with +validate-config]:config:_files'
+)
+if [[ $OSTYPE != darwin* ]]; then
+  options+=(
+    '--ttf[TrueType font file]:font:_files -g "*.ttf"'
+    '--renderer[Renderer backend]:backend:(d3d11 d3d12 opengl pure-opengl vulkan native-vulkan)'
+  )
+fi
+_arguments $options

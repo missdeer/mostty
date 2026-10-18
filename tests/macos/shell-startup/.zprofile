@@ -1,0 +1,1 @@
+export MOSTTY_STARTUP="${MOSTTY_STARTUP}:profile"

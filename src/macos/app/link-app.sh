@@ -19,6 +19,12 @@ if [[ "${1:-}" == "--test" ]]; then
     TEST_ARGS=(-D MOSTTY_APP_TESTS "$2")
     shift 2
 fi
+CONST_ARGS=()
+if [[ "${1:-}" == "--metadata" ]]; then
+    CONST_ARGS=(-whole-module-optimization -emit-const-values-path "$2"
+        -const-gather-protocols-list "$SRCDIR/app-intents-protocols.json")
+    shift 2
+fi
 
 # Keep the object-extraction scratch dir inside the build tree (next to the
 # output), not the system temp: the build sandbox restricts access to /var tmp.
@@ -44,11 +50,15 @@ chmod -R u+rw "$WORK"
 
 swiftc -O -o "$OUT" \
     ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
+    ${CONST_ARGS[@]+"${CONST_ARGS[@]}"} \
     -target "$TARGET" \
     -import-objc-header "$SRCDIR/Bridge.h" \
     "$SRCDIR/key_input.swift" \
     "$SRCDIR/terminal_view.swift" \
     "$SRCDIR/pane_container.swift" \
+    "$SRCDIR/automation.swift" \
+    "$SRCDIR/app_intents.swift" \
+    "$SRCDIR/command_line.swift" \
     "$SRCDIR/app_shell.swift" \
     "$WORK"/a*/*.o \
     -lc++ \
@@ -58,4 +68,7 @@ swiftc -O -o "$OUT" \
     -framework CoreText \
     -framework CoreGraphics \
     -framework ImageIO \
-    -framework Foundation
+    -framework Foundation \
+    -framework AppIntents \
+    -module-name Mostty \
+    -module-cache-path "$SRCDIR/../../../tmp/swift-module-cache"

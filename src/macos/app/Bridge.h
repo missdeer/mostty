@@ -67,6 +67,11 @@ void *mostty_tab_metal_device(MosttyTab *tab);
 intptr_t mostty_tab_read(MosttyTab *tab, uint8_t *buf, size_t cap);
 void mostty_tab_feed(MosttyTab *tab, const uint8_t *ptr, size_t len);
 void mostty_tab_write(MosttyTab *tab, const uint8_t *ptr, size_t len);
+bool mostty_tab_input(MosttyTab *tab, const uint8_t *ptr, size_t len);
+size_t mostty_tab_pwd(MosttyTab *tab, uint8_t *buf, size_t cap);
+bool mostty_tab_at_prompt(MosttyTab *tab);
+void mostty_config_apply_cli(float font, float opacity, int32_t blur);
+int32_t mostty_config_validate_file(const char *path);
 
 bool mostty_tab_set_surface(MosttyTab *tab, uint32_t pixel_width, uint32_t pixel_height,
                             float scale, uint32_t *out_cols, uint32_t *out_rows);

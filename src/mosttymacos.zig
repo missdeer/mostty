@@ -6,6 +6,7 @@ pub const capi = @import("macos/capi.zig");
 
 test {
     _ = @import("macos/kitty_tests.zig");
+    _ = @import("cmdline.zig");
 }
 
 comptime {

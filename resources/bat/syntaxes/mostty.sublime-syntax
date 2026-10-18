@@ -1,0 +1,15 @@
+%YAML 1.2
+---
+name: Mostty Config
+file_extensions: [mostty]
+scope: source.mostty
+contexts:
+  main:
+    - match: '^\s*#.*$'
+      scope: comment.line.number-sign.mostty
+    - match: '^\s*(background|background-blur|background-image|background-image-fit|background-image-opacity|background-image-position|background-image-repeat|background-opacity|confirm-close-surface|cursor-color|cursor-text|emoji-font-family|env|font-codepoint-map|font-family|font-family-bold|font-family-bold-italic|font-family-italic|font-feature|font-ligatures|font-size|font-style|font-style-bold|font-style-bold-italic|font-style-italic|font-synthetic-style|foreground|fullscreen|gpu|images-enabled|launcher|maximize|palette|render-interval-local-ms|render-interval-remote-ms|renderer|selection-background|selection-foreground|shell-integration|smart-ime|tabbar-font-family|tabbar-font-size|theme)\b'
+      scope: keyword.other.mostty
+    - match: '#[0-9a-fA-F]{6}\b'
+      scope: constant.other.color.mostty
+    - match: '\b(true|false|none)\b'
+      scope: constant.language.mostty

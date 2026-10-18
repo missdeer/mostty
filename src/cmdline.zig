@@ -5,6 +5,9 @@ font_size: f32 = 16.0,
 renderer: RendererSelection = .from_config,
 background_opacity: ?f32 = null,
 background_blur: ?bool = null,
+list_themes: bool = false,
+validate_config: bool = false,
+config_file: ?[]const u8 = null,
 
 pub const RendererSelection = union(enum) {
     from_config,
@@ -25,6 +28,9 @@ pub fn usage() !void {
         \\                            pure-opengl, vulkan, or native-vulkan)
         \\  --background-opacity <n> Default background opacity in [0,1]
         \\  --background-blur <bool> Enable DWM blur behind (true or false)
+        \\  +list-themes             List available theme names
+        \\  +validate-config         Validate configuration without opening a window
+        \\  --config-file <path>     Configuration to validate
         \\
     );
 }
@@ -61,11 +67,19 @@ pub fn parse(args: *std.process.Args.Iterator) !Cmdline {
                 "invalid --background-blur '{s}' (expected true or false)",
                 .{value},
             );
+        } else if (std.mem.eql(u8, arg, "+list-themes")) {
+            result.list_themes = true;
+        } else if (std.mem.eql(u8, arg, "+validate-config")) {
+            result.validate_config = true;
+        } else if (std.mem.eql(u8, arg, "--config-file")) {
+            result.config_file = args.next() orelse errExit("--config-file requires a path", .{});
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try Cmdline.usage();
             std.process.exit(0);
         } else errExit("unknown cmdline option '{s}'", .{arg});
     }
+    if (result.config_file != null and !result.validate_config) errExit("--config-file requires +validate-config", .{});
+    if (result.list_themes and result.validate_config) errExit("choose one CLI action", .{});
     return result;
 }
 
@@ -73,6 +87,31 @@ pub fn applyConfigOverrides(self: Cmdline, config: *Config) void {
     config.renderer = self.rendererOr(config.renderer);
     if (self.background_opacity) |value| config.background_opacity = value;
     if (self.background_blur) |value| config.background_blur = value;
+}
+
+pub fn runAction(self: Cmdline, allocator: std.mem.Allocator) !bool {
+    if (self.validate_config) {
+        const path = self.config_file orelse Config.defaultPath(allocator) orelse return error.ConfigPathUnavailable;
+        defer if (self.config_file == null) allocator.free(path);
+        const valid = Config.validateFile(allocator, path) catch |err| {
+            std.log.err("config: {s}: {t}", .{ path, err });
+            std.process.exit(2);
+        };
+        if (!valid) std.process.exit(1);
+        return true;
+    }
+    if (!self.list_themes) return false;
+    const names = Config.listThemeNames(allocator);
+    defer {
+        for (names) |name| allocator.free(name);
+        allocator.free(names);
+    }
+    const io = std.Io.Threaded.global_single_threaded.io();
+    for (names) |name| {
+        try std.Io.File.stdout().writeStreamingAll(io, name);
+        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    }
+    return true;
 }
 
 pub fn rendererOr(self: Cmdline, configured: Config.RendererBackend) Config.RendererBackend {
@@ -112,6 +151,10 @@ test "renderer accepts exactly the configured backend names" {
     }
     try std.testing.expectEqualStrings("D3D11", parseRenderer("D3D11").invalid);
     try std.testing.expectEqualStrings("native_vulkan", parseRenderer("native_vulkan").invalid);
+}
+
+test "normal launch continues into the application instead of a CLI action" {
+    try std.testing.expect(!(try (Cmdline{}).runAction(std.testing.allocator)));
 }
 
 test "renderer command-line value overrides config and omission preserves it" {

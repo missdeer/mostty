@@ -277,6 +277,8 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     const exe = link.addOutputFileArg("Mostty");
     link.addDirectoryArg(b.path("src/macos/app"));
     link.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
+    link.addArg("--metadata");
+    const intent_constants = link.addOutputFileArg("Mostty.swiftconstvalues");
 
     const pane_link = b.addSystemCommand(&.{"bash"});
     pane_link.addFileArg(b.path("src/macos/app/link-app.sh"));
@@ -285,8 +287,16 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     pane_link.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
     pane_link.addArg("--test");
     pane_link.addFileArg(b.path("tests/macos/PaneTests.swift"));
-    for ([_][]const u8{ "Bridge.h", "key_input.swift", "terminal_view.swift", "pane_container.swift", "app_shell.swift" }) |name| {
+    const automation_link = b.addSystemCommand(&.{"bash"});
+    automation_link.addFileArg(b.path("src/macos/app/link-app.sh"));
+    const automation_exe = automation_link.addOutputFileArg("automation-tests");
+    automation_link.addDirectoryArg(b.path("src/macos/app"));
+    automation_link.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
+    automation_link.addArg("--test");
+    automation_link.addFileArg(b.path("tests/macos/AutomationTests.swift"));
+    for ([_][]const u8{ "Bridge.h", "key_input.swift", "terminal_view.swift", "pane_container.swift", "app_shell.swift", "automation.swift", "app_intents.swift", "command_line.swift", "app-intents-protocols.json" }) |name| {
         pane_link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
+        automation_link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
     }
     const pane_client = b.addSystemCommand(&.{ "swiftc", "-target", b.fmt("{s}-apple-macos13.0", .{swift_arch}) });
     pane_client.addArgs(&.{ "-module-cache-path", b.pathFromRoot("tmp/swift-module-cache") });
@@ -315,16 +325,21 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     link.addFileInput(b.path("src/macos/app/terminal_view.swift"));
     link.addFileInput(b.path("src/macos/app/pane_container.swift"));
     link.addFileInput(b.path("src/macos/app/app_shell.swift"));
+    for ([_][]const u8{ "automation.swift", "app_intents.swift", "command_line.swift", "app-intents-protocols.json" }) |name| {
+        link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
+    }
 
     // The Zig core, then the terminal core's transitive C++ archives
     // (simdutf/highway), which a static library does not bundle itself.
     link.addFileArg(core.getEmittedBin());
     pane_link.addFileArg(core.getEmittedBin());
+    automation_link.addFileArg(core.getEmittedBin());
     for (vt.link_objects.items) |link_object| {
         switch (link_object) {
             .other_step => |compile| {
                 link.addFileArg(compile.getEmittedBin());
                 pane_link.addFileArg(compile.getEmittedBin());
+                automation_link.addFileArg(compile.getEmittedBin());
             },
             else => {},
         }
@@ -355,16 +370,43 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     });
 
     const app_step = b.step("macos-app", "Assemble the launchable Mostty.app");
+    const install_sdef = b.addInstallFileWithDir(b.path("src/macos/app/Mostty.sdef"), .{ .custom = "Mostty.app/Contents/Resources" }, "Mostty.sdef");
+    const install_resources = b.addInstallDirectory(.{
+        .source_dir = b.path("resources"),
+        .install_dir = .{ .custom = "Mostty.app/Contents/Resources" },
+        .install_subdir = "",
+    });
+    const metadata = b.addSystemCommand(&.{"bash"});
+    metadata.addFileArg(b.path("src/macos/app/extract-intents.sh"));
+    metadata.addDirectoryArg(b.path("src/macos/app"));
+    metadata.addArg(b.fmt("{s}-apple-macos13.0", .{swift_arch}));
+    metadata.addFileArg(intent_constants);
+    const metadata_dir = metadata.addOutputDirectoryArg("intent-resources");
+    const install_metadata = b.addInstallDirectory(.{
+        .source_dir = metadata_dir,
+        .install_dir = .{ .custom = "Mostty.app/Contents/Resources" },
+        .install_subdir = "",
+    });
     for ([_]*std.Build.Step{
         &install_exe.step,
         &install_plist.step,
         &install_icon.step,
         &install_icon_assets.step,
         &install_themes.step,
+        &install_resources.step,
+        &install_sdef.step,
+        &install_metadata.step,
     }) |step| {
         app_step.dependOn(step);
         b.getInstallStep().dependOn(step);
     }
+    b.step("check-macos-automation", "Compile native scripting and App Intents acceptance tests").dependOn(&automation_link.step);
+    const automation_run = b.addSystemCommand(&.{"bash"});
+    automation_run.addFileArg(b.path("tests/macos/automation.sh"));
+    automation_run.addFileArg(automation_exe);
+    automation_run.addArg(b.getInstallPath(.{ .custom = "Mostty.app" }, ""));
+    automation_run.step.dependOn(app_step);
+    b.step("test-macos-automation", "Exercise shell integration, AppleScript, and App Intents with real terminal panes").dependOn(&automation_run.step);
 }
 
 fn addMacosFrameworks(module: *std.Build.Module) void {
@@ -428,6 +470,12 @@ fn buildWindows(
         .install_subdir = "themes",
     });
     b.getInstallStep().dependOn(&install_themes.step);
+    const install_resources = b.addInstallDirectory(.{
+        .source_dir = b.path("resources"),
+        .install_dir = .{ .custom = "share" },
+        .install_subdir = "",
+    });
+    b.getInstallStep().dependOn(&install_resources.step);
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(&install.step);

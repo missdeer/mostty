@@ -136,6 +136,15 @@ func stubWrite(_ tab: OpaquePointer?, _ pointer: UnsafePointer<UInt8>?, _ length
     written.append(contentsOf: UnsafeBufferPointer(start: pointer, count: length))
 }
 private var renderedCols: UInt32 = 0
+@_cdecl("mostty_tab_input")
+func stubInput(_ tab: OpaquePointer?, _ pointer: UnsafePointer<UInt8>?, _ length: Int) -> Bool {
+    stubWrite(tab, pointer, length)
+    return true
+}
+@_cdecl("mostty_tab_pwd")
+func stubPwd(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ capacity: Int) -> Int { 0 }
+@_cdecl("mostty_tab_at_prompt")
+func stubAtPrompt(_ tab: OpaquePointer?) -> Bool { false }
 private var renderedRows: UInt32 = 0
 @_cdecl("mostty_tab_set_surface")
 func stubSetSurface(_ tab: OpaquePointer?, _ width: UInt32, _ height: UInt32, _ scale: Float,

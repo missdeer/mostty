@@ -24,6 +24,7 @@ run_suite() {
 }
 run_suite unit zig build test --global-cache-dir .zig-cache --summary all
 run_suite bundle-themes swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/bundle-themes.swift zig-out/Mostty.app
+run_suite bundle-integrations swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/resource-bundle.swift zig-out/Mostty.app
 # Production AppKit title handling with bridge doubles; no windows, Metal or
 # pointer permission. Keep this outside the native GUI capability gates.
 run_suite titles bash tests/macos/interactions.sh --titles-only
@@ -34,6 +35,7 @@ if [ "$preflight_build" -ne 0 ]; then
     exit 1
 fi
 if tmp/ci-macos/preflight; then
+    run_suite automation zig build test-macos-automation --global-cache-dir .zig-cache --summary all
     run_suite panes zig build test-macos-panes --global-cache-dir .zig-cache --summary all
     run_suite pane-config zig build test-macos-pane-config --global-cache-dir .zig-cache --summary all
     run_suite clipboard bash tests/macos/clipboard.sh
@@ -47,10 +49,11 @@ if tmp/ci-macos/preflight; then
         run_suite interactions-compile bash tests/macos/interactions.sh --compile-only
     fi
 else
-    for suite in panes pane-config clipboard scrollbar interactions; do
+    for suite in automation panes pane-config clipboard scrollbar interactions; do
         printf '%s\tblocked\tGUI/Metal unavailable\n' "$suite" >> "$summary"
     done
     run_suite panes-compile zig build check-macos-panes --global-cache-dir .zig-cache --summary all
+    run_suite automation-compile zig build check-macos-automation --global-cache-dir .zig-cache --summary all
     run_suite clipboard-compile bash tests/macos/clipboard.sh --compile-only
     run_suite scrollbar-compile bash tests/macos/scrollbar.sh --compile-only
     run_suite interactions-compile bash tests/macos/interactions.sh --compile-only

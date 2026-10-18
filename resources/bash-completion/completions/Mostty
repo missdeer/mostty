@@ -1,0 +1,17 @@
+_mostty() {
+    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+    local options='--help --font-size --background-opacity --background-blur +list-themes +validate-config'
+    if [[ " ${COMP_WORDS[*]} " == *' +validate-config '* ]]; then options+=' --config-file'; fi
+    if [[ $OSTYPE != darwin* ]]; then options+=' --ttf --renderer'; fi
+    case "$prev" in
+        --ttf|--config-file)
+            COMPREPLY=()
+            while IFS= read -r path; do COMPREPLY+=("$path"); done < <(compgen -f -- "$cur")
+            return ;;
+        --renderer) COMPREPLY=( $(compgen -W 'd3d11 d3d12 opengl pure-opengl vulkan native-vulkan' -- "$cur") ); return ;;
+        --background-blur) COMPREPLY=( $(compgen -W 'true false' -- "$cur") ); return ;;
+        --font-size|--background-opacity) COMPREPLY=(); return ;;
+    esac
+    COMPREPLY=( $(compgen -W "$options" -- "$cur") )
+}
+complete -F _mostty Mostty mostty
