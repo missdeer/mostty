@@ -22,7 +22,7 @@ fi
 CONST_ARGS=()
 if [[ "${1:-}" == "--metadata" ]]; then
     CONST_ARGS=(-whole-module-optimization -emit-const-values-path "$2"
-        -const-gather-protocols-list "$SRCDIR/app-intents-protocols.json")
+        -Xfrontend -const-gather-protocols-list -Xfrontend "$SRCDIR/app-intents-protocols.json")
     shift 2
 fi
 
