@@ -21,6 +21,7 @@ pub const HandlerFn = *const fn (
 //         and then need the default-window-proc post-processing).
 // value = concrete WndProc result.
 const TABLE = [_]struct { msg: u32, handler: HandlerFn }{
+    .{ .msg = win32.WM_COPYDATA, .handler = &@import("../automation.zig").onCopyData },
     // lifecycle
     .{ .msg = win32.WM_CREATE, .handler = &lifecycle.onCreate },
     .{ .msg = win32.WM_CLOSE, .handler = &lifecycle.onClose },

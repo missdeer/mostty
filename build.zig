@@ -479,6 +479,7 @@ fn buildWindows(
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(&install.step);
+    run.step.dependOn(&install_resources.step);
     if (b.args) |a| run.addArgs(a);
     b.step("run", "").dependOn(&run.step);
 

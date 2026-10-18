@@ -5,6 +5,24 @@ builds ship it in `share/` next to the distribution's executable and themes.
 
 ## Shell integration
 
+On Windows, interactive PowerShell (`pwsh` and Windows PowerShell), cmd, and
+Git Bash receive integration automatically. PowerShell keeps its normal profiles
+and prompt and reports titles, directories and OSC 133 prompt/command boundaries.
+cmd keeps its existing prompt and reports titles and directories; it does not
+report semantic command boundaries. Git Bash uses the bundled Bash hooks and
+preserves its startup-file options. `shell-integration = false` disables injection.
+Shell command/script arguments and unrecognized launchers (including WSL wrappers)
+are passed through without injection. WSL users can install/source the Bash/Zsh
+resources inside their distribution; POSIX-only directories are not inherited as
+Windows directories.
+
+Windows looks for `share/mostty` beside the executable (distribution layout), then
+in its parent (the `zig-out/bin` build layout), or uses `MOSTTY_RESOURCES_DIR`.
+New tabs and splits inherit the active pane's existing local drive directory unless
+the launcher specifies a directory. OSC 7 URI escapes and Git Bash `/c/...` drive
+paths are decoded; remote hosts, UNC reports, malformed URIs and WSL paths are
+excluded from local inheritance.
+
 On macOS, supported interactive login shells receive the bundled integration
 automatically. Zsh retains the user's `ZDOTDIR`, `.zshenv`, `.zprofile`, and
 `.zshrc`; modern Bash retains its normal login startup files. Apple's `/bin/bash`
@@ -81,6 +99,41 @@ For `bat`, install `bat/syntaxes/mostty.sublime-syntax` under the directory prin
 by `bat --config-dir`, then run `bat cache --build`. Use
 `bat --language 'Mostty Config' <config-file>` for a config with no extension.
 
+## Terminal automation (Windows)
+
+`Mostty +control [--target-process <pid>]` reads one UTF-8 JSON request from stdin
+and writes a JSON response to stdout, without opening a terminal window. Select
+the process explicitly when several Mostty windows are running. The bundled
+PowerShell client handles UTF-8, quoting, output capture and error responses:
+
+```powershell
+$control = './share/mostty/Invoke-Mostty.ps1'
+$pane = (& $control -Request @{ action = 'new_tab'; directory = 'C:\work' }).terminal
+& $control -Request @{ action = 'input'; id = $pane.id; text = "pwd`r" }
+& $control -Request @{ action = 'split'; id = $pane.id; direction = 'down' }
+& $control -Request @{ action = 'get'; id = $pane.id }
+& $control -Request @{ action = 'list' }
+```
+
+Actions are `list`, `get`, `new_tab`, `focus`, `split`, `input` and `close`.
+Omit `id` to address the active pane. `new_tab` accepts an optional `command`
+(a Windows launcher command line) and `directory`. Split directions are `right`
+and `down`. Input is literal; include a carriage return to submit a command.
+Responses include `ok`, `error`, `terminal` and `terminals`; terminal details include
+`id`, `title`, `directory`, `at_prompt` and `active`. IDs belong to one process
+instance; closed panes and IDs from another instance fail. Close follows
+`confirm-close-surface`; cancelling returns `CloseCancelled`, and successful
+close is queued through the normal pane lifecycle. Configuration changes to the
+confirmation policy apply to keyboard/menu and window close as well.
+
+The transport uses synchronous `WM_COPYDATA` on the application UI thread, with
+64 KiB request/response limits. It uses normal Windows message access rules;
+controlling an elevated Mostty requires a client at the same integrity level.
+Transport/argument errors exit with status 2; rejected operations exit with 1.
+The client waits up to two minutes for a request, including any confirmation
+dialog. A timeout leaves the operation's outcome unknown; inspect the live panes
+before retrying an operation that creates, inputs to, or closes a session.
+
 ## AppleScript (macOS)
 
 `Mostty.sdef` exposes a flat list of terminal panes. IDs are stable within an app
@@ -112,6 +165,11 @@ against live pane IDs; restarting Mostty invalidates references from an earlier
 process. Actions run in the foreground and use the same operations as AppleScript.
 
 ## Verification
+
+On Windows, `tools/terminal-integration-acceptance.ps1` launches isolated app
+instances with real ConPTY shells and exercises the control interface, directory
+inheritance, literal input, invalid IDs, injection opt-out and shell command
+preservation. Evidence is written beneath the repository's `tmp/` directory.
 
 `zig build test-macos-automation --global-cache-dir .zig-cache` runs native
 acceptance tests in a separate test app with real PTYs and Metal. It exercises

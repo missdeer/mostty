@@ -64,7 +64,7 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
         if (window.confirming_close) return 0;
         window.confirming_close = true;
         defer window.confirming_close = false;
-        if (!tab_mgmt.confirmYesNo(
+        if (global.config.confirm_close_surface and !tab_mgmt.confirmYesNo(
             window.hwnd,
             win32.L("Close window and all tabs?"),
             win32.L("Mostty"),

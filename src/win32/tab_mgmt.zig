@@ -12,6 +12,7 @@ const state = @import("state.zig");
 const tooltip = @import("tooltip.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const shell_integration = @import("shell_integration.zig");
 const window_geom = @import("window_geom.zig");
 
 const ChildProcess = cp_mod.ChildProcess;
@@ -121,12 +122,16 @@ pub fn newTab(window: *Window) void {
 }
 
 pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) void {
+    _ = openTab(window, launcher);
+}
+
+pub fn openTab(window: *Window, launcher: ?*const Config.Launcher) ?*Tab {
     if (window.tabs.items.len >= types.MAX_TABS or window.panes.items.len >= types.MAX_PANES) {
         std.log.warn("tab or pane limit reached", .{});
-        return;
+        return null;
     }
     const gpa = global.gpa.allocator();
-    const id = allocatePaneId(window) orelse return;
+    const id = allocatePaneId(window) orelse return null;
     const tab = gpa.create(state.Tab) catch util.oom(error.OutOfMemory);
     tab.* = .{
         .id = id,
@@ -134,16 +139,17 @@ pub fn newTabWithLauncher(window: *Window, launcher: ?*const Config.Launcher) vo
         .layout = state.SplitLayout.init(gpa, id) catch util.oom(error.OutOfMemory),
         .input_layout = state.systemDefaultInputLayout(),
     };
-    if (createPane(window, tab, id, launcher) == null) {
+    const pane = createPane(window, tab, id, launcher) orelse {
         tab.layout.deinit();
         gpa.destroy(tab);
-        return;
-    }
+        return null;
+    };
     window.tabs.append(gpa, tab) catch util.oom(error.OutOfMemory);
     window.active_index = window.tabs.items.len - 1;
     native.reflow(window);
     window.onActiveChanged();
     native.focusActive(window);
+    return pane;
 }
 
 fn allocatePaneId(window: *Window) ?types.TabId {
@@ -176,25 +182,29 @@ fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*c
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    var application_name: ?[*:0]const u16 = null;
-    var command_line: ?[*:0]u16 = null;
+    const a = arena.allocator();
+    const launch = shell_integration.prepare(a, if (launcher) |l| l.command_line else "C:\\Windows\\System32\\cmd.exe", global.config.env, global.config.shell_integration) catch |e| util.oom(e);
+    const command_line = util.utf16ZAllocMut(a, launch.command) catch |e| util.oom(e);
     var working_directory: ?[*:0]const u16 = null;
     if (launcher) |L| {
-        const cmd_u16 = util.utf16ZAllocMut(arena.allocator(), L.command_line) catch |e| util.oom(e);
-        command_line = cmd_u16;
         if (L.working_directory.len > 0) {
             const cwd_u16 = util.utf16ZAllocConst(arena.allocator(), L.working_directory) catch |e| util.oom(e);
             working_directory = cwd_u16;
         }
-    } else {
-        application_name = win32.L("C:\\Windows\\System32\\cmd.exe");
+    }
+    if (working_directory == null and window.tabs.items.len > 0) {
+        if (window.active().term.getPwd()) |report| {
+            if (shell_integration.localDirectory(a, report) catch |e| util.oom(e)) |directory| {
+                working_directory = util.utf16ZAllocConst(a, directory) catch |e| util.oom(e);
+            }
+        }
     }
 
     var err: Error = undefined;
     tab.child_process = ChildProcess.startConPtyWin32(
         &err,
         arena.allocator(),
-        application_name,
+        null,
         command_line,
         working_directory,
         window.hwnd,
@@ -203,7 +213,7 @@ fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*c
         tab.id,
         &tab.reader_stop,
         &tab.pty_ring,
-        global.config.env,
+        launch.env,
     ) catch {
         // User-configurable launchers can fail (bad path, missing exe, etc.);
         // surface and abandon this tab rather than crashing the whole app.
@@ -271,7 +281,7 @@ pub fn confirmAndCloseTab(window: *Window, tab_id: TabId) void {
     if (window.confirming_close) return;
     window.confirming_close = true;
     defer window.confirming_close = false;
-    if (!confirmYesNo(
+    if (global.config.confirm_close_surface and !confirmYesNo(
         window.hwnd,
         win32.L("Close this tab?"),
         win32.L("Mostty"),
@@ -365,41 +375,51 @@ fn releasePane(window: *Window, tab: *Tab) void {
 }
 
 pub fn splitActive(window: *Window, axis: state.SplitLayout.Axis) void {
+    _ = splitActiveResult(window, axis);
+}
+
+pub fn splitActiveResult(window: *Window, axis: state.SplitLayout.Axis) ?*Tab {
     if (!native.supported()) {
         _ = win32.MessageBoxW(window.hwnd, win32.L("Native split panes are not yet supported by the selected renderer. The selected renderer has not been changed."), win32.L("Mostty split panes"), .{ .ICONASTERISK = 1 });
-        return;
+        return null;
     }
-    if (window.tabs.items.len == 0 or window.panes.items.len >= types.MAX_PANES) return;
+    if (window.tabs.items.len == 0 or window.panes.items.len >= types.MAX_PANES) return null;
     native.reflow(window);
     const tab = window.activeTab();
     const previous = tab.layout.active.?;
     if (!tab.layout.canSplit(previous, axis)) {
         std.log.warn("pane {} is too small to split", .{previous});
-        return;
+        return null;
     }
-    const id = allocatePaneId(window) orelse return;
+    const id = allocatePaneId(window) orelse return null;
     const launcher: ?*const Config.Launcher = if (global.config.launchers.len > 0) &global.config.launchers[0] else null;
-    const pane = createPane(window, tab, id, launcher) orelse return;
+    const pane = createPane(window, tab, id, launcher) orelse return null;
     tab.layout.split(previous, id, axis) catch |err| {
         releasePane(window, pane);
         std.log.warn("cannot split pane {}: {s}", .{ previous, @errorName(err) });
-        return;
+        return null;
     };
     native.reflow(window);
     window.onActiveChanged();
     native.focusActive(window);
+    return pane;
 }
 
 pub fn closeActivePane(window: *Window) void {
     if (window.tabs.items.len == 0) return;
-    const id = window.active().id;
-    if (window.confirming_close) return;
+    _ = closePane(window, window.active().id);
+}
+
+pub fn closePane(window: *Window, id: TabId) bool {
+    if (window.confirming_close) return false;
+    if (window.findById(id) == null) return false;
     window.confirming_close = true;
     defer window.confirming_close = false;
-    if (!confirmYesNo(window.hwnd, win32.L("Close this pane?"), win32.L("Mostty"))) return;
-    const pane = window.findById(id) orelse return;
+    if (global.config.confirm_close_surface and !confirmYesNo(window.hwnd, win32.L("Close this pane?"), win32.L("Mostty"))) return false;
+    const pane = window.findById(id) orelse return false;
     pane.closing = true;
     _ = win32.PostMessageW(window.hwnd, types.WM_APP_CLOSE_PANE, id, 0);
+    return true;
 }
 
 pub fn writeToPty(tab: *Tab, bytes: []const u8) void {

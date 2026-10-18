@@ -269,9 +269,9 @@ maximize: bool = false,
 // mode (the Raymond Chen recipe) so the distinction is meaningless on Windows
 // and shared Ghostty configs shouldn't warn.
 fullscreen: bool = false,
-// macOS prompts before closing a running session unless explicitly disabled.
+// Both hosts prompt before closing a running session unless explicitly disabled.
 confirm_close_surface: bool = true,
-// macOS injects the bundled integration into supported interactive shells.
+// Both hosts inject the bundled integration into supported interactive shells.
 shell_integration: bool = true,
 // Reloads retain warn-and-default behavior; CLI validation checks this count.
 diagnostic_count: usize = 0,

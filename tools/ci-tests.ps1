@@ -24,6 +24,7 @@ try {
     Invoke-Suite 'vulkan-self-test' { & tools/vulkan-acceptance.ps1 self-test }
     Invoke-Suite 'ci-result-test' { & tools/ci-result-test.ps1 }
     if ($Gui) {
+        Invoke-Suite 'terminal-integration-acceptance' { & tools/terminal-integration-acceptance.ps1 }
         Invoke-Suite 'startup-failure' { & tools/startup-failure.ps1 }
         Invoke-Suite 'pane-matrix-acceptance' { & tools/pane-matrix-acceptance.ps1 -SkipBuild }
         Invoke-Suite 'tabbar-acceptance' { & tools/tabbar-acceptance.ps1 }
@@ -36,7 +37,7 @@ try {
             } $baseline $renderer
         }
     } else {
-        foreach ($suite in @('startup-failure','pane-acceptance','pane-backend-acceptance','pane-matrix-acceptance','tabbar-acceptance','d3d11-close-redraw','vulkan-acceptance-local')) {
+        foreach ($suite in @('terminal-integration-acceptance','startup-failure','pane-acceptance','pane-backend-acceptance','pane-matrix-acceptance','tabbar-acceptance','d3d11-close-redraw','vulkan-acceptance-local')) {
             $results.Add([ordered]@{suite=$suite;status='blocked';detail='Requires an interactive desktop and renderer-capable GPU; dispatch GUI CI on an existing suitable runner'})
         }
     }

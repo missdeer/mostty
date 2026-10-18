@@ -1076,6 +1076,21 @@ tab, split, focus and close operations. Input enqueue errors propagate to automa
 callers. `Mostty.sdef` is installed into the bundle, and App Intents metadata is
 generated from Swift compiler constants by Apple's metadata processor.
 
+Windows prepares supported interactive PowerShell, cmd and Git Bash launches in
+`win32/shell_integration.zig` before ConPTY creation. Resource lookup covers both
+`share/mostty` beside a packaged executable and `../share/mostty` in a build tree.
+New tabs/splits inherit the active pane's reported existing local drive directory;
+explicit launcher directories win. URI decoding rejects remote/UNC/WSL paths and
+invalid escapes. Windows shell commands and unrecognized launchers are not injected.
+
+`win32/automation.zig` handles JSON `WM_COPYDATA` control requests on the UI thread,
+reusing tab/pane operations and the normal close confirmation. `Mostty +control`
+is a headless client with a message-only reply window and process selection.
+Requests and responses are limited to 64 KiB; responses are copied before the
+sender returns. IDs combine the process, an instance token and the monotonic pane
+ID. Close is posted through the existing lifecycle handlers, and nested control
+requests are rejected during model operations and modal close confirmation.
+
 
 ### 9.1 PTY → screen → frame
 

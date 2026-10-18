@@ -8,6 +8,8 @@ background_blur: ?bool = null,
 list_themes: bool = false,
 validate_config: bool = false,
 config_file: ?[]const u8 = null,
+control: bool = false,
+target_process: ?u32 = null,
 
 pub const RendererSelection = union(enum) {
     from_config,
@@ -31,6 +33,8 @@ pub fn usage() !void {
         \\  +list-themes             List available theme names
         \\  +validate-config         Validate configuration without opening a window
         \\  --config-file <path>     Configuration to validate
+        \\  +control                 Send a JSON request from stdin to a Windows instance
+        \\  --target-process <pid>    Target process for +control (required if multiple)
         \\
     );
 }
@@ -71,6 +75,10 @@ pub fn parse(args: *std.process.Args.Iterator) !Cmdline {
             result.list_themes = true;
         } else if (std.mem.eql(u8, arg, "+validate-config")) {
             result.validate_config = true;
+        } else if (std.mem.eql(u8, arg, "+control")) {
+            result.control = true;
+        } else if (std.mem.eql(u8, arg, "--target-process")) {
+            result.target_process = std.fmt.parseInt(u32, args.next() orelse errExit("--target-process requires a PID", .{}), 10) catch errExit("invalid process ID", .{});
         } else if (std.mem.eql(u8, arg, "--config-file")) {
             result.config_file = args.next() orelse errExit("--config-file requires a path", .{});
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -80,6 +88,8 @@ pub fn parse(args: *std.process.Args.Iterator) !Cmdline {
     }
     if (result.config_file != null and !result.validate_config) errExit("--config-file requires +validate-config", .{});
     if (result.list_themes and result.validate_config) errExit("choose one CLI action", .{});
+    if (result.target_process != null and !result.control) errExit("--target-process requires +control", .{});
+    if (result.control and (result.list_themes or result.validate_config or result.config_file != null)) errExit("choose one CLI action", .{});
     return result;
 }
 

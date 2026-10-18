@@ -53,7 +53,14 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
     var args = try process_args.iterateAllocator(global.gpa.allocator());
     defer args.deinit();
     var cmdline = try Cmdline.parse(&args);
-    cli_logging = cmdline.validate_config;
+    cli_logging = cmdline.validate_config or cmdline.control;
+    if (cmdline.control) {
+        @import("win32/automation.zig").runClient(global.gpa.allocator(), cmdline.target_process) catch |err| {
+            std.log.err("control: {t}", .{err});
+            std.process.exit(2);
+        };
+        return;
+    }
     if (try cmdline.runAction(global.gpa.allocator())) return;
     switch (cmdline.renderer) {
         .invalid => |value| {
