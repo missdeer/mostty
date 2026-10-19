@@ -375,7 +375,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
                     acquired = self.feedInFlight.wait(timeout: .now() + 0.1) == .success
                 }
                 if !acquired { break }
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [self] in
                     guard self.alive else { self.feedInFlight.signal(); return }
                     self.feedQueue.append(bytes) { [weak self] in
                         guard let self = self else { return }

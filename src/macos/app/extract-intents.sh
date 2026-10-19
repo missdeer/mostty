@@ -18,6 +18,6 @@ xcrun appintentsmetadataprocessor \
     --sdk-root "$(xcrun --sdk macosx --show-sdk-path)" \
     --xcode-version "$(xcodebuild -version | tail -n 1 | cut -d ' ' -f 3)" \
     --platform-family macOS --deployment-target 13.0 --target-triple "$TARGET" \
-    --source-file-list "$SOURCES" --swift-const-vals-list "$VALUES"
+    --source-file-list "$SOURCES" --swift-const-vals-list "$VALUES" 2>&1
 test -s "$OUT/Metadata.appintents/extract.actionsdata"
 rm "$SOURCES" "$VALUES"
