@@ -133,3 +133,15 @@ The default terminal font is **Menlo at 13pt**. macOS supports ordered text and 
 | Open configuration | Window system menu > Open Settings File... | `Cmd+,` |
 
 On both platforms, click a tab to activate it, its close button to close it, or `+` to open a new tab. Right-click `+` to choose a launcher or SSH host. The menu reads concrete `Host` aliases from the top-level `~/.ssh/config` each time it opens; wildcard/negated patterns and `Include` files are not listed. Double-click a URL to open it or another word to select it. Hold `Shift` to select text or scroll locally when a terminal application has enabled mouse reporting.
+
+### License
+
+Mostty's own code is licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`). See [LICENSE](LICENSE) for the complete license text.
+
+Third-party components retain their respective licenses and copyright notices.
+In particular, `libghostty-vt` is MIT-licensed; see
+[Ghostty's license at the revision pinned by Mostty](https://github.com/ghostty-org/ghostty/blob/5dc28bb8eebaf57a6c793a406bfea8c632d4fa94/LICENSE).
+The GPL-3.0-only designation for Mostty's own code does not relicense these
+third-party components. Refer to their accompanying license files and upstream
+notices for the applicable terms.
