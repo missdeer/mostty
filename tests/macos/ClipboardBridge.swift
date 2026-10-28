@@ -95,6 +95,8 @@ func clipboard_test_created_tab() -> OpaquePointer? { tabCount > 0 ? OpaquePoint
 func clipboard_test_write_tab() -> OpaquePointer? { writeTab }
 @_cdecl("mostty_tab_destroy")
 func stubDestroy(_ tab: OpaquePointer?) {}
+@_cdecl("mostty_tab_set_clipboard_writer")
+func stubSetClipboardWriter(_ tab: OpaquePointer?, _ writer: MosttyClipboardWriter?) {}
 @_cdecl("mostty_config_background_opacity")
 func stubBackgroundOpacity() -> Float { 1 }
 // Config's own theme defaults, so chrome assertions track the real palette.

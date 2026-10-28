@@ -312,6 +312,10 @@ struct PaneTests {
             })
         }
         defer { restorePasteboard() }
+        input(panes[0], "O")
+        expect(waitUntil { pasteboard.string(forType: .string) == "PTY OSC 52 中文 👩‍💻" },
+               "OSC 52 travels from a real child PTY through the main-thread pump to NSPasteboard")
+        checkRemoteClipboard(panes[0].view.testSession!, expect: expect)
         input(panes[1], "B")
         settle()
         pasteboard.clearContents()
@@ -581,5 +585,47 @@ struct PaneTests {
         try restoreConfig()
         print("\(failures) native pane checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    private static func checkRemoteClipboard(_ session: OpaquePointer, expect: (Bool, String) -> Void) {
+        let pasteboard = NSPasteboard.general
+        func feed(_ sequence: String, chunk: Int = 173) {
+            let bytes = Array(sequence.utf8)
+            bytes.withUnsafeBufferPointer { buffer in
+                for offset in stride(from: 0, to: bytes.count, by: chunk) {
+                    mostty_tab_feed(session, buffer.baseAddress!.advanced(by: offset), min(chunk, bytes.count - offset))
+                }
+            }
+        }
+        func osc52(_ data: Data, destination: String = "c", terminator: String = "\u{7}") -> String {
+            "\u{1b}]52;\(destination);\(data.base64EncodedString())\(terminator)"
+        }
+        let unicode = "SSH Codex 中文 👩‍💻\nsecond line"
+        feed(osc52(Data(unicode.utf8)), chunk: 1)
+        expect(pasteboard.string(forType: .string) == unicode,
+               "fragmented OSC 52 BEL writes exact Unicode and multiline text to the macOS clipboard")
+        feed(osc52(Data("ST terminator".utf8), destination: "", terminator: "\u{1b}\\"))
+        expect(pasteboard.string(forType: .string) == "ST terminator",
+               "OSC 52 with the default destination and ST terminator writes the macOS clipboard")
+        let large = String(repeating: "remote selection 中文 ", count: 2000)
+        feed(osc52(Data(large.utf8)))
+        expect(pasteboard.string(forType: .string) == large,
+               "large remote selections survive VT feed boundaries without truncation")
+        let rejected = [
+            "\u{1b}]52;c;%%%\u{7}",
+            osc52(Data([0xff])),
+            osc52(Data("prefix\0suffix".utf8)),
+            "\u{1b}]52;c;?\u{7}",
+            osc52(Data("primary selection".utf8), destination: "p"),
+        ]
+        let rules = ["invalid base64", "invalid UTF-8", "embedded NUL", "clipboard read query", "primary selection"]
+        for (sequence, rule) in zip(rejected, rules) {
+            let count = pasteboard.changeCount
+            feed(sequence)
+            expect(pasteboard.changeCount == count && pasteboard.string(forType: .string) == large,
+                   "\(rule) leaves the macOS clipboard untouched")
+        }
+        feed(osc52(Data()))
+        expect(pasteboard.string(forType: .string) == "", "an empty OSC 52 write clears the macOS text clipboard")
     }
 }

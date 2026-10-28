@@ -34,6 +34,7 @@ pub const Exit = union(enum) {
 pub const Hooks = struct {
     context: *anyopaque,
     title_changed: ?*const fn (*anyopaque, *TerminalSession) void = null,
+    clipboard_write: ?*const fn (*anyopaque, vt.clipboard.Write) void = null,
 };
 
 pub const Options = struct {
@@ -87,6 +88,7 @@ pub fn init(self: *PtySession, options: Options) !void {
             .context = self,
             .title_changed = onTitleChanged,
             .write_pty = onWritePty,
+            .clipboard_write = onClipboardWrite,
             .size = onSize,
         },
     });
@@ -276,6 +278,19 @@ fn onWritePty(context: *anyopaque, bytes: []const u8) void {
         // worker latches a permanent failure in WriteQueue.failed.
         std.log.warn("PTY reply rejected: {s}", .{@errorName(err)});
     };
+}
+
+fn onClipboardWrite(context: *anyopaque, request: vt.clipboard.Write) void {
+    const self: *PtySession = @ptrCast(@alignCast(context));
+    const hooks = self.hooks orelse {
+        request.reply(.unsupported);
+        return;
+    };
+    const callback = hooks.clipboard_write orelse {
+        request.reply(.unsupported);
+        return;
+    };
+    callback(hooks.context, request);
 }
 
 fn onSize(_: *anyopaque, term: *vt.Terminal) TerminalSession.SizeResponse {

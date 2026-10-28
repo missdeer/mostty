@@ -42,6 +42,7 @@ fn addRuntimeBench(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         }),
     });
     tests.root_module.addImport("vt", vt);
+    addMacosSdkPaths(vt, tests);
     if (os == .windows) {
         const shaders = buildShaders(b);
         const z2d = b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d");
@@ -90,6 +91,7 @@ fn addMacosGridTests(
         }),
     });
     tests.root_module.addImport("vt", vt);
+    addMacosSdkPaths(vt, tests);
     // Grid defaults now use Config, whose parser tests need the Windows API.
     if (target.result.os.tag == .windows) {
         if (b.lazyDependency("win32", .{})) |win32_dep| {
@@ -148,6 +150,7 @@ fn addCoreTests(
         }),
     });
     tests.root_module.addImport("vt", vt);
+    addMacosSdkPaths(vt, tests);
     b.step("check-core", "Compile platform-neutral terminal core tests").dependOn(&tests.step);
     if (canRunTarget(b, target)) {
         const run_tests = b.addRunArtifact(tests);
@@ -175,6 +178,7 @@ fn buildMacos(
         }),
     });
     core.root_module.addImport("vt", vt);
+    addMacosSdkPaths(vt, core);
     core.root_module.addImport("z2d", b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d"));
     core.root_module.linkSystemLibrary("c", .{});
     b.installArtifact(core);
@@ -190,6 +194,7 @@ fn buildMacos(
             }),
         });
         tests.root_module.addImport("vt", vt);
+        addMacosSdkPaths(vt, tests);
         tests.root_module.addImport("z2d", b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d"));
         addMacosFrameworks(tests.root_module);
         tests.root_module.linkSystemLibrary("c", .{});
@@ -261,6 +266,7 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
         }),
     });
     core.root_module.addImport("vt", vt);
+    addMacosSdkPaths(vt, core);
     core.root_module.addImport("z2d", b.dependency("z2d", .{ .target = app_target, .optimize = .ReleaseFast }).module("z2d"));
     core.root_module.linkSystemLibrary("c", .{});
 
@@ -407,6 +413,16 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     automation_run.addArg(b.getInstallPath(.{ .custom = "Mostty.app" }, ""));
     automation_run.step.dependOn(app_step);
     b.step("test-macos-automation", "Exercise shell integration, AppleScript, and App Intents with real terminal panes").dependOn(&automation_run.step);
+}
+
+// Final consumers need the same SDK paths and Xcode math-header compatibility
+// as Ghostty's C++ dependencies, including when targeting the host OS version.
+fn addMacosSdkPaths(vt: *std.Build.Module, step: *std.Build.Step.Compile) void {
+    if (@import("builtin").os.tag != .macos or step.rootModuleTarget().os.tag != .macos) return;
+    const apple_sdk = vt.owner.lazyImport(@import("ghostty"), "apple_sdk").?;
+    apple_sdk.addPaths(vt.owner, step) catch |err| {
+        std.debug.panic("failed to configure the macOS SDK: {}", .{err});
+    };
 }
 
 fn addMacosFrameworks(module: *std.Build.Module) void {

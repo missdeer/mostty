@@ -427,6 +427,10 @@ On macOS, `PtySession` owns the shell child and PTY master around the same
 state, resize both sides as one operation, and explicitly reap the child. Exec
 startup uses a close-on-exec handshake so a missing shell is reported to the
 caller and cleaned up before initialization succeeds.
+OSC 52 writes pass through `PtySession` and the C-ABI clipboard-writer callback
+to Swift/AppKit's `NSPasteboard` synchronously on the main thread. Like Windows,
+macOS accepts only standard-clipboard text writes, validates UTF-8 and rejects
+embedded NUL before changing the clipboard. Clipboard reads remain disabled.
 
 Terminal allocations must not use a pane-lifetime arena: image replacement,
 eviction and decode scratch release memory while the pane remains alive.

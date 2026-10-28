@@ -57,6 +57,9 @@ while true {
         switch String(decoding: data, as: UTF8.self) {
         case "M": try output("\u{1b}[?1003h\u{1b}[?1006h")
         case "B": try output("\u{1b}[?2004h")
+        case "O":
+            let text = Data("PTY OSC 52 中文 👩‍💻".utf8).base64EncodedString()
+            try output("\u{1b}]52;c;\(text)\u{7}")
         case "G":
             paused = true
             let pixels = Data(Array(repeating: [UInt8(255), 0, 0, 255], count: 4).flatMap { $0 }).base64EncodedString()

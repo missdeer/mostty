@@ -30,6 +30,7 @@ comptime {
 }
 
 const allocator = std.heap.c_allocator;
+const ClipboardWriter = *const fn ([*]const u8, usize) callconv(.c) bool;
 
 const SelectionInput = struct {
     start_col: u32,
@@ -45,6 +46,7 @@ fn runtimeIo() std.Io {
 const Tab = struct {
     pty: PtySession,
     renderer: CoreTextRenderer,
+    clipboard_writer: ?ClipboardWriter = null,
     exit_code: ?i32 = null,
     mouse_last_cell: ?vt.Coordinate = null,
     selection_input: ?SelectionInput = null,
@@ -200,14 +202,50 @@ fn createTab(pixel_width: u32, pixel_height: u32, scale: f32, launcher: ?*const 
         .images_enabled = cfg.images_enabled,
         .cell_width = tab.renderer.metrics.cell_width,
         .cell_height = tab.renderer.metrics.cell_height,
+        .hooks = .{ .context = tab, .clipboard_write = onClipboardWrite },
     });
     cfg.theme.applyToNewTerminal(tab.pty.terminal.term);
     tab.exit_code = null;
+    tab.clipboard_writer = null;
     tab.mouse_last_cell = null;
     tab.selection_input = null;
     tab.hover_cell = null;
     if (builtin.is_test) tab.hover_detections = 0;
     return tab;
+}
+
+export fn mostty_tab_set_clipboard_writer(tab: ?*Tab, writer: ?ClipboardWriter) void {
+    const t = tab orelse return;
+    t.clipboard_writer = writer;
+}
+
+fn onClipboardWrite(context: *anyopaque, request: vt.clipboard.Write) void {
+    const tab: *Tab = @ptrCast(@alignCast(context));
+    const writer = tab.clipboard_writer orelse {
+        request.reply(.unsupported);
+        return;
+    };
+    if (request.location != .standard) {
+        request.reply(.unsupported);
+        return;
+    }
+    var text: []const u8 = "";
+    if (request.contents.len > 0) {
+        for (request.contents) |content| {
+            if (vt.clipboard.isTextMime(content.mime)) {
+                text = content.data;
+                break;
+            }
+        } else {
+            request.reply(.unsupported);
+            return;
+        }
+    }
+    if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) {
+        request.reply(.invalid_data);
+        return;
+    }
+    request.reply(if (writer(text.ptr, text.len)) .{ .success = .{} } else .io_error);
 }
 
 // Resolves the initial CWD for a new tab: the selected launcher's

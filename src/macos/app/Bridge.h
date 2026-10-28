@@ -35,6 +35,10 @@ MosttyTab *mostty_tab_create(uint32_t pixel_width, uint32_t pixel_height, float 
 MosttyTab *mostty_tab_create_with_launcher(uint32_t pixel_width, uint32_t pixel_height,
                                          float scale, const char *command, const char *directory);
 void mostty_tab_destroy(MosttyTab *tab);
+/* Register before feeding output. Called synchronously on the main thread;
+   UTF-8 text is borrowed for the call, and false reports a pasteboard failure. */
+typedef bool (*MosttyClipboardWriter)(const uint8_t *ptr, size_t len);
+void mostty_tab_set_clipboard_writer(MosttyTab *tab, MosttyClipboardWriter writer);
 
 /* Configuration. Values are read from the file the app watches; `reload` returns
    false when it was unreadable, leaving the previous config in place. */

@@ -294,6 +294,13 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         }
         guard let t = created else { return }
         tab = t
+        mostty_tab_set_clipboard_writer(t) { pointer, length in
+            precondition(Thread.isMainThread)
+            let bytes = UnsafeBufferPointer(start: pointer, count: length)
+            guard let text = String(bytes: bytes, encoding: .utf8) else { return false }
+            NSPasteboard.general.clearContents()
+            return NSPasteboard.general.setString(text, forType: .string)
+        }
 
         guard let devPtr = mostty_tab_metal_device(t),
               let dev = Unmanaged<AnyObject>.fromOpaque(devPtr).takeUnretainedValue() as? MTLDevice,
