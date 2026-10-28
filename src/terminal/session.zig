@@ -53,6 +53,7 @@ pub const Hooks = struct {
     context: *anyopaque,
     title_changed: ?*const fn (*anyopaque, *vt.Terminal) void = null,
     write_pty: ?*const fn (*anyopaque, []const u8) void = null,
+    clipboard_write: ?*const fn (*anyopaque, vt.clipboard.Write) void = null,
     size: ?*const fn (*anyopaque, *vt.Terminal) SizeResponse = null,
 };
 
@@ -91,6 +92,7 @@ pub fn init(self: *Session, options: Options) !void {
         var effects: vt.TerminalStream.Handler.Effects = .readonly;
         effects.title_changed = onTitleChanged;
         effects.write_pty = onWritePty;
+        effects.clipboard_write = onClipboardWrite;
         effects.device_attributes = onDeviceAttributes;
         effects.xtversion = onXtVersion;
         effects.size = onSize;
@@ -162,6 +164,15 @@ fn onWritePty(handler: *vt.TerminalStream.Handler, data: []const u8) void {
     const self = sessionFromEffectHandler(handler);
     const callback = self.hooks.write_pty orelse return;
     callback(self.hooks.context, data);
+}
+
+fn onClipboardWrite(handler: *vt.TerminalStream.Handler, request: vt.clipboard.Write) void {
+    const self = sessionFromEffectHandler(handler);
+    const callback = self.hooks.clipboard_write orelse {
+        request.reply(.unsupported);
+        return;
+    };
+    callback(self.hooks.context, request);
 }
 
 fn onDeviceAttributes(handler: *vt.TerminalStream.Handler) effectReturnType("device_attributes") {

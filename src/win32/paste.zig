@@ -1,5 +1,6 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
+const vt = @import("vt");
 
 const state = @import("state.zig");
 const util = @import("util.zig");
@@ -10,25 +11,28 @@ const Window = state.Window;
 const paste_core = @import("../terminal/paste.zig");
 
 pub fn copyToClipboard(hwnd: win32.HWND, utf8: []const u8) void {
+    _ = writeClipboard(hwnd, utf8);
+}
+
+pub fn writeClipboard(hwnd: win32.HWND, utf8: []const u8) vt.clipboard.Write.Result {
+    const u16_len = std.unicode.calcUtf16LeLen(utf8) catch {
+        std.log.err("copy: invalid utf-8 in clipboard text", .{});
+        return .invalid_data;
+    };
+    if (std.mem.indexOfScalar(u8, utf8, 0) != null) {
+        std.log.err("copy: embedded NUL in clipboard text", .{});
+        return .invalid_data;
+    }
     if (win32.OpenClipboard(hwnd) == 0) {
         std.log.err("copy: OpenClipboard failed, error={f}", .{win32.GetLastError()});
-        return;
+        return .busy;
     }
     defer if (0 == win32.CloseClipboard()) win32.panicWin32("CloseClipboard", win32.GetLastError());
 
-    if (win32.EmptyClipboard() == 0) {
-        std.log.err("copy: EmptyClipboard failed, error={f}", .{win32.GetLastError()});
-        return;
-    }
-
-    const u16_len = std.unicode.calcUtf16LeLen(utf8) catch {
-        std.log.err("copy: invalid utf-8 in selection", .{});
-        return;
-    };
     const hmem = win32.GlobalAlloc(.{ .MEM_MOVEABLE = 1 }, (u16_len + 1) * @sizeOf(u16));
     if (hmem == 0) {
         std.log.err("copy: GlobalAlloc failed, error={f}", .{win32.GetLastError()});
-        return;
+        return .io_error;
     }
     var hmem_owned = true;
     defer if (hmem_owned) if (0 != win32.GlobalFree(hmem)) win32.panicWin32("GlobalFree", win32.GetLastError());
@@ -36,7 +40,7 @@ pub fn copyToClipboard(hwnd: win32.HWND, utf8: []const u8) void {
     {
         const ptr: [*]u16 = @ptrCast(@alignCast(win32.GlobalLock(hmem) orelse {
             std.log.err("copy: GlobalLock failed, error={f}", .{win32.GetLastError()});
-            return;
+            return .io_error;
         }));
         defer util.globalUnlock(hmem);
         const len = std.unicode.utf8ToUtf16Le(ptr[0 .. u16_len + 1], utf8) catch unreachable;
@@ -45,11 +49,17 @@ pub fn copyToClipboard(hwnd: win32.HWND, utf8: []const u8) void {
     }
 
     const handle: win32.HANDLE = @ptrFromInt(@as(usize, @bitCast(hmem)));
+    if (win32.EmptyClipboard() == 0) {
+        std.log.err("copy: EmptyClipboard failed, error={f}", .{win32.GetLastError()});
+        return .io_error;
+    }
     if (win32.SetClipboardData(@intFromEnum(win32.CF_UNICODETEXT), handle) == null) {
         std.log.err("copy: SetClipboardData failed, error={f}", .{win32.GetLastError()});
+        return .io_error;
     } else {
         hmem_owned = false;
     }
+    return .{ .success = .{} };
 }
 
 pub fn pasteClipboard(hwnd: win32.HWND, tab: *Tab) void {

@@ -8,6 +8,7 @@ const cp_mod = @import("child_process.zig");
 const err_mod = @import("error.zig");
 const global_mod = @import("global.zig");
 const pty_ring_mod = @import("pty_ring.zig");
+const paste = @import("paste.zig");
 const state = @import("state.zig");
 const tooltip = @import("tooltip.zig");
 const types = @import("types.zig");
@@ -88,6 +89,29 @@ fn onWritePty(context: *anyopaque, data: []const u8) void {
         "write_pty failed (tab {}): {s}",
         .{ tab.id, @errorName(e) },
     );
+}
+
+fn onClipboardWrite(context: *anyopaque, request: vt.clipboard.Write) void {
+    const pane: *Tab = @ptrCast(@alignCast(context));
+    if (pane.closing or request.location != .standard) {
+        request.reply(.unsupported);
+        return;
+    }
+    const hwnd = pane.hwnd orelse {
+        request.reply(.unsupported);
+        return;
+    };
+    if (request.contents.len == 0) {
+        request.reply(paste.writeClipboard(hwnd, ""));
+        return;
+    }
+    for (request.contents) |content| {
+        if (vt.clipboard.isTextMime(content.mime)) {
+            request.reply(paste.writeClipboard(hwnd, content.data));
+            return;
+        }
+    }
+    request.reply(.unsupported);
 }
 
 // Pixel-based size queries (CSI 14/16/18 t). Cell width/height come from
@@ -239,6 +263,7 @@ fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*c
             .context = tab,
             .title_changed = onTitleChanged,
             .write_pty = onWritePty,
+            .clipboard_write = onClipboardWrite,
             .size = onSize,
         },
     }) catch |e| std.debug.panic("TerminalSession.init: {}", .{e});

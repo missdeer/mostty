@@ -407,7 +407,7 @@ print actions.
 
 The shared session owns device-attribute and xtversion responses and routes
 platform effects through context callbacks. Windows supplies title changes,
-PTY writeback, and size reports from `tab_mgmt.zig`:
+PTY writeback, clipboard writes, and size reports from `tab_mgmt.zig`:
 
 - **`onTitleChanged`**: receives the owning `Tab` as callback context, copies
   into `title_buf`, refreshes the tooltip if it is already showing, and
@@ -417,6 +417,10 @@ PTY writeback, and size reports from `tab_mgmt.zig`:
   `ChildProcess.writeFlushAll`.
 - **Shared device attributes / xtversion and Windows `onSize`**: compose the
   reply payloads.
+- **`onClipboardWrite`**: writes plain text from OSC 52 (including remote SSH
+  applications) to the Windows clipboard on the UI thread and replies with
+  the write result. Unsupported clipboard destinations and non-text formats
+  are rejected. Clipboard reads remain disabled.
 
 On macOS, `PtySession` owns the shell child and PTY master around the same
 `TerminalSession`. Callers write input to the PTY, pump PTY output into the VT
