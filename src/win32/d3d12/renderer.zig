@@ -900,6 +900,8 @@ pub fn render(
     );
     self.common.syncBlinkTimer(hwnd, build.has_blink);
 
+    if (!self.common.beginPaneSubmission(prepared.client_w, prepared.client_h, self.grid_force_full or resizing or build.dirty_min_row != null)) return;
+
     self.drawAndPresent(prepared, tabbar, remote_session, .{
         .cell_count = cell_count,
         .dirty_min_row = build.dirty_min_row,
@@ -907,6 +909,8 @@ pub fn render(
         .resizing = resizing,
         .inline_images_present = inline_images_present,
     });
+    if (self.healthy() and !self.occluded and !self.frame_pending)
+        self.common.notePanePresented(prepared.client_w, prepared.client_h);
 }
 
 pub fn syncSurface(self: *D3d12Renderer, parent: *D3d12Renderer) void {

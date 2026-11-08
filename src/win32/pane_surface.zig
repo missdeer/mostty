@@ -84,6 +84,12 @@ pub fn needsFrame(self: *const PaneSurface) bool {
     };
 }
 
+pub fn invalidatePresentation(self: *PaneSurface) void {
+    switch (self.backend) {
+        inline else => |*backend| backend.common.pane_present_valid = false,
+    }
+}
+
 pub fn cacheGeneration(self: *const PaneSurface) u32 {
     return switch (self.backend) {
         inline else => |backend| backend.cache_gen,
@@ -110,6 +116,9 @@ pub fn render(
     remote_session: bool,
     url_highlight: ?types.UrlHighlight,
 ) void {
+    // The parent may render and ValidateRect before the child's WM_PAINT is
+    // dispatched. Preserve that exposure obligation before it is consumed.
+    if (win32.GetUpdateRect(hwnd, null, 0) != 0) self.invalidatePresentation();
     switch (self.backend) {
         inline else => |*backend, tag| {
             const result = backend.render(

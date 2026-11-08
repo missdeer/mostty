@@ -248,6 +248,7 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wp: win32.WPARAM, lp: win32.LPARAM) callc
         win32.WM_PAINT => {
             _, var ps = win32.beginPaint(hwnd);
             win32.endPaint(hwnd, &ps);
+            if (pane.renderer) |*surface| surface.invalidatePresentation();
             if (!window.layout_updating) window.requestRender();
             return 0;
         },

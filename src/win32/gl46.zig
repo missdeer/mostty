@@ -1155,9 +1155,12 @@ pub fn render(
     );
     self.common.syncBlinkTimer(hwnd, build.has_blink);
 
+    if (!self.common.beginPaneSubmission(prepared.client_w, prepared.client_h, self.grid_force_full or resizing or build.dirty_min_row != null or self.test_fail_present)) return;
+
     const presentation = self.beginPresentation(hwnd, prepared.client_w, prepared.client_h) orelse return;
     self.drawFrame(prepared, tabbar);
     self.finishFrame(presentation);
+    if (self.failure == null) self.common.notePanePresented(prepared.client_w, prepared.client_h);
 }
 
 fn enableBaseline(self: *Gl46Renderer) void {

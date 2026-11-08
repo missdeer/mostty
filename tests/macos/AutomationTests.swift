@@ -17,6 +17,13 @@ struct AutomationTests {
         setenv("MOSTTY_RESOURCES_DIR", "", 1)
         setenv("SHELL", "/bin/zsh", 1)
         setenv("ZDOTDIR", FileManager.default.currentDirectoryPath + "/tests/macos/shell-startup", 1)
+        let shellReady = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tmp/automation-zle-ready-\(UUID().uuidString)")
+        setenv("MOSTTY_TEST_ZLE_READY", shellReady.path, 1)
+        defer {
+            unsetenv("MOSTTY_TEST_ZLE_READY")
+            try? FileManager.default.removeItem(at: shellReady)
+        }
         let model = AppModel.shared
         defer { model.shutdownAll() }
         let window = NSWindow(contentRect: NSRect(x: 60, y: 80, width: 1200, height: 800),
@@ -38,6 +45,10 @@ struct AutomationTests {
         }
         expect(waitUntil { model.selectedTab?.activePane?.view.atPrompt == true },
                "an empty inherited resource override still loads the bundled shell integration")
+        // OSC 133 marks the prompt before ZLE starts accepting input. Wait for
+        // the fixture's line-init hook so the first command cannot race startup.
+        expect(waitUntil { FileManager.default.fileExists(atPath: shellReady.path) },
+               "the shell line editor is ready before automated input")
         let first = model.selectedTab!.activePane!
         try TerminalAutomation.input("cd /usr\r", to: first.automationID)
         expect(waitUntil { first.view.workingDirectory == "/usr" && first.view.atPrompt },

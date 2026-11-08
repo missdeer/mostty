@@ -14,6 +14,55 @@ focused: bool = true,
 // desired state from `build.has_blink` on every frame; without this the
 // renderer issues a SetTimer or KillTimer syscall per frame forever.
 blink_timer_armed: bool = false,
+// Only a successfully presented pane can reuse its displayed contents.
+pane_present_valid: bool = false,
+pane_present_size: [2]u32 = .{ 0, 0 },
+
+pub fn beginPaneSubmission(self: *RendererCommon, width: u32, height: u32, changed: bool) bool {
+    if (self.surface_id == 0) return true;
+    if (!changed and self.pane_present_valid and
+        self.pane_present_size[0] == width and self.pane_present_size[1] == height) return false;
+    // Dirty rows have already updated the shadow. Keep retrying if presentation
+    // is deferred or fails even when the next comparison finds identical cells.
+    self.pane_present_valid = false;
+    return true;
+}
+
+pub fn notePanePresented(self: *RendererCommon, width: u32, height: u32) void {
+    self.pane_present_size = .{ width, height };
+    self.pane_present_valid = true;
+}
+
+test "unchanged panes skip submission only after success and retain repaint and retry obligations" {
+    const std = @import("std");
+    var common: RendererCommon = .{ .cell_size = .{ .cx = 8, .cy = 16 }, .tab_bar_height = 0, .font_ligatures = true, .remote_or_software_adapter = false, .surface_id = 1 };
+    // First paint and deferred/failed submissions must retry even after the
+    // cell shadow has caught up with the terminal.
+    try std.testing.expect(common.beginPaneSubmission(320, 200, false));
+    try std.testing.expect(common.beginPaneSubmission(320, 200, false));
+    common.notePanePresented(320, 200);
+    for (0..1000) |_| try std.testing.expect(!common.beginPaneSubmission(320, 200, false));
+    // A content, glyph, paint or image change requires a new successful frame.
+    try std.testing.expect(common.beginPaneSubmission(320, 200, true));
+    try std.testing.expect(common.beginPaneSubmission(320, 200, false));
+    common.notePanePresented(320, 200);
+    // Pixel-only resizes matter even when the terminal's row/column counts
+    // stay the same. Returning to the old size is another change.
+    try std.testing.expect(common.beginPaneSubmission(321, 200, false));
+    common.notePanePresented(321, 200);
+    try std.testing.expect(common.beginPaneSubmission(320, 200, false));
+    common.notePanePresented(320, 200);
+    try std.testing.expect(common.beginPaneSubmission(320, 201, false));
+    common.notePanePresented(320, 201);
+    // Exposure invalidates presentation independently of terminal content.
+    common.pane_present_valid = false;
+    try std.testing.expect(common.beginPaneSubmission(320, 201, false));
+    common.notePanePresented(320, 201);
+    try std.testing.expect(!common.beginPaneSubmission(320, 201, false));
+    // Chrome has independent title/tab/hover state and retains its own path.
+    common.surface_id = 0;
+    try std.testing.expect(common.beginPaneSubmission(320, 201, false));
+}
 
 // Arm or cancel the SGR-blink timer only on a state change.
 pub fn syncBlinkTimer(self: *RendererCommon, hwnd: win32.HWND, want: bool) void {
