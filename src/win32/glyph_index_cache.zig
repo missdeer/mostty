@@ -28,11 +28,13 @@ pub const Key = struct {
         // u21 occupies four bytes but its unused bits are not canonical.
         // Hash Unicode values, not padding that can differ between callers
         // and optimization modes, or identical glyphs get different slots.
-        const first_word: u32 = first;
+        // Mask raw storage explicitly; widening a slice load alone can retain
+        // those unused bits on the Debug backend.
+        const first_word = @as(u32, @bitCast(std.mem.asBytes(&first).*)) & 0x1fffff;
         h_a.update(std.mem.asBytes(&first_word));
         h_b.update(std.mem.asBytes(&first_word));
         for (rest) |codepoint| {
-            const word: u32 = codepoint;
+            const word = @as(u32, @bitCast(std.mem.asBytes(&codepoint).*)) & 0x1fffff;
             h_a.update(std.mem.asBytes(&word));
             h_b.update(std.mem.asBytes(&word));
         }
