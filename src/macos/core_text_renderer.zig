@@ -308,6 +308,8 @@ hovered_url: ?url_hover.Hit = null,
 sprite_masks: std.AutoHashMapUnmanaged(u32, []u8) = .empty,
 shaping_cache: ShapingCache = .{},
 frame_cells: std.ArrayListUnmanaged(GridModel.Cell) = .empty,
+snapshot: FrameSnapshot = .{},
+rasterized_frames: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 kitty_images: KittyImages = .{},
 background_image: BackgroundImage = .{},
 
@@ -348,6 +350,7 @@ pub fn init(options: Options) !CoreTextRenderer {
 }
 
 pub fn deinit(self: *CoreTextRenderer) void {
+    self.snapshot.deinit(self.allocator);
     self.frame_cells.deinit(self.allocator);
     self.shaping_cache.deinit(self.allocator);
     self.background_image.deinit(self.allocator);
@@ -373,6 +376,7 @@ pub fn reconfigure(self: *CoreTextRenderer, options: FontOptions) !bool {
     errdefer fonts.deinit();
     const metrics = try metricsForFont(fonts.regular);
 
+    self.snapshot.state = null;
     self.shaping_cache.clear();
     self.fonts.deinit();
     self.families.deinit();
@@ -407,6 +411,7 @@ pub fn resize(self: *CoreTextRenderer, pixel_width: u32, pixel_height: u32, scal
     // A resized surface must not retain the cell capacity of an old huge grid.
     self.frame_cells.deinit(self.allocator);
     self.frame_cells = .empty;
+    self.snapshot.deinit(self.allocator);
     if (replacement_fonts) |fonts| {
         self.shaping_cache.clear();
         self.fonts.deinit();
@@ -453,8 +458,32 @@ pub fn render(self: *CoreTextRenderer, session: *TerminalSession, cursor: ?Curso
         GridModel.Rgba.fromRgb(color.r, color.g, color.b)
     else
         null;
-    try self.rasterize(&frame, cursor, cursor_color);
-    try self.metal.render(self.pixels);
+    const state: FrameSnapshot.State = .{
+        .cols = frame.cols,
+        .rows = frame.rows,
+        .background = frame.background,
+        .paint = self.paint,
+        .cursor = cursor,
+        .cursor_color = cursor_color,
+        .text_blink_on = self.text_blink_on,
+    };
+    // TUI output can rewrite the same cells or only query terminal state.
+    // Compare resolved content, not PTY activity or VT dirty flags. Images keep
+    // their existing full-frame path until their own damage is tracked.
+    const cacheable = self.background_image.image == null and self.kitty_images.placements.items.len == 0;
+    if (!cacheable or !self.snapshot.matches(state, frame.cells)) {
+        self.snapshot.state = null;
+        // Graphemes borrow VT pages, and rasterize recolors cursor cells in
+        // place. Capture the unmodified content with owned grapheme storage.
+        const captured = if (cacheable) captured: {
+            self.snapshot.capture(self.allocator, frame.cells) catch break :captured false;
+            break :captured true;
+        } else false;
+        try self.rasterize(&frame, cursor, cursor_color);
+        try self.metal.render(self.pixels);
+        // Failed raster/upload work must never become a reusable frame.
+        if (captured) self.snapshot.state = state;
+    }
     return .{
         .cols = frame.cols,
         .rows = frame.rows,
@@ -468,6 +497,7 @@ fn rasterize(
     cursor: ?Cursor,
     cursor_color: ?GridModel.Rgba,
 ) !void {
+    if (builtin.is_test) self.rasterized_frames += 1;
     const color_space = try graphics.ColorSpace.createDeviceRGB();
     defer color_space.release();
     const bitmap_info = @intFromEnum(graphics.BitmapInfo.byte_order_32_little) |
@@ -489,15 +519,21 @@ fn rasterize(
     ctx.setShouldSmoothFonts(context, true);
     ctx.setTextDrawingMode(context, .fill);
     ctx.setTextMatrix(context, graphics.AffineTransform.identity());
-    // The pixel buffer is reused across frames, so a translucent background
-    // would blend with the previous frame instead of replacing it.
     const drawable = graphics.Rect.init(0, 0, self.pixel_width, self.pixel_height);
-    ctx.clearRect(context, drawable);
-    // Wallpaper is behind the translucent terminal background, matching the
-    // shared config semantics. Explicit cell backgrounds cover both layers.
-    self.background_image.draw(context, self.pixel_width, self.pixel_height);
-    setFill(context, frame.background);
-    ctx.fillRect(context, drawable);
+    if (self.background_image.image == null) {
+        // Replace stale pixels including alpha, avoiding source-over blending
+        // across the whole bitmap. Subsequent text/images use normal blending.
+        ctx.setBlendMode(context, .copy);
+        setFill(context, frame.background);
+        ctx.fillRect(context, drawable);
+        ctx.setBlendMode(context, .normal);
+    } else {
+        // Wallpaper must remain beneath the translucent terminal background.
+        ctx.clearRect(context, drawable);
+        self.background_image.draw(context, self.pixel_width, self.pixel_height);
+        setFill(context, frame.background);
+        ctx.fillRect(context, drawable);
+    }
 
     const viewport = graphics.Rect.init(0, self.pixel_height - frame.rows * self.metrics.cell_height, frame.cols * self.metrics.cell_width, frame.rows * self.metrics.cell_height);
     self.kitty_images.draw(context, .below_background, viewport, self.pixel_height);
@@ -539,6 +575,11 @@ fn rasterize(
         cell_index += 1;
         if (!cell_style.textVisible(draw_cell.style, self.text_blink_on) or
             draw_cell.codepoint == @import("vt").kitty.graphics.unicode.placeholder) continue;
+        // Ordinary spaces have no ink. Decorations still need the selected
+        // font's metrics; spaces with combining marks still go through shaping.
+        if (draw_cell.codepoint == ' ' and draw_cell.grapheme.len == 0 and
+            draw_cell.style.underline == 0 and !draw_cell.style.strikethrough and
+            !draw_cell.style.overline) continue;
         const font = self.fonts.selectCell(self.families.options, draw_cell);
         // Shape only contiguous programming symbols with identical paint.
         // Cursor/selection/style boundaries remain individual grid cells.
@@ -573,6 +614,54 @@ fn rasterize(
     }
     self.kitty_images.draw(context, .above_text, viewport, self.pixel_height);
 }
+
+const FrameSnapshot = struct {
+    const State = struct {
+        cols: u32,
+        rows: u32,
+        background: GridModel.Rgba,
+        paint: Paint,
+        cursor: ?Cursor,
+        cursor_color: ?GridModel.Rgba,
+        text_blink_on: bool,
+    };
+
+    state: ?State = null,
+    cells: std.ArrayListUnmanaged(GridModel.Cell) = .empty,
+    graphemes: std.ArrayListUnmanaged(u21) = .empty,
+
+    fn deinit(self: *FrameSnapshot, allocator: std.mem.Allocator) void {
+        self.cells.deinit(allocator);
+        self.graphemes.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn matches(self: *const FrameSnapshot, state: State, cells: []const GridModel.Cell) bool {
+        if (!std.meta.eql(self.state orelse return false, state) or self.cells.items.len != cells.len) return false;
+        for (self.cells.items, cells) |previous, current| {
+            if (previous.col != current.col or previous.row != current.row or
+                previous.width != current.width or previous.codepoint != current.codepoint or
+                !std.meta.eql(previous.style, current.style) or
+                !std.mem.eql(u21, previous.grapheme, current.grapheme)) return false;
+        }
+        return true;
+    }
+
+    fn capture(self: *FrameSnapshot, allocator: std.mem.Allocator, cells: []const GridModel.Cell) !void {
+        var count: usize = 0;
+        for (cells) |cell| count = try std.math.add(usize, count, cell.grapheme.len);
+        try self.cells.resize(allocator, cells.len);
+        try self.graphemes.resize(allocator, count);
+        var offset: usize = 0;
+        for (cells, self.cells.items) |cell, *copy| {
+            copy.* = cell;
+            const owned = self.graphemes.items[offset..][0..cell.grapheme.len];
+            @memcpy(owned, cell.grapheme);
+            copy.grapheme = owned;
+            offset += cell.grapheme.len;
+        }
+    }
+};
 
 fn ligatureCandidate(cell: GridModel.Cell, cursor: ?Cursor) bool {
     if (cursor) |cur| {
@@ -801,6 +890,104 @@ test "CoreText resolves ordinary and wide glyphs" {
     try std.testing.expect(metrics.cell_height > 0);
 }
 
+test "blank cells avoid shaping while decorated and combining spaces retain their ink" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 8,
+        .rows = 2,
+        .hooks = .{ .context = &context },
+    });
+    defer session.deinit();
+    var renderer = try CoreTextRenderer.init(.{
+        .allocator = std.testing.allocator,
+        .pixel_width = 320,
+        .pixel_height = 96,
+        .paint = .{ .background_alpha = 255 },
+    });
+    defer renderer.deinit();
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqual(@as(usize, 0), renderer.shaping_cache.entries.len);
+    session.feed("\x1b[38;2;255;255;255;48;2;0;0;0m \x1b[4m \x1b[24;9m \x1b[29;53m \x1b[55m ́");
+    _ = try renderer.render(&session, null);
+    var ink: [5]bool = @splat(false);
+    for (0..renderer.metrics.cell_height) |y| {
+        for (0..5 * renderer.metrics.cell_width) |x| {
+            const offset = (y * renderer.pixel_width + x) * 4;
+            if (!std.mem.eql(u8, &.{ 0, 0, 0 }, renderer.pixels[offset..][0..3]))
+                ink[x / renderer.metrics.cell_width] = true;
+        }
+    }
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, true, true }, &ink);
+}
+
+test "identical TUI redraws reuse the texture without hiding visual changes" {
+    var session: TerminalSession = undefined;
+    var context: u8 = 0;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 8,
+        .rows = 2,
+        .hooks = .{ .context = &context },
+    });
+    defer session.deinit();
+    var renderer = try CoreTextRenderer.init(.{
+        .allocator = std.testing.allocator,
+        .pixel_width = 320,
+        .pixel_height = 96,
+    });
+    defer renderer.deinit();
+    session.feed("\x1b[Hé界\x1b[4m \x1b[24;9m \x1b[29;53m \x1b[0m");
+    _ = try renderer.render(&session, null);
+    const initial = try std.testing.allocator.dupe(u8, renderer.pixels);
+    defer std.testing.allocator.free(initial);
+    const count = renderer.rasterized_frames;
+    // A status refresh can clear and rewrite exactly the same screen. Every
+    // byte must still reach VT, but it must not cause another raster/upload.
+    for (0..10) |_| {
+        session.feed("\x1b[H\x1b[2Jé界\x1b[4m \x1b[24;9m \x1b[29;53m \x1b[0m\x1b[6n");
+        _ = try renderer.render(&session, null);
+    }
+    try std.testing.expectEqual(count, renderer.rasterized_frames);
+    try std.testing.expectEqualSlices(u8, initial, renderer.pixels);
+
+    // Grapheme storage must own its bytes: changing only the combining mark
+    // must invalidate the cache even if VT reuses the same page allocation.
+    session.feed("\x1b[Hè");
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqual(count + 1, renderer.rasterized_frames);
+    try std.testing.expect(!std.mem.eql(u8, initial, renderer.pixels));
+    // A reused texture must equal a forced full render, including decorations.
+    const changed = try std.testing.allocator.dupe(u8, renderer.pixels);
+    defer std.testing.allocator.free(changed);
+    renderer.snapshot.state = null;
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqualSlices(u8, changed, renderer.pixels);
+
+    var previous = renderer.rasterized_frames;
+    _ = try renderer.render(&session, .{ .col = 1, .row = 0 });
+    _ = try renderer.render(&session, .{ .col = 2, .row = 0 });
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqual(previous + 3, renderer.rasterized_frames);
+    previous = renderer.rasterized_frames;
+    renderer.selection = .{ .start_col = 0, .end_col = 0, .start_row = 0, .end_row = 0 };
+    _ = try renderer.render(&session, null);
+    renderer.text_blink_on = false;
+    _ = try renderer.render(&session, null);
+    renderer.paint.cursor_text = .{ .r = 1, .g = 2, .b = 3 };
+    _ = try renderer.render(&session, null);
+    _ = try renderer.reconfigure(.{ .size = 18 });
+    _ = try renderer.render(&session, null);
+    try renderer.resize(400, 160, 1);
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqual(previous + 5, renderer.rasterized_frames);
+}
+
 test "CoreText and Metal render a resized styled terminal frame" {
     var session: TerminalSession = undefined;
     var context: u8 = 0;
@@ -950,6 +1137,53 @@ test "explicit Noto emoji chain renders color with Apple system fallback" {
         if (@max(p[0], p[1], p[2]) - @min(p[0], p[1], p[2]) > 32) colored += 1;
     }
     try std.testing.expect(colored > 10);
+}
+
+test "background replacement matches clear then source-over across colors and alpha" {
+    var session: TerminalSession = undefined;
+    var hook_context: u8 = 0;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 8,
+        .rows = 2,
+        .hooks = .{ .context = &hook_context },
+    });
+    defer session.deinit();
+    var renderer = try CoreTextRenderer.init(.{
+        .allocator = std.testing.allocator,
+        .pixel_width = 128,
+        .pixel_height = 96,
+    });
+    defer renderer.deinit();
+    const reference = try std.testing.allocator.alloc(u8, renderer.pixels.len);
+    defer std.testing.allocator.free(reference);
+    const space = try graphics.ColorSpace.createDeviceRGB();
+    defer space.release();
+    const context = try graphics.BitmapContext.create(reference, 128, 96, 8, 128 * 4, space, @intFromEnum(graphics.BitmapInfo.byte_order_32_little) |
+        @intFromEnum(graphics.ImageAlphaInfo.premultiplied_first));
+    defer graphics.BitmapContext.context.release(context);
+    for ([_][]const u8{ "#000000", "#ffffff", "#123456", "#282c34" }) |color| {
+        var command: [64]u8 = undefined;
+        session.feed(try std.fmt.bufPrint(&command, "\x1b]11;{s}\x07", .{color}));
+        for ([_]u8{ 0, 1, 64, 127, 128, 240, 254, 255 }) |alpha| {
+            renderer.paint.background_alpha = alpha;
+            _ = try renderer.render(&session, null);
+            // Use the previous algorithm as an independent pixel reference.
+            // Poison both buffers to ensure each path replaces stale content.
+            @memset(reference, 0xa5);
+            const rect = graphics.Rect.init(0, 0, 128, 96);
+            graphics.Context.clearRect(context, rect);
+            const rgb = session.term.colors.background.get().?;
+            var background = GridModel.Rgba.fromRgb(rgb.r, rgb.g, rgb.b);
+            background.a = alpha;
+            setFill(context, background);
+            graphics.Context.fillRect(context, rect);
+            try std.testing.expectEqualSlices(u8, reference, renderer.pixels);
+            @memset(renderer.pixels, 0x5a);
+        }
+    }
 }
 
 test "background-opacity survives into the rasterized pixels" {

@@ -464,6 +464,15 @@ replace the old entry after shaping succeeds; keys longer than 128 UTF-16 units
 bypass the cache. Font reloads and backing-scale changes clear cached lines
 before publishing replacement fonts. Colors, clipping and cell fitting remain
 dynamic, so repainting selections or blink phases reuses the same shapes.
+For text-only frames without wallpaper, an owned snapshot compares resolved
+cells, graphemes, paint and cursor/blink state against the last successful
+raster/upload. Identical TUI redraws reuse that texture; font changes invalidate
+the snapshot and surface resize releases it. Snapshot allocation failure falls
+back to a full render. Plain spaces skip text drawing while retaining their
+backgrounds and any decorations. Image frames keep the full-render path.
+Without wallpaper, the bitmap background uses copy blending to replace all
+pixels including alpha, then restores normal blending for text and images.
+Wallpaper retains clear/draw/source-over composition beneath the background.
 Shaped clusters are scaled down as
 needed to fit their VT cell spans, preserving color glyphs in the BGRA buffer.
 The renderer submits that buffer through
