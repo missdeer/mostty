@@ -67,16 +67,23 @@ jobs:
 
       - name: Stage artifact
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $conptyVersion = "1.23.251216003"
-          $conptyUrl = "https://github.com/microsoft/terminal/releases/download/v1.23.13503.0/Microsoft.Windows.Console.ConPTY.$conptyVersion.nupkg"
           $conptyPackageHash = "119F8D06969703AA6530A236EB17DB33A7179A6BC35991E9076A7A63CABABFF7"
           $conptyDllHash = "1F5FFD52FF118DB975EEB25BAC0051F4CEFF3E051313FA03A5AFFFA9E75EE502"
           $openConsoleHash = "6B2915A9A91C0738346A6C6A7B3EE2B74E26582B0C92B1B16066E72570DDDD68"
           $conptyPackage = "Microsoft.Windows.Console.ConPTY.$conptyVersion.nupkg"
           $conptyExtractDir = "conpty-package"
 
-          Invoke-WebRequest -Uri $conptyUrl -OutFile $conptyPackage
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            gh release download v1.23.13503.0 --repo microsoft/terminal --pattern $conptyPackage --clobber
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw 'ConPTY package download failed after three attempts' }
+            Write-Warning "ConPTY package download attempt $attempt failed; retrying"
+            Start-Sleep -Seconds (5 * $attempt)
+          }
           $actualPackageHash = (Get-FileHash $conptyPackage -Algorithm SHA256).Hash
           if ($actualPackageHash -ne $conptyPackageHash) {
             throw "Unexpected ConPTY package hash: $actualPackageHash"
