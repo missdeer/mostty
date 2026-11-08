@@ -470,6 +470,9 @@ raster/upload. Identical TUI redraws reuse that texture; font changes invalidate
 the snapshot and surface resize releases it. Snapshot allocation failure falls
 back to a full render. Plain spaces skip text drawing while retaining their
 backgrounds and any decorations. Image frames keep the full-render path.
+Without wallpaper, the bitmap background uses copy blending to replace all
+pixels including alpha, then restores normal blending for text and images.
+Wallpaper retains clear/draw/source-over composition beneath the background.
 Shaped clusters are scaled down as
 needed to fit their VT cell spans, preserving color glyphs in the BGRA buffer.
 The renderer submits that buffer through

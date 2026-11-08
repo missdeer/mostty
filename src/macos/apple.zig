@@ -146,6 +146,7 @@ extern "c" fn CGContextDrawTiledImage(context: CGContextRef, rect: Rect, image: 
 extern "c" fn CGContextSetRGBFillColor(context: CGContextRef, red: f64, green: f64, blue: f64, alpha: f64) void;
 extern "c" fn CGContextFillRect(context: CGContextRef, rect: Rect) void;
 extern "c" fn CGContextClearRect(context: CGContextRef, rect: Rect) void;
+extern "c" fn CGContextSetBlendMode(context: CGContextRef, mode: c_int) void;
 
 pub const foundation = struct {
     pub const StringEncoding = enum(u32) {
@@ -360,6 +361,10 @@ pub const graphics = struct {
             CGContextFillRect(@ptrCast(value), rect);
         }
 
+        pub fn setBlendMode(value: *BitmapContext, mode: BlendMode) void {
+            CGContextSetBlendMode(@ptrCast(value), @intFromEnum(mode));
+        }
+
         /// Resets the region to transparent black. Required before painting a
         /// translucent background, which would otherwise blend with the previous
         /// frame still sitting in the reused pixel buffer.
@@ -371,6 +376,11 @@ pub const graphics = struct {
     pub const TextDrawingMode = enum(c_int) {
         fill = 0,
         fill_stroke = 2,
+    };
+
+    pub const BlendMode = enum(c_int) {
+        normal = 0,
+        copy = 17,
     };
 };
 

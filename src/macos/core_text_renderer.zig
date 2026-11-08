@@ -519,15 +519,21 @@ fn rasterize(
     ctx.setShouldSmoothFonts(context, true);
     ctx.setTextDrawingMode(context, .fill);
     ctx.setTextMatrix(context, graphics.AffineTransform.identity());
-    // The pixel buffer is reused across frames, so a translucent background
-    // would blend with the previous frame instead of replacing it.
     const drawable = graphics.Rect.init(0, 0, self.pixel_width, self.pixel_height);
-    ctx.clearRect(context, drawable);
-    // Wallpaper is behind the translucent terminal background, matching the
-    // shared config semantics. Explicit cell backgrounds cover both layers.
-    self.background_image.draw(context, self.pixel_width, self.pixel_height);
-    setFill(context, frame.background);
-    ctx.fillRect(context, drawable);
+    if (self.background_image.image == null) {
+        // Replace stale pixels including alpha, avoiding source-over blending
+        // across the whole bitmap. Subsequent text/images use normal blending.
+        ctx.setBlendMode(context, .copy);
+        setFill(context, frame.background);
+        ctx.fillRect(context, drawable);
+        ctx.setBlendMode(context, .normal);
+    } else {
+        // Wallpaper must remain beneath the translucent terminal background.
+        ctx.clearRect(context, drawable);
+        self.background_image.draw(context, self.pixel_width, self.pixel_height);
+        setFill(context, frame.background);
+        ctx.fillRect(context, drawable);
+    }
 
     const viewport = graphics.Rect.init(0, self.pixel_height - frame.rows * self.metrics.cell_height, frame.cols * self.metrics.cell_width, frame.rows * self.metrics.cell_height);
     self.kitty_images.draw(context, .below_background, viewport, self.pixel_height);
@@ -1131,6 +1137,53 @@ test "explicit Noto emoji chain renders color with Apple system fallback" {
         if (@max(p[0], p[1], p[2]) - @min(p[0], p[1], p[2]) > 32) colored += 1;
     }
     try std.testing.expect(colored > 10);
+}
+
+test "background replacement matches clear then source-over across colors and alpha" {
+    var session: TerminalSession = undefined;
+    var hook_context: u8 = 0;
+    try session.init(.{
+        .io = std.testing.io,
+        .terminal_allocator = std.testing.allocator,
+        .stream_allocator = std.testing.allocator,
+        .cols = 8,
+        .rows = 2,
+        .hooks = .{ .context = &hook_context },
+    });
+    defer session.deinit();
+    var renderer = try CoreTextRenderer.init(.{
+        .allocator = std.testing.allocator,
+        .pixel_width = 128,
+        .pixel_height = 96,
+    });
+    defer renderer.deinit();
+    const reference = try std.testing.allocator.alloc(u8, renderer.pixels.len);
+    defer std.testing.allocator.free(reference);
+    const space = try graphics.ColorSpace.createDeviceRGB();
+    defer space.release();
+    const context = try graphics.BitmapContext.create(reference, 128, 96, 8, 128 * 4, space, @intFromEnum(graphics.BitmapInfo.byte_order_32_little) |
+        @intFromEnum(graphics.ImageAlphaInfo.premultiplied_first));
+    defer graphics.BitmapContext.context.release(context);
+    for ([_][]const u8{ "#000000", "#ffffff", "#123456", "#282c34" }) |color| {
+        var command: [64]u8 = undefined;
+        session.feed(try std.fmt.bufPrint(&command, "\x1b]11;{s}\x07", .{color}));
+        for ([_]u8{ 0, 1, 64, 127, 128, 240, 254, 255 }) |alpha| {
+            renderer.paint.background_alpha = alpha;
+            _ = try renderer.render(&session, null);
+            // Use the previous algorithm as an independent pixel reference.
+            // Poison both buffers to ensure each path replaces stale content.
+            @memset(reference, 0xa5);
+            const rect = graphics.Rect.init(0, 0, 128, 96);
+            graphics.Context.clearRect(context, rect);
+            const rgb = session.term.colors.background.get().?;
+            var background = GridModel.Rgba.fromRgb(rgb.r, rgb.g, rgb.b);
+            background.a = alpha;
+            setFill(context, background);
+            graphics.Context.fillRect(context, rect);
+            try std.testing.expectEqualSlices(u8, reference, renderer.pixels);
+            @memset(renderer.pixels, 0x5a);
+        }
+    }
 }
 
 test "background-opacity survives into the rasterized pixels" {
