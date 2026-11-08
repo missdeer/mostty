@@ -860,6 +860,15 @@ continue consuming PTY output. All selected Windows backends use the pane facade
    buffer's top strip, then `Present(0|1, 0)` (sync interval depends on
    the adapter classification from §6.6).
 
+After cell comparison, every Windows pane backend skips drawing, backbuffer
+copies and presentation when neither content nor paint state changed. The
+shared submission gate also tracks exact pixel size and successful presentation;
+deferred or failed frames remain pending even after their cell shadow updates.
+Native child-window paint invalidates presentation for exposure redraws. Main
+chrome retains its independent tab/title/hover rendering path. OpenGL and Vulkan
+still draw the full grid when a changed pane submits; their frame-slot cell
+copies remain necessary to preserve unchanged rows across slot rotation.
+
 ### 6.3 Cell buffer & per-row diff
 
 ```hlsl

@@ -480,6 +480,8 @@ pub fn render(
     self.common.syncBlinkTimer(hwnd, build.has_blink);
     if (self.takeFailure()) |failure| return failure;
 
+    if (!self.common.beginPaneSubmission(prepared.client_w, prepared.client_h, self.grid_force_full or resizing or build.dirty_min_row != null or self.test_fail_present)) return null;
+
     self.prepareTabbar(prepared, tabbar) catch |err| return .{
         .operation = if (err == error.ImageUnavailable) .tab_bar_image else .tab_bar_upload,
         .cause = err,
@@ -490,6 +492,7 @@ pub fn render(
     };
     self.grid_force_full = outcome != .presented;
     self.frame_pending = outcome != .presented;
+    if (outcome == .presented) self.common.notePanePresented(prepared.client_w, prepared.client_h);
     return null;
 }
 
@@ -549,10 +552,6 @@ fn prepareFrame(
             self.frame_pending = true;
             return null;
         }
-        if (self.bridge) |*bridge| if (!bridge.presenter.frameReady()) {
-            self.frame_pending = true;
-            return null;
-        };
     }
     _ = try self.core.?.beginFrame();
 
@@ -812,6 +811,9 @@ fn recordAndPresentNative(self: *VulkanRenderer, hwnd: win32.HWND, prepared: Pre
 fn recordAndPresentBridge(self: *VulkanRenderer, prepared: PreparedFrame) !PresentOutcome {
     var core = &self.core.?;
     var bridge = &self.bridge.?;
+    // The DXGI readiness probe consumes admission. Do it only once we know
+    // this pane will submit; an unchanged frame must leave it available.
+    if (self.parent != null and !bridge.presenter.frameReady()) return .deferred;
     const resized = try bridge.ensureSize(core, prepared.client_w, prepared.client_h);
     if (resized) self.grid_force_full = true;
 

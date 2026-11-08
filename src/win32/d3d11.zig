@@ -711,6 +711,8 @@ pub fn render(
     const build_us = if (diag_on) diag.qpcUsSince(build_t0) else 0;
     self.common.syncBlinkTimer(hwnd, build.has_blink);
 
+    if (!self.common.beginPaneSubmission(prepared.client_w, prepared.client_h, self.grid_force_full or resizing or build.dirty_min_row != null)) return;
+
     // Phase 3: persistent grid draw decision + back-buffer delivery.
     const grid_t0 = if (diag_on) diag.qpcNow() else 0;
     swap_chain_mod.acquireBackBufferTexture(self, prepared.swap_chain);
@@ -733,6 +735,7 @@ pub fn render(
     // Phase 4: tab-bar band paint + Present + occlusion state + diag.
     const present_t0 = if (diag_on) diag.qpcNow() else 0;
     paintChromeAndPresent(self, prepared, tabbar, remote_session);
+    if (!self.occluded) self.common.notePanePresented(prepared.client_w, prepared.client_h);
     const present_us = if (diag_on) diag.qpcUsSince(present_t0) else 0;
     if (diag_on) {
         const total_us = diag.qpcUsSince(t0);
@@ -1332,6 +1335,24 @@ test "chrome preparation leaves atlas lazy across font changes while panes retai
     pane.shader_cells.cell_buf.GetDesc(&cell_desc);
     try std.testing.expectEqual(pane.shader_cells.count * @sizeOf(shader.Cell), cell_desc.ByteWidth);
     try std.testing.expect(parent.glyph_texture.obj == null and parent.glyph_cache == null);
+
+    // Exercise the actual VT/cell builder and submission decision without
+    // depending on presentation to this deliberately hidden test window.
+    pane_common.pane_present_valid = false;
+    for (0..12) |i| {
+        session.feed(if (i == 11) "\x1b[41m \x1b[0m" else "\x1b[2J\x1b[H\x1b[?25l\x1b[6n");
+        const build = cell_buffer.buildAndUpload(&pane, session.term, terminal.shader_col, terminal.term_shader_row, terminal.tex_cell_count, terminal.atlas.?, false, null, null, null, 1, null);
+        // Repeated clearing/rewriting and state queries do not change pixels;
+        // the last frame changes only a blank cell's background and must submit.
+        const submit = pane_common.beginPaneSubmission(terminal.client_w, terminal.client_h, pane.grid_force_full or build.dirty_min_row != null);
+        try std.testing.expectEqual(i == 0 or i == 11, submit);
+        if (submit) {
+            pane.grid_force_full = false;
+            pane_common.notePanePresented(terminal.client_w, terminal.client_h);
+        }
+    }
+    pane_common.pane_present_valid = false;
+    try std.testing.expect(pane_common.beginPaneSubmission(terminal.client_w, terminal.client_h, false));
 }
 
 test "surviving pane restores draw topology after sibling teardown clears shared context" {
