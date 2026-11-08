@@ -24,12 +24,18 @@ pub const Key = struct {
 
     pub fn init(first: u21, rest: []const u21, half: Half, style: Style) Key {
         var h_a = std.hash.Wyhash.init(0);
-        h_a.update(std.mem.asBytes(&first));
-        h_a.update(std.mem.sliceAsBytes(rest));
-
         var h_b = std.hash.Wyhash.init(0x9e3779b97f4a7c15);
-        h_b.update(std.mem.asBytes(&first));
-        h_b.update(std.mem.sliceAsBytes(rest));
+        // u21 occupies four bytes but its unused bits are not canonical.
+        // Hash Unicode values, not padding that can differ between callers
+        // and optimization modes, or identical glyphs get different slots.
+        const first_word: u32 = first;
+        h_a.update(std.mem.asBytes(&first_word));
+        h_b.update(std.mem.asBytes(&first_word));
+        for (rest) |codepoint| {
+            const word: u32 = codepoint;
+            h_a.update(std.mem.asBytes(&word));
+            h_b.update(std.mem.asBytes(&word));
+        }
 
         return .{
             .hash_a = h_a.final(),
@@ -69,6 +75,17 @@ pub const Key = struct {
         return key;
     }
 };
+
+test "glyph keys ignore unused bits in codepoint storage" {
+    const clean = [_]u32{ ' ', 0x301 };
+    const padded = [_]u32{ 0xffe00020, 0xffe00301 };
+    const a: [*]const u21 = @ptrCast(&clean);
+    const b: [*]const u21 = @ptrCast(&padded);
+    try std.testing.expectEqual(a[0], b[0]);
+    try std.testing.expectEqual(a[1], b[1]);
+    try std.testing.expectEqualDeep(Key.init(a[0], &.{}, .single, .regular), Key.init(b[0], &.{}, .single, .regular));
+    try std.testing.expectEqualDeep(Key.init(a[0], a[1..2], .single, .regular), Key.init(b[0], b[1..2], .single, .regular));
+}
 
 test "ligature offsets reuse hashes without aliasing cache entries" {
     for ([_][]const u8{ "->", "===", "abcdefghijklmnop" }) |run| {
