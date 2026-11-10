@@ -158,6 +158,7 @@ fn next(self: *InlineImages, stream: anytype, ch: u8) void {
             if (ch == '\\') {
                 self.finish(stream.handler.terminal);
             } else {
+                self.transferring = false;
                 self.reset();
                 stream.nextSlice("\x1b");
                 self.next(stream, ch);

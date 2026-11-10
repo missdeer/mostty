@@ -1,7 +1,7 @@
 const Cmdline = @This();
 
 font_path: ?[]const u8 = null,
-font_size: f32 = 16.0,
+font_size: ?f32 = null,
 renderer: RendererSelection = .from_config,
 background_opacity: ?f32 = null,
 background_blur: ?bool = null,
@@ -22,8 +22,8 @@ pub fn usage() !void {
         \\Usage: Mostty [options]
         \\
         \\Font Options:
-        \\  --ttf <path>              Use TrueType font at <path>
-        \\  --font-size <float>       Font size (scaled by DPI, default: 16.0)
+        \\  --ttf <path>              Legacy option (currently ignored)
+        \\  --font-size <float>       Font size in points (1..256; defaults to config)
         \\
         \\Renderer Options:
         \\  --renderer <backend>      Renderer backend (d3d11, d3d12, opengl,
@@ -47,15 +47,11 @@ pub fn parse(args: *std.process.Args.Iterator) !Cmdline {
             result.font_path = args.next() orelse errExit("--ttf requires a path argument", .{});
         } else if (std.mem.eql(u8, arg, "--font-size")) {
             const size_str = args.next() orelse errExit("--font-size requires an argument", .{});
-            result.font_size = std.fmt.parseFloat(f32, size_str) catch errExit(
-                "invalid --font-size '{s}'",
+            result.font_size = parseFontSize(size_str) orelse errExit(
+                "invalid --font-size '{s}' (must be finite and in [1,256])",
                 .{size_str},
             );
-            if (result.font_size <= 0) errExit(
-                "invalid --font-size  '{d}' (must be positive)",
-                .{result.font_size},
-            );
-            std.log.info("--font-size {d}", .{result.font_size});
+            std.log.info("--font-size {d}", .{result.font_size.?});
         } else if (std.mem.eql(u8, arg, "--renderer")) {
             const value = args.next() orelse errExit("--renderer requires an argument", .{});
             result.renderer = parseRenderer(value);
@@ -94,6 +90,7 @@ pub fn parse(args: *std.process.Args.Iterator) !Cmdline {
 }
 
 pub fn applyConfigOverrides(self: Cmdline, config: *Config) void {
+    if (self.font_size) |value| config.font_size_pt = value;
     config.renderer = self.rendererOr(config.renderer);
     if (self.background_opacity) |value| config.background_opacity = value;
     if (self.background_blur) |value| config.background_blur = value;
@@ -138,6 +135,11 @@ fn parseRenderer(value: []const u8) RendererSelection {
     return .{ .backend = backend };
 }
 
+fn parseFontSize(value: []const u8) ?f32 {
+    const size = std.fmt.parseFloat(f32, value) catch return null;
+    return if (Config.validFontSize(size)) size else null;
+}
+
 fn parseBackgroundOpacity(value: []const u8) ?f32 {
     const opacity = std.fmt.parseFloat(f32, value) catch return null;
     if (!std.math.isFinite(opacity) or opacity < 0.0 or opacity > 1.0) return null;
@@ -171,6 +173,19 @@ test "renderer command-line value overrides config and omission preserves it" {
     const configured: Config.RendererBackend = .opengl;
     try std.testing.expectEqual(configured, (Cmdline{}).rendererOr(configured));
     try std.testing.expectEqual(Config.RendererBackend.vulkan, (Cmdline{ .renderer = .{ .backend = .vulkan } }).rendererOr(configured));
+}
+
+test "font command-line values use config limits and override only when supplied" {
+    for ([_][]const u8{ "nan", "inf", "-inf", "0", "0.5", "257", "1e40", "invalid" }) |value| {
+        try std.testing.expectEqual(@as(?f32, null), parseFontSize(value));
+    }
+    try std.testing.expectEqual(@as(?f32, 1), parseFontSize("1"));
+    try std.testing.expectEqual(@as(?f32, 256), parseFontSize("256"));
+    var configured: Config = .{ .font_size_pt = 18 };
+    (Cmdline{}).applyConfigOverrides(&configured);
+    try std.testing.expectEqual(@as(?f32, 18), configured.font_size_pt);
+    (Cmdline{ .font_size = parseFontSize("24.5").? }).applyConfigOverrides(&configured);
+    try std.testing.expectEqual(@as(?f32, 24.5), configured.font_size_pt);
 }
 
 test "window effect command-line values are validated" {

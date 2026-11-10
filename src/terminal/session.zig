@@ -511,6 +511,27 @@ test "image interception preserves non-image strings and recovers after cancella
     try std.testing.expectEqualStrings("hello", text);
 }
 
+test "an unrelated escape cancels the whole multipart transfer at every chunk boundary" {
+    const input = "\x1b]1337;MultipartFile=inline=1\x07" ++
+        "\x1b]1337;FilePart=AAAA\x07\x1b]1337;FilePart=BBBB\x1b[31mhello";
+    for (0..input.len + 1) |boundary| {
+        var context: u8 = 0;
+        var session: Session = undefined;
+        try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 5, .hooks = .{ .context = &context } });
+        defer session.deinit();
+        session.feed(input[0..boundary]);
+        session.feed(input[boundary..]);
+        // A canceled part must not leave old data eligible for a later FileEnd.
+        try std.testing.expect(!session.images.transferring);
+        try std.testing.expectEqual(@as(usize, 0), session.images.transfer.items.len);
+        session.feed("\x1b]1337;FilePart=ignored\x07\x1b]1337;FileEnd\x07");
+        try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+        const text = try session.term.plainString(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings("hello", text);
+    }
+}
+
 test "large encoded scratch is reclaimed without losing multipart bytes" {
     var context: u8 = 0;
     var session: Session = undefined;

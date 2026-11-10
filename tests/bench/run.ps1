@@ -16,7 +16,11 @@ foreach ($side in @('base', 'head')) {
     $tree = Join-Path $out $side
     & git worktree add --detach $tree $revision
     if ($LASTEXITCODE -ne 0) { throw 'worktree creation failed' }
-    if ((Get-FileHash "$root/build.zig.zon").Hash -ne (Get-FileHash "$tree/build.zig.zon").Hash) { throw 'Dependency manifests differ; comparison is not valid' }
+    # Ignore only the package inclusion list; retain compiler and dependency checks.
+    $packagePaths = '(?ms)^    \.paths = \.\{\r?\n.*?^    \},\r?\n'
+    $currentManifest = [regex]::Replace([IO.File]::ReadAllText("$root/build.zig.zon"), $packagePaths, '')
+    $baselineManifest = [regex]::Replace([IO.File]::ReadAllText("$tree/build.zig.zon"), $packagePaths, '')
+    if ($currentManifest -cne $baselineManifest) { throw 'Dependency manifests differ; comparison is not valid' }
     Copy-Item "$root/build.zig" "$tree/build.zig"
     Copy-Item "$root/src/runtime_bench*.zig" "$tree/src/"
     Copy-Item "$root/src/win32/d3d11/run_cache_fixture.zig" "$tree/src/win32/d3d11/"

@@ -26,5 +26,8 @@
         "build.zig.zon",
         "src",
         "resources",
+        "themes",
+        "tests",
+        "LICENSE",
     },
 }

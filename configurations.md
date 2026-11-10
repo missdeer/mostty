@@ -1,7 +1,7 @@
 # Mostty Configuration
 
 Mostty is configured through a single plain-text config file on Windows and
-macOS. Windows also supports the startup command-line overrides listed below.
+macOS. Both platforms also support the command-line overrides listed below.
 See [Platform support](#platform-support) for each key's applicability.
 
 ## File location
@@ -38,7 +38,11 @@ The Windows executable accepts these options:
 | `--background-opacity <0..1>` | Overrides the configured background opacity at startup. |
 | `--background-blur <true\|false>` | Overrides the configured blur at startup; accepts only `true` or `false` (case-insensitive), unlike the broader config-file syntax. |
 | `-h`, `--help` | Prints usage and exits. |
-| `--ttf <path>`, `--font-size <float>` | Parsed legacy options, but not applied to rendering; use `font-family` and `font-size` in the config file. |
+| `--font-size <float>` | Overrides the configured font size in points; must be finite and in 1..256. |
+| `--ttf <path>` | Parsed legacy option, but not applied to rendering; use `font-family` in the config file. |
+| `+list-themes` | Lists available theme names and exits. |
+| `+validate-config [--config-file <path>]` | Validates the specified file, or the default config, without opening a window. |
+| `+control [--target-process <pid>]` | Sends a JSON control request from stdin to a Windows instance. |
 
 For example, to use an opaque native Vulkan window:
 
@@ -47,16 +51,18 @@ Mostty.exe --renderer native-vulkan --background-opacity 1 --background-blur fal
 ```
 
 These overrides do not edit the config file. A later config reload can replace
-the opacity and blur overrides; the active renderer stays fixed until restart.
-The macOS application does not use this command-line parser and has no
-equivalent configuration overrides; use its config file.
+the font size, opacity and blur overrides on Windows; the active renderer stays
+fixed until restart. macOS accepts `--font-size`, `--background-opacity`,
+`--background-blur`, `+list-themes`, `+validate-config [--config-file <path>]`,
+and `--help`/`-h` through its native parser. Its font size, opacity and blur
+overrides remain in effect across config reloads.
 
 ## Syntax
 
 - One `key = value` per line. Whitespace around the key and value is trimmed.
 - UTF-8. A leading UTF-8 BOM (added by some Windows editors) is tolerated.
-- There is **no comment syntax**. A line without `=` is reported as a warning
-  and skipped, so do not use `#`/`//` comment lines.
+- Lines beginning with `#` after optional whitespace are comments. Inline
+  comments and `//` comments are not supported; `#` also prefixes hex colors.
 - Unknown keys produce a warning. A small set of Ghostty keys that Mostty has no
   feature for is accepted-and-ignored silently on both platforms (so a ported Ghostty config does
   not spam warnings): `split-*`, `search-*`, `window-titlebar-*`,
@@ -103,7 +109,8 @@ unknown keys follow the rules in [Syntax](#syntax).
 | `images-enabled` | yes | yes |
 | `smart-ime` | yes | no |
 | `maximize`, `fullscreen` | yes | yes |
-| `confirm-close-surface` | no | yes |
+| `confirm-close-surface` | yes | yes |
+| `shell-integration` | yes | yes |
 | `render-interval-local-ms` | yes | yes |
 | `launcher`, `env` | yes | yes |
 | `emoji-font-family`, `font-ligatures`, `font-feature`, `font-codepoint-map`, `font-style`, `font-style-bold`, `font-style-italic`, `font-style-bold-italic`, `font-synthetic-style` | yes | yes (CoreText) |
@@ -777,7 +784,7 @@ via `AcceptEnv`, which macOS/Linux defaults usually do).
 
 ## Example config
 
-Only real `key = value` lines are valid — do not add `#` comment lines.
+Use `key = value` lines for settings; separate `#` comment lines are allowed.
 
 ### Windows
 
