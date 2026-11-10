@@ -4,6 +4,11 @@
     .version = "0.0.1",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
+        .translate_c = .{
+            .url = "https://deps.files.ghostty.org/translate_c-02ff0c523fb92a38939b04d0145c4a9602a74d56.tar.gz",
+            .hash = "translate_c-2.0.0-Q_BUWltOBwBYABF84EUL208pIFeUIwbBs29FmVBaafN5",
+            .lazy = true,
+        },
         .win32 = .{
             .url = "git+https://github.com/marlersoft/zigwin32#ab1c05ff1da857ec500c4da42e190032a8639717",
             .hash = "win32-25.0.28-preview-mX5pFQ8t5QNuXMsGluHTUtIed00-Mu4MEcV4wHxTJqpg",

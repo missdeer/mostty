@@ -543,6 +543,25 @@ fn addWindowsImports(
         mod.addIncludePath(b.path("src/win32"));
         mod.addIncludePath(.{ .cwd_relative = vulkan_include });
     }
+    if (b.lazyDependency("translate_c", .{})) |translate_c_dep| {
+        const Translator = @import("translate_c").Translator;
+        const resources = Translator.init(translate_c_dep, .{
+            .c_source_file = b.path("src/win32/ResourceNames.h"),
+            .target = mod.resolved_target.?,
+            .optimize = mod.optimize.?,
+        });
+        mod.addImport("resource_names", resources.mod);
+
+        const vulkan = Translator.init(translate_c_dep, .{
+            .c_source_file = b.path("src/win32/vulkan/vulkan_win32_abi.h"),
+            .target = mod.resolved_target.?,
+            .optimize = mod.optimize.?,
+        });
+        vulkan.defineCMacro("VK_NO_PROTOTYPES", "1");
+        vulkan.defineCMacro("VK_USE_PLATFORM_WIN32_KHR", "1");
+        vulkan.addIncludePath(.{ .cwd_relative = vulkan_include });
+        mod.addImport("vulkan", vulkan.mod);
+    }
 }
 
 const ShaderTargets = struct {

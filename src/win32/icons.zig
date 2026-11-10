@@ -1,9 +1,7 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 const util = @import("util.zig");
-const cimport = @cImport({
-    @cInclude("ResourceNames.h");
-});
+const cimport = @import("resource_names");
 
 pub const Icons = struct {
     small: win32.HICON,

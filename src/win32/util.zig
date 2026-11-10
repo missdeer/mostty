@@ -15,6 +15,24 @@ pub fn oom(e: error{OutOfMemory}) noreturn {
     @panic(@errorName(e));
 }
 
+// Decode signed mouse coordinates without zigwin32's removed std.meta.Int API.
+pub fn xFromLparam(lparam: win32.LPARAM) i16 {
+    return @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
+}
+
+pub fn yFromLparam(lparam: win32.LPARAM) i16 {
+    return @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
+}
+
+test "LPARAM mouse coordinates preserve signed 16-bit values" {
+    // Negative screen coordinates occur on monitors left of or above the primary.
+    const lparam: win32.LPARAM = @bitCast(@as(usize, 0x8000ffff));
+    try std.testing.expectEqual(@as(i16, -1), xFromLparam(lparam));
+    try std.testing.expectEqual(@as(i16, -32768), yFromLparam(lparam));
+    try std.testing.expectEqual(@as(i16, 32767), xFromLparam(0x00007fff));
+    try std.testing.expectEqual(@as(i16, 32767), yFromLparam(0x7fff0000));
+}
+
 pub fn isCtrlDown() bool {
     return win32.GetKeyState(@intFromEnum(win32.VK_CONTROL)) < 0;
 }

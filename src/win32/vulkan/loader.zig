@@ -1,11 +1,7 @@
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-pub const vk = @cImport({
-    @cDefine("VK_NO_PROTOTYPES", "1");
-    @cDefine("VK_USE_PLATFORM_WIN32_KHR", "1");
-    @cInclude("vulkan/vulkan_win32_abi.h");
-});
+pub const vk = @import("vulkan");
 
 pub const LoadError = error{ LibraryUnavailable, ProcedureUnavailable };
 

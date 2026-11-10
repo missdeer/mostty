@@ -7,6 +7,7 @@ const global = global_mod.global;
 const Renderer = @import("renderer.zig");
 const tab_mgmt = @import("tab_mgmt.zig");
 const geom = @import("window_geom.zig");
+const util = @import("util.zig");
 const dispatch = @import("wnd/dispatch.zig");
 const Error = @import("error.zig").Error;
 
@@ -196,8 +197,8 @@ pub fn mainMessage(window: *state.Window, msg: u32, wp: win32.WPARAM, lp: win32.
         return 0;
     }
     if (msg == win32.WM_CAPTURECHANGED or msg == win32.WM_CANCELMODE) window.divider_drag = null;
-    const x: f64 = @floatFromInt(win32.xFromLparam(lp));
-    const y: f64 = @floatFromInt(win32.yFromLparam(lp));
+    const x: f64 = @floatFromInt(util.xFromLparam(lp));
+    const y: f64 = @floatFromInt(util.yFromLparam(lp));
     if (msg == win32.WM_LBUTTONDOWN) {
         const tab = window.activeTab();
         if (tab.layout.hitDivider(x, y)) |hit| {

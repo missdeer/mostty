@@ -338,8 +338,8 @@ fn reportMotion(window: *state.Window, hwnd: win32.HWND, mouse_x: i32, mouse_y: 
 
 pub fn onLButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     const cs = global.renderer.common.cell_size;
     const tbh = global_mod.tabBarHeight(hwnd);
     const client_size = win32.getClientSize(hwnd);
@@ -417,8 +417,8 @@ const selectWordCJK = word_selection.selectWordCJK;
 
 pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     const tbh = global_mod.tabBarHeight(hwnd);
     const cs = global.renderer.common.cell_size;
     const client_size = win32.getClientSize(hwnd);
@@ -495,8 +495,8 @@ pub fn onLButtonDblClk(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPA
 
 pub fn onLButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     if (reportButtonUp(window, hwnd, mouse_x, mouse_y, .left)) return 0;
     switch (window.mouse_capture) {
         .none => {},
@@ -539,7 +539,7 @@ pub fn onMouseWheel(hwnd: win32.HWND, wparam: win32.WPARAM, lparam: win32.LPARAM
     const notches = mouse_report.wheelNotches(&tab.wheel_accum, delta);
     if (notches == 0) return 0;
     if (!util.isShiftDown() and mouse_report.enabled(tab.term)) {
-        var pt: win32.POINT = .{ .x = win32.xFromLparam(lparam), .y = win32.yFromLparam(lparam) };
+        var pt: win32.POINT = .{ .x = util.xFromLparam(lparam), .y = util.yFromLparam(lparam) };
         const target_hwnd = tab.hwnd orelse hwnd;
         _ = win32.ScreenToClient(target_hwnd, &pt);
         const tm = terminalMouse(tab, target_hwnd, pt.x, pt.y);
@@ -588,8 +588,8 @@ pub fn onMouseMove(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
         window.tracking_mouse = true;
         window.tracking_hwnd = hwnd;
     }
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     const cs = global.renderer.common.cell_size;
     const tbh = global_mod.tabBarHeight(hwnd);
     const hover_id = if (hwnd == window.hwnd) null else @as(?types.TabId, global_mod.inputPane(hwnd).id);
@@ -730,8 +730,8 @@ pub fn onSetCursor(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win
 
 pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     const cs = global.renderer.common.cell_size;
     if (mouse_y < global_mod.tabBarHeight(hwnd)) {
         tooltip.hide(window);
@@ -749,24 +749,24 @@ pub fn onRButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?w
 
 pub fn onRButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     _ = reportButtonUp(window, hwnd, mouse_x, mouse_y, .right);
     return 0;
 }
 
 pub fn onMButtonDown(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     if (!util.isShiftDown()) _ = reportButtonDown(window, hwnd, mouse_x, mouse_y, .middle);
     return 0;
 }
 
 pub fn onMButtonUp(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
     const window = global_mod.windowFromHwnd(hwnd);
-    const mouse_x: i32 = win32.xFromLparam(lparam);
-    const mouse_y: i32 = win32.yFromLparam(lparam);
+    const mouse_x: i32 = util.xFromLparam(lparam);
+    const mouse_y: i32 = util.yFromLparam(lparam);
     _ = reportButtonUp(window, hwnd, mouse_x, mouse_y, .middle);
     return 0;
 }
