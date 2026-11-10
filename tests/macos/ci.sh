@@ -1,6 +1,7 @@
 #!/bin/bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache"
 mkdir -p tmp/ci-macos
 summary="$PWD/tmp/ci-macos/results.tsv"
 printf 'suite\tstatus\tdetail\n' > "$summary"
@@ -22,7 +23,7 @@ run_suite() {
     cat "tmp/ci-macos/$name.log"
     printf '::endgroup::\n'
 }
-run_suite unit zig build test --global-cache-dir .zig-cache --summary all
+run_suite unit zig build test --summary all
 run_suite bundle-themes swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/bundle-themes.swift zig-out/Mostty.app
 run_suite bundle-integrations swift -module-cache-path "$PWD/tmp/swift-module-cache" tests/macos/resource-bundle.swift zig-out/Mostty.app
 # Production AppKit title handling with bridge doubles; no windows, Metal or
@@ -35,9 +36,9 @@ if [ "$preflight_build" -ne 0 ]; then
     exit 1
 fi
 if tmp/ci-macos/preflight; then
-    run_suite automation zig build test-macos-automation --global-cache-dir .zig-cache --summary all
-    run_suite panes zig build test-macos-panes --global-cache-dir .zig-cache --summary all
-    run_suite pane-config zig build test-macos-pane-config --global-cache-dir .zig-cache --summary all
+    run_suite automation zig build test-macos-automation --summary all
+    run_suite panes zig build test-macos-panes --summary all
+    run_suite pane-config zig build test-macos-pane-config --summary all
     run_suite clipboard bash tests/macos/clipboard.sh
     if tmp/ci-macos/preflight pointer; then
         run_suite scrollbar bash tests/macos/scrollbar.sh
@@ -52,8 +53,8 @@ else
     for suite in automation panes pane-config clipboard scrollbar interactions; do
         printf '%s\tblocked\tGUI/Metal unavailable\n' "$suite" >> "$summary"
     done
-    run_suite panes-compile zig build check-macos-panes --global-cache-dir .zig-cache --summary all
-    run_suite automation-compile zig build check-macos-automation --global-cache-dir .zig-cache --summary all
+    run_suite panes-compile zig build check-macos-panes --summary all
+    run_suite automation-compile zig build check-macos-automation --summary all
     run_suite clipboard-compile bash tests/macos/clipboard.sh --compile-only
     run_suite scrollbar-compile bash tests/macos/scrollbar.sh --compile-only
     run_suite interactions-compile bash tests/macos/interactions.sh --compile-only

@@ -549,7 +549,7 @@ test "closing output reader drains a full pipe until EOF without the UI" {
     // With publication stopped, the reader must discard instead of exiting.
     defer thread.join();
     defer win32.closeHandle(write);
-    const block = [_]u8{'x'} ** 65536;
+    const block: [65536]u8 = @splat('x');
     for (0..32) |_| {
         var written: u32 = 0;
         try std.testing.expect(win32.WriteFile(write, &block, block.len, &written, null) != 0);

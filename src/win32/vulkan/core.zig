@@ -1818,7 +1818,7 @@ test "only an incompatible Vulkan driver is classified as missing API capability
 }
 
 test "present tier preference is ordered from explicit wait to FIFO" {
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(PresentTier).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 3), @typeInfo(PresentTier).@"enum".field_names.len);
     try std.testing.expectEqual(PresentTier.present_wait_mailbox, try selectPresentTier(true, true, null));
     try std.testing.expectEqual(PresentTier.timeline_mailbox, try selectPresentTier(true, false, null));
     try std.testing.expectEqual(PresentTier.fifo, try selectPresentTier(false, false, null));

@@ -89,7 +89,7 @@ pub fn startupErrorDescription(err: StartupError) []const u8 {
     };
 }
 
-const debug_stats_enabled = builtin.mode == .Debug;
+const debug_stats_enabled = builtin.mode == .debug;
 const DebugStats = struct {
     rows_uploaded: u64 = 0,
     rows_skipped: u64 = 0,

@@ -9,8 +9,8 @@ by a Swift/AppKit application (`src/macos/app/`) through a C-ABI boundary
 (`src/macos/capi.zig`); every VT-touching call runs on the main thread. PTY
 reading and queued input writing run on independent background threads.
 
-Pinned versions: Zig `0.16.0`, Vulkan SDK `1.4.350.0` in CI. The Windows application requires the MSVC ABI, Windows SDK `fxc.exe`, Windows SDK `dxc.exe` with `dxil.dll` beside it (signed DXIL for D3D12; the Vulkan SDK DXC cannot sign), and Vulkan SDK `dxc.exe` / `spirv-cross.exe` / `glslangValidator.exe` / `spirv-val.exe`. The macOS core target does not discover or depend on those Windows tools. Build the Windows application with
-`zig build --global-cache-dir .zig-cache` with Zig 0.16.0 on PATH.
+Pinned versions: Zig `0.17.1`, Vulkan SDK `1.4.350.0` in CI. The Windows application requires the MSVC ABI, Windows SDK `fxc.exe`, Windows SDK `dxc.exe` with `dxil.dll` beside it (signed DXIL for D3D12; the Vulkan SDK DXC cannot sign), and Vulkan SDK `dxc.exe` / `spirv-cross.exe` / `glslangValidator.exe` / `spirv-val.exe`. The macOS core target does not discover or depend on those Windows tools. Build the Windows application with
+`zig build` with Zig 0.17.1 on PATH and `ZIG_GLOBAL_CACHE_DIR=.zig-cache` in the environment.
 
 ---
 

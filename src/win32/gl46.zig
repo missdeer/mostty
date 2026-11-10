@@ -710,7 +710,7 @@ fn ensureInitialized(self: *Gl46Renderer, hwnd: win32.HWND) StartupError!void {
         },
     };
 
-    const context_flags: i32 = if (@import("builtin").mode == .Debug)
+    const context_flags: i32 = if (@import("builtin").mode == .debug)
         WGL_CONTEXT_DEBUG_BIT_ARB
     else
         0;

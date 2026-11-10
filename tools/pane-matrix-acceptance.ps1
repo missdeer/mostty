@@ -1,6 +1,7 @@
 param([string]$Zig = 'zig', [switch]$SkipBuild)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
+$env:ZIG_GLOBAL_CACHE_DIR=Join-Path $root '.zig-cache'
 $matrixId=[Guid]::NewGuid().ToString('N')
 $matrixRoot=Join-Path $root "tmp/six-backend-$matrixId"
 New-Item -ItemType Directory -Path $matrixRoot | Out-Null
@@ -14,9 +15,9 @@ try{
     & (Join-Path $PSScriptRoot 'pane-matrix-summary-test.ps1') *> (Join-Path $matrixRoot 'summary-tests.log')
     if(-not $?){throw 'Matrix summary contract tests failed'}
     if (-not $SkipBuild) {
-        & $Zig build --global-cache-dir .zig-cache *> (Join-Path $matrixRoot 'build.log')
+        & $Zig build *> (Join-Path $matrixRoot 'build.log')
         if($LASTEXITCODE -ne 0){throw 'Matrix build failed'}
-        & $Zig build test --global-cache-dir .zig-cache --summary all *> (Join-Path $matrixRoot 'tests.log')
+        & $Zig build test --summary all *> (Join-Path $matrixRoot 'tests.log')
         if($LASTEXITCODE -ne 0){throw 'Matrix tests failed'}
     }
     $exeHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash

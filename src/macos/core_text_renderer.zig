@@ -1360,23 +1360,24 @@ test "font comparison checks owned strings and every configuration field" {
     var owned = try FamilySet.init(std.testing.allocator, base);
     defer owned.deinit();
     try std.testing.expect(owned.options.eql(base));
-    inline for (std.meta.fields(FontOptions)) |field| {
+    const fields = @typeInfo(FontOptions).@"struct";
+    inline for (fields.field_names, fields.field_types) |name, Field| {
         var changed = base;
-        if (field.type == []const u8) {
-            @field(changed, field.name) = "different";
-        } else if (field.type == []const []const u8) {
-            @field(changed, field.name) = &.{"different"};
-        } else if (field.type == [4]Config.FontStyle) {
+        if (Field == []const u8) {
+            @field(changed, name) = "different";
+        } else if (Field == []const []const u8) {
+            @field(changed, name) = &.{"different"};
+        } else if (Field == [4]Config.FontStyle) {
             changed.styles[2] = .{ .named = "different" };
-        } else if (field.type == Config.SyntheticStyle) {
+        } else if (Field == Config.SyntheticStyle) {
             changed.synthetic.bold = false;
-        } else if (field.type == []const Config.FontFeature) {
+        } else if (Field == []const Config.FontFeature) {
             changed.features = &.{.{ .tag = 1, .value = 0 }};
-        } else if (field.type == []const Config.CodepointMap) {
+        } else if (Field == []const Config.CodepointMap) {
             changed.codepoint_maps = &.{.{ .range_start = 1, .range_end = 2, .family = "different" }};
-        } else if (field.type == bool) {
+        } else if (Field == bool) {
             changed.ligatures = !base.ligatures;
-        } else if (field.type == f32) {
+        } else if (Field == f32) {
             changed.size += 1;
         } else @compileError("new font option needs equality coverage");
         try std.testing.expect(!owned.options.eql(changed));
@@ -1699,7 +1700,7 @@ test "shaping cache preserves pixels Unicode font identity and dynamic color" {
         try std.testing.expectEqual(FontSelectionTest.CTLineGetGlyphCount(fresh.line), FontSelectionTest.CTLineGetGlyphCount(result.shape.line));
     }
     try std.testing.expectEqual(ShapingCache.capacity, cache.entries.len);
-    const long = [_]u16{'a'} ** 129;
+    const long: [129]u16 = @splat('a');
     const uncached = try cache.get(allocator, &long, font);
     defer uncached.deinit();
     try std.testing.expect(uncached.owned);

@@ -1,6 +1,6 @@
 # Test inventory
 
-Use Zig **0.16.0**. Run commands from the repository root. Logs distinguish
+Use Zig **0.17.1**. Run commands from the repository root. Logs distinguish
 `pass`, `fail`, `blocked`, `skipped`, and `compile-only`; a green build does not
 claim that blocked hardware scenarios passed. Zig summaries retain individual
 skipped counts (for example the macOS-only config-path test on other hosts).

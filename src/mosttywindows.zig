@@ -335,7 +335,7 @@ fn mainWithShowCommand(startup_show_cmd: win32.SHOW_WINDOW_CMD) !void {
             .{ .ALERTABLE = 1, .INPUTAVAILABLE = 1 },
         );
 
-        if (wait_result == @intFromEnum(win32.WAIT_FAILED)) {
+        if (wait_result == @backingInt(win32.WAIT_FAILED)) {
             win32.panicWin32("MsgWaitForMultipleObjectsEx", win32.GetLastError());
         }
         const wait_io_completion: u32 = 0xc0;
@@ -388,12 +388,13 @@ fn confirmRendererFallback(
             "capabilities vary by host and session, and this session did not satisfy the configured renderer's requirements.\n\n"
     else
         "";
-    const message = std.fmt.bufPrintZ(
+    const message = std.mem.printSentinel(
         &message_buf,
         "The configured renderer ({s}) failed its startup capability check.\n\n" ++
             "{s}.\n\n{s}Use D3D11 for this session instead?\n\n" ++
             "Choose Yes to continue with D3D11, or No to exit Mostty.",
         .{ @tagName(fallback.configured), failure.description(), remote_note },
+        0,
     ) catch unreachable;
     return win32.MessageBoxA(
         hwnd,
@@ -407,13 +408,14 @@ fn confirmRendererFallback(
 fn confirmInvalidRendererFallback(value: []const u8) bool {
     var message_buf: [768]u8 = undefined;
     const display_value = value[0..@min(value.len, 128)];
-    const message = std.fmt.bufPrintZ(
+    const message = std.mem.printSentinel(
         &message_buf,
         "The command-line renderer value ({s}) is not recognized.\n\n" ++
             "Expected d3d11, d3d12, opengl, pure-opengl, vulkan, or native-vulkan.\n\n" ++
             "Use D3D11 for this session instead?\n\n" ++
             "Choose Yes to continue with D3D11, or No to exit Mostty.",
         .{display_value},
+        0,
     ) catch unreachable;
     return win32.MessageBoxA(
         null,

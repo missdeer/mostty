@@ -22,7 +22,7 @@ test "invalid UTF16 is rejected before any bracketed paste can be emitted" {
     try validateUtf16(&.{ 'a', 0xd83d, 0xde00 });
     try std.testing.expectError(error.DanglingSurrogateHalf, validateUtf16(&.{ 'a', 0xd800 }));
     try std.testing.expectError(error.UnexpectedSecondSurrogateHalf, validateUtf16(&.{ 'a', 0xdc00 }));
-    const malformed = ([_]u16{'a'} ** 8192) ++ [_]u16{0xd800};
+    const malformed = @as([8192]u16, @splat('a')) ++ [_]u16{0xd800};
     var tiny: [1]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&tiny);
     // A streaming writer would have flushed the prefix long before the bad

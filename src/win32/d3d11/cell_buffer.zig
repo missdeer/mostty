@@ -39,7 +39,7 @@ pub const max_shader_col: u32 = 4096;
 
 // Only flip in Debug builds: release builds emit zero overhead, but
 // renderer-side diagnostic counters always flush via `maybeLogDiag`.
-const debug_stats_enabled = builtin.mode == .Debug;
+const debug_stats_enabled = builtin.mode == .debug;
 
 const VisualCell = struct {
     codepoint: u21,

@@ -254,7 +254,7 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     // runtime symbols Apple's linker cannot resolve without Zig's own runtime.
     const vt = b.dependency("ghostty", .{
         .target = app_target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     }).module("ghostty-vt");
 
     const core = b.addLibrary(.{
@@ -262,12 +262,12 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/mosttymacos.zig"),
             .target = app_target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     core.root_module.addImport("vt", vt);
     addMacosSdkPaths(vt, core);
-    core.root_module.addImport("z2d", b.dependency("z2d", .{ .target = app_target, .optimize = .ReleaseFast }).module("z2d"));
+    core.root_module.addImport("z2d", b.dependency("z2d", .{ .target = app_target, .optimize = .fast }).module("z2d"));
     core.root_module.linkSystemLibrary("c", .{});
 
     // Apple spells the arches differently than Zig; swiftc must target the same
@@ -305,7 +305,8 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
         automation_link.addFileInput(b.path(b.fmt("src/macos/app/{s}", .{name})));
     }
     const pane_client = b.addSystemCommand(&.{ "swiftc", "-target", b.fmt("{s}-apple-macos13.0", .{swift_arch}) });
-    pane_client.addArgs(&.{ "-module-cache-path", b.pathFromRoot("tmp/swift-module-cache") });
+    pane_client.setCwd(b.path(""));
+    pane_client.addArgs(&.{ "-module-cache-path", "tmp/swift-module-cache" });
     pane_client.addFileArg(b.path("tests/macos/pane-client.swift"));
     pane_client.addArg("-o");
     const pane_client_exe = pane_client.addOutputFileArg("pane-client");
@@ -410,7 +411,7 @@ fn buildMacosApp(b: *std.Build, target: std.Build.ResolvedTarget) void {
     const automation_run = b.addSystemCommand(&.{"bash"});
     automation_run.addFileArg(b.path("tests/macos/automation.sh"));
     automation_run.addFileArg(automation_exe);
-    automation_run.addArg(b.getInstallPath(.{ .custom = "Mostty.app" }, ""));
+    automation_run.addDirectoryArg(b.graph.path(.install_prefix, "Mostty.app"));
     automation_run.step.dependOn(app_step);
     b.step("test-macos-automation", "Exercise shell integration, AppleScript, and App Intents with real terminal panes").dependOn(&automation_run.step);
 }
@@ -472,7 +473,7 @@ fn buildWindows(
     exe.root_module.addWin32ResourceFile(.{
         .file = b.path("src/win32/mostty.rc"),
     });
-    exe.subsystem = .Windows;
+    exe.subsystem = .windows;
 
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
@@ -496,7 +497,7 @@ fn buildWindows(
     const run = b.addRunArtifact(exe);
     run.step.dependOn(&install.step);
     run.step.dependOn(&install_resources.step);
-    if (b.args) |a| run.addArgs(a);
+    run.addPassthruArgs();
     b.step("run", "").dependOn(&run.step);
 
     const tests = b.addTest(.{

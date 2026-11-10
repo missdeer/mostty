@@ -534,7 +534,7 @@ test "a later shell cannot inherit an earlier pane master" {
     try first.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .shell = "/bin/sh", .command = "sleep 30" });
     defer first.deinit();
     var command_buffer: [160]u8 = undefined;
-    const command = try std.fmt.bufPrintZ(&command_buffer, "if test -e /dev/fd/{d}; then echo inherited-master; else echo isolated; fi", .{first.master_fd});
+    const command = try std.mem.printSentinel(&command_buffer, "if test -e /dev/fd/{d}; then echo inherited-master; else echo isolated; fi", .{first.master_fd}, 0);
     var second: PtySession = undefined;
     try second.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 80, .rows = 24, .shell = "/bin/sh", .command = command });
     defer second.deinit();

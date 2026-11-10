@@ -4127,11 +4127,12 @@ pub const ProcTable = struct {
     pub fn init(procs: *ProcTable, loader: anytype) bool {
         @setEvalBranchQuota(1_000_000);
         var success: u1 = 1;
-        inline for (@typeInfo(ProcTable).@"struct".fields) |field_info| {
-            switch (@typeInfo(field_info.type)) {
+        const fields = @typeInfo(ProcTable).@"struct";
+        inline for (fields.field_names, fields.field_types) |name, Field| {
+            switch (@typeInfo(Field)) {
                 .pointer => |ptr_info| switch (@typeInfo(ptr_info.child)) {
                     .@"fn" => {
-                        success &= @intFromBool(procs.initCommand(loader, field_info.name));
+                        success &= @intFromBool(procs.initCommand(loader, name));
                     },
                     else => comptime unreachable,
                 },

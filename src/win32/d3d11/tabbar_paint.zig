@@ -172,8 +172,8 @@ pub fn signature(
 // changes. The field-count guard fails the build when `TabDrawInfo` grows a
 // field, forcing that decision instead of letting it default to "not hashed".
 test "band signature covers every paint input" {
-    comptime std.debug.assert(std.meta.fields(types.TabDrawInfo).len == 8);
-    comptime std.debug.assert(std.meta.fields(types.TabBarDraw).len == 6);
+    comptime std.debug.assert(@typeInfo(types.TabDrawInfo).@"struct".field_names.len == 8);
+    comptime std.debug.assert(@typeInfo(types.TabBarDraw).@"struct".field_names.len == 6);
 
     const base = types.TabDrawInfo{
         .col_start = 0,
@@ -195,7 +195,7 @@ test "band signature covers every paint input" {
     const baseline = one(base);
     try std.testing.expectEqual(baseline, one(base));
 
-    var variants: [8]types.TabDrawInfo = .{base} ** 8;
+    var variants: [8]types.TabDrawInfo = @splat(base);
     variants[0].col_start += 1;
     variants[1].col_end += 1;
     variants[2].close_col += 1;

@@ -347,11 +347,12 @@ fn fallbackToD3d11With(
 
 pub fn reportD3d11Unavailable(hwnd: ?win32.HWND, err: D3d11InitError) void {
     var message_buf: [512]u8 = undefined;
-    const message = std.fmt.bufPrintZ(
+    const message = std.mem.printSentinel(
         &message_buf,
         "Mostty could not initialize its D3D11 renderer ({s}).\n\n" ++
             "There is no usable renderer left, so Mostty will exit.",
         .{@errorName(err)},
+        0,
     ) catch "Mostty could not initialize its D3D11 renderer. Mostty will exit.";
     _ = win32.MessageBoxA(
         hwnd,
@@ -614,12 +615,13 @@ pub fn render(
 
 pub fn confirmRuntimeFallback(hwnd: win32.HWND, failure: RuntimeFailure) bool {
     var message_buf: [768]u8 = undefined;
-    const message = std.fmt.bufPrintZ(
+    const message = std.mem.printSentinel(
         &message_buf,
         "The configured renderer ({s}) encountered an unrecoverable runtime failure while {s}.\n\n" ++
             "{s}.\n\nUse D3D11 for this session instead?\n\n" ++
             "Choose Yes to continue with D3D11, or No to exit Mostty.",
         .{ failure.backendName(), failure.operationDescription(), failure.codeName() },
+        0,
     ) catch unreachable;
     return win32.MessageBoxA(
         hwnd,
@@ -680,9 +682,9 @@ test "every selectable backend answers the whole facade contract" {
         "applyGlyphResult",            "reloadBackgroundImage",
         "applyDecodedBackgroundImage", "releaseKittyImagesForTab",
     };
-    inline for (@typeInfo(RendererBackend).@"union".fields) |field| {
+    inline for (@typeInfo(RendererBackend).@"union".field_types) |Backend| {
         inline for (contract) |name| {
-            try std.testing.expect(@hasDecl(field.type, name));
+            try std.testing.expect(@hasDecl(Backend, name));
         }
     }
 }
@@ -693,7 +695,7 @@ test "d3d11 stays the default so an untouched install is unaffected" {
     try std.testing.expectEqual(Config.RendererBackend.d3d11, (Config{}).renderer);
     try std.testing.expectEqualStrings(
         "d3d11",
-        @typeInfo(RendererBackend).@"union".fields[0].name,
+        @typeInfo(RendererBackend).@"union".field_names[0],
     );
 }
 
@@ -705,10 +707,10 @@ test "all backends consume one rasterizer, differing only in handoff form" {
     try std.testing.expectEqual(shared.GlyphHandoff.cpu_pixels, d3d12.Renderer.glyph_handoff);
     try std.testing.expectEqual(shared.GlyphHandoff.cpu_pixels, gl46.glyph_handoff);
     try std.testing.expectEqual(shared.GlyphHandoff.cpu_pixels, vulkan.glyph_handoff);
-    inline for (@typeInfo(RendererBackend).@"union".fields) |field| {
+    inline for (@typeInfo(RendererBackend).@"union".field_types) |Backend| {
         // Neither backend may own font machinery; it belongs to the service.
         inline for (.{ "dwrite_factory", "d2d_factory", "text_formats" }) |owned_by_service| {
-            try std.testing.expect(!@hasField(field.type, owned_by_service));
+            try std.testing.expect(!@hasField(Backend, owned_by_service));
         }
     }
 }
@@ -718,10 +720,10 @@ test "a wide glyph's two halves are copied under one surface acquisition" {
     // intervening write blocks the UI thread forever. Taking both halves in
     // one call is what makes that impossible; a signature accepting a single
     // region would invite the caller to loop and deadlock instead.
-    const params = @typeInfo(@TypeOf(d3d11.atlasCopyStaging)).@"fn".params;
+    const params = @typeInfo(@TypeOf(d3d11.atlasCopyStaging)).@"fn".param_types;
     try std.testing.expectEqual(@as(usize, 4), params.len);
-    try std.testing.expectEqual(?gpu.AtlasCopy, params[2].type.?);
-    try std.testing.expectEqual(?gpu.AtlasCopy, params[3].type.?);
+    try std.testing.expectEqual(?gpu.AtlasCopy, params[2].?);
+    try std.testing.expectEqual(?gpu.AtlasCopy, params[3].?);
 }
 
 test "backend does not duplicate renderer common state" {

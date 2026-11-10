@@ -100,22 +100,22 @@ fn msgSendPointer(comptime Return: type) *const fn () callconv(.c) void {
 
 fn msgSendFn(comptime Return: type, comptime Target: type, comptime Args: type) type {
     const info = @typeInfo(Args).@"struct";
-    var types: [info.fields.len + 2]type = undefined;
+    var types: [info.field_types.len + 2]type = undefined;
     types[0] = Target;
     types[1] = RawSel;
-    for (info.fields, 0..) |field, index| types[index + 2] = unwrapType(field.type);
+    for (info.field_types, 0..) |field_type, index| types[index + 2] = unwrapType(field_type);
     return @Fn(&types, &@splat(.{}), Return, .{ .@"callconv" = .c });
 }
 
 fn UnwrappedArgs(comptime Args: type) type {
-    const fields = @typeInfo(Args).@"struct".fields;
+    const fields = @typeInfo(Args).@"struct".field_types;
     var types: [fields.len]type = undefined;
-    for (fields, 0..) |field, index| types[index] = unwrapType(field.type);
+    for (fields, 0..) |field_type, index| types[index] = unwrapType(field_type);
     return @Tuple(&types);
 }
 
 fn unwrapArgs(args: anytype) UnwrappedArgs(@TypeOf(args)) {
-    const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+    const fields = @typeInfo(@TypeOf(args)).@"struct".field_types;
     var result: UnwrappedArgs(@TypeOf(args)) = undefined;
     inline for (fields, 0..) |_, index| {
         result[index] = if (unwrapType(@TypeOf(args[index])) != @TypeOf(args[index]))

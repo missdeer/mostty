@@ -307,7 +307,8 @@ test "Metal creates upload and render textures, draws, and resizes" {
     var backend = try init();
     defer backend.deinit();
     try backend.resize(2, 2);
-    try backend.render(&([_]u8{ 255, 255, 255, 255 } ** 4));
+    const pixels: [16]u8 = @splat(255);
+    try backend.render(&pixels);
     try std.testing.expect(backend.texture() != null);
     try std.testing.expectEqual(@as(c_ulong, 2), backend.target.?.getProperty(c_ulong, "storageMode"));
     try backend.resize(1, 1);

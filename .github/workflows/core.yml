@@ -7,6 +7,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  ZIG_GLOBAL_CACHE_DIR: .zig-cache
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,13 +20,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.1
       - name: Run shared suites
         shell: bash
         run: |
           set -o pipefail
           mkdir -p tmp/ci-core
-          zig build test -Dcore-only -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache --summary all 2>&1 | tee tmp/ci-core/unit.log
+          zig build test -Dcore-only -Doptimize=${{ matrix.optimize }} --summary all 2>&1 | tee tmp/ci-core/unit.log
       - name: Preserve shared test evidence
         if: always()
         uses: actions/upload-artifact@v4

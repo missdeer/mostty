@@ -26,23 +26,6 @@ const StreamHandler = struct {
             .kitty_keyboard_query, .kitty_keyboard_push, .kitty_keyboard_pop, .kitty_keyboard_set, .kitty_keyboard_set_or, .kitty_keyboard_set_not => return,
             else => {},
         }
-        if (action == .erase_display_scrollback) {
-            // ED3 relocates erased history pins without marking them garbage.
-            // Retire image anchors first so they cannot reappear at the top.
-            const screen = self.terminal.screens.active;
-            var changed = false;
-            var placements = screen.kitty_images.placements.valueIterator();
-            while (placements.next()) |placement| {
-                const pin = switch (placement.location) {
-                    .pin => |pin| pin,
-                    .virtual, .relative => continue,
-                };
-                if (pin.garbage or screen.pages.pointFromPin(.active, pin.*) != null) continue;
-                pin.garbage = true;
-                changed = true;
-            }
-            if (changed) screen.kitty_images.markMutated(self.terminal.io());
-        }
         self.inner.vt(action, value);
     }
 };
@@ -306,7 +289,8 @@ test "session resize rejects a zero grid without changing terminal state" {
 
 test "every wrapped URL cell resolves the full mixed-character address" {
     const url_hover = @import("url_hover.zig");
-    const suffix = "a-b_C%2F+9=" ** 8;
+    const part = "a-b_C%2F+9=";
+    const suffix = part ++ part ++ part ++ part ++ part ++ part ++ part ++ part;
     const urls = [_][]const u8{
         "https://example.test/login?redirect_uri=https%3A%2F%2Fexample.test%2Fcallback&state=" ++ suffix ++ "#fragment",
         "https://example.test/login?redirect_uri=http://redirect.test/finish?state=" ++ suffix,
@@ -368,7 +352,8 @@ test "URL detection keeps prose boundaries and enforces the UTF-8 byte limit" {
         // Adjacent prose and an unmatched closing brace are not part of the address.
         try std.testing.expectEqualStrings(url, hit.url());
     }
-    const limit_url = "https://x/" ++ ("\u{4e2d}" ** 1362);
+    const cjk: [1362][3]u8 = @splat("\u{4e2d}".*);
+    const limit_url = "https://x/" ++ @as([4086]u8, @bitCast(cjk));
     try std.testing.expectEqual(url_hover.MAX_URL_LEN, limit_url.len);
     session.feed("\x1b[2J\x1b[H" ++ limit_url);
     const hit = url_hover.detectAt(session.term, 0, 0).?;
@@ -446,15 +431,18 @@ test "fragmented ED3 retires history images and preserves active image anchors" 
         if (placement.location.pin != history_pin) active_pin = placement.location.pin;
     }
     try std.testing.expect(active_pin != null);
-    screen.kitty_images.dirty = false;
+    const dirty = screen.kitty_images.dirty;
     const generation = screen.kitty_images.generation;
     for ("\x1b[3J") |byte| session.feed(&.{byte});
-    // Removed history must never be rendered at a relocated pin's new position.
-    try std.testing.expect(history_pin.garbage);
+    // Upstream now removes history placements and frees their tracked pins.
+    // Only the active image may remain; erased history cannot reappear.
+    try std.testing.expectEqual(@as(u32, 1), screen.kitty_images.placements.count());
+    placements = screen.kitty_images.placements.valueIterator();
+    try std.testing.expect(placements.next().?.location.pin == active_pin.?);
     try std.testing.expect(!active_pin.?.garbage);
     try std.testing.expect(screen.pages.pointFromPin(.active, active_pin.?.*) != null);
     // Windows also needs a mutation signal to repaint the disappearing image.
-    try std.testing.expect(screen.kitty_images.dirty);
+    try std.testing.expect(screen.kitty_images.dirty != dirty);
     try std.testing.expect(screen.kitty_images.generation != generation);
 }
 
@@ -570,7 +558,7 @@ test "large encoded scratch is reclaimed without losing multipart bytes" {
 
 fn feedOversizedMultipart(session: *Session) void {
     session.feed("\x1b]1337;MultipartFile=inline=1;width=9px\x07\x1b]1337;FilePart=");
-    const part = [_]u8{'A'} ** 4096;
+    const part: [4096]u8 = @splat('A');
     for (0..InlineImages.retained_scratch_limit / part.len + 1) |_| session.feed(&part);
     session.feed("\x07");
 }
@@ -717,7 +705,8 @@ test "bulk Sixel ignores BEL without consuming payload capacity" {
         const image = images.next().?;
         try std.testing.expectEqual(@as(u32, 2), image.width);
         try std.testing.expectEqual(@as(u32, 6), image.height);
-        try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 0, 0, 255 } ** 12), image.data.bytes().?);
+        const pixels: [12][4]u8 = @splat(.{ 255, 0, 0, 255 });
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pixels), image.data.bytes().?);
     }
 }
 

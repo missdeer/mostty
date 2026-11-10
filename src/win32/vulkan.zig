@@ -1179,8 +1179,8 @@ test "a glyph atlas upload failure reaches the runtime recovery path instead of 
 }
 
 test "every Vulkan runtime failure operation can be named in the fallback prompt" {
-    inline for (@typeInfo(RuntimeFailure.Operation).@"enum".fields) |field| {
-        const operation: RuntimeFailure.Operation = @enumFromInt(field.value);
+    inline for (@typeInfo(RuntimeFailure.Operation).@"enum".field_names) |name| {
+        const operation = @field(RuntimeFailure.Operation, name);
         try std.testing.expect(operation.description().len > 0);
     }
 }

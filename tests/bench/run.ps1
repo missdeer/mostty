@@ -1,6 +1,7 @@
 # Windows benchmark runner. Both executables are built before timing begins.
 $ErrorActionPreference = 'Stop'
 $root = (Get-Location).Path
+$env:ZIG_GLOBAL_CACHE_DIR = Join-Path $root '.zig-cache'
 function GitValue([string[]]$Arguments) {
     $value = & git @Arguments
     if ($LASTEXITCODE -ne 0) { throw "git failed: $Arguments" }
@@ -59,7 +60,7 @@ foreach ($side in @('base', 'head')) {
     [IO.File]::WriteAllText("$tree/src/mosttywindows.zig", $entry)
     Push-Location $tree
     try {
-        & zig build runtime-bench -Druntime-bench -Doptimize=ReleaseFast -Dcpu=baseline --global-cache-dir "$root/.zig-cache" *> "$out/$side-build.log"
+        & zig build runtime-bench -Druntime-bench -Doptimize=ReleaseFast -Dcpu=baseline *> "$out/$side-build.log"
         if ($LASTEXITCODE -ne 0) { Get-Content "$out/$side-build.log" -Tail 100; throw "Benchmark build failed: $side" }
     } finally { Pop-Location }
 }

@@ -17,7 +17,7 @@ timings include its writes and are not uninstrumented application timings.
 
 Run `BENCH_BASE=<commit> bash tests/bench/run.sh` on Linux/macOS, or set
 `BENCH_BASE` then run `tests/bench/run.ps1` on Windows, in a checkout with Zig
-0.16.0 and its normal platform prerequisites. Use a fresh `tmp/runtime-bench`
+0.17.1 and its normal platform prerequisites. Use a fresh `tmp/runtime-bench`
 directory/worktree registry for a new comparison, or set `BENCH_OUTPUT` to
 another relative path under `tmp/`. On Linux, run
 `python3 tests/bench/report.py tmp/runtime-bench tmp/benchmark-report` to analyze

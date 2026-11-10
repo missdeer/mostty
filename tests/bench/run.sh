@@ -40,9 +40,9 @@ for side in base head; do
   if [[ $(uname -s) == Darwin ]]; then
     cat "$root/tests/bench/macos-capi.zig" >> "$tree/src/macos/capi.zig"
     printf '\ncomptime { _ = @import("runtime_bench.zig"); }\npub fn runtimeBenchAllocator() @import("std").mem.Allocator { return @import("std").heap.c_allocator; }\n' >> "$tree/src/mosttymacos.zig"
-    (cd "$tree" && zig build runtime-bench -Druntime-bench -Doptimize=ReleaseFast -Dcpu=baseline --global-cache-dir "$root/.zig-cache") > "$out/$side-build.log" 2>&1
+    (cd "$tree" && ZIG_GLOBAL_CACHE_DIR="$root/.zig-cache" zig build runtime-bench -Druntime-bench -Doptimize=ReleaseFast -Dcpu=baseline) > "$out/$side-build.log" 2>&1
   else
-    (cd "$tree" && zig build runtime-bench -Druntime-bench -Dcore-only -Doptimize=ReleaseFast -Dcpu=baseline --global-cache-dir "$root/.zig-cache") > "$out/$side-build.log" 2>&1
+    (cd "$tree" && ZIG_GLOBAL_CACHE_DIR="$root/.zig-cache" zig build runtime-bench -Druntime-bench -Dcore-only -Doptimize=ReleaseFast -Dcpu=baseline) > "$out/$side-build.log" 2>&1
   fi
 done
 if [[ $(uname -s) == Darwin ]]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(lscpu | tr '\n' ' '); fi

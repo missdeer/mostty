@@ -38,12 +38,14 @@ pub const Layer = enum {
 
 images: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
 placements: std.ArrayListUnmanaged(Placement) = .empty,
+placeholder_state: vt.RenderState = .empty,
 
 pub fn deinit(self: *KittyImages, allocator: std.mem.Allocator) void {
     var it = self.images.valueIterator();
     while (it.next()) |entry| entry.image.release();
     self.images.deinit(allocator);
     self.placements.deinit(allocator);
+    self.placeholder_state.deinit(allocator);
     self.* = .{};
 }
 
@@ -63,7 +65,7 @@ pub fn sync(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal
     }
 
     const top = screen.pages.getTopLeft(.viewport);
-    const bottom = screen.pages.getBottomRight(.viewport) orelse return;
+    if (screen.pages.getBottomRight(.viewport) == null) return;
     const top_y = screen.pages.pointFromPin(.screen, top).?.screen.y;
     var virtual = false;
     var it = storage.placements.iterator();
@@ -94,11 +96,23 @@ pub fn sync(self: *KittyImages, allocator: std.mem.Allocator, term: *vt.Terminal
         });
     }
     if (virtual) {
-        var placeholders = vt.kitty.graphics.unicode.placementIterator(top, bottom);
+        try self.placeholder_state.update(allocator, term);
+        var placeholders = self.placeholder_state.imagePlacementIterator();
         while (placeholders.next()) |p| {
+            if (p.protocol.kitty.kind != .virtual) continue;
             const image = storage.imageById(p.image_id) orelse continue;
-            const placement = p.renderPlacement(storage, &image, term.width_px / term.cols, term.height_px / term.rows) catch continue;
-            try self.append(allocator, term, top_y, image, p.placement_id, -1, placement);
+            const pin = screen.pages.pin(.{ .viewport = .{ .x = @intCast(p.x), .y = @intCast(p.y) } }) orelse continue;
+            try self.append(allocator, term, top_y, image, p.protocol.kitty.placement_id, p.z, .{
+                .top_left = pin,
+                .offset_x = p.offset_x,
+                .offset_y = p.offset_y,
+                .source_x = p.source_x,
+                .source_y = p.source_y,
+                .source_width = p.source_width,
+                .source_height = p.source_height,
+                .dest_width = p.width,
+                .dest_height = p.height,
+            });
         }
     }
     std.mem.sortUnstable(Placement, self.placements.items, {}, struct {
@@ -164,6 +178,54 @@ pub fn draw(self: *const KittyImages, context: *graphics.BitmapContext, layer: L
     }
 }
 
+test "virtual image rows preserve source crops and disappear when placeholders are erased" {
+    const allocator = std.testing.allocator;
+    var term = try vt.Terminal.init(std.testing.io, allocator, .{ .cols = 10, .rows = 5 });
+    defer term.deinit(allocator);
+    term.width_px = 100;
+    term.height_px = 50;
+    term.modes.set(.grapheme_cluster, true);
+    const storage = &term.screens.active.kitty_images;
+    const pixels = try allocator.alloc(u8, 10 * 10 * 3);
+    @memset(pixels, 255);
+    try storage.addImage(std.testing.io, allocator, term.screens.active, .{
+        .id = 1,
+        .width = 10,
+        .height = 10,
+        .format = .rgb,
+        .data = .{ .complete = pixels },
+    });
+    try storage.addPlacement(std.testing.io, allocator, term.screens.active, 1, 1, .{
+        .location = .{ .virtual = {} },
+        .columns = 2,
+        .rows = 2,
+    });
+    try term.setAttribute(.{ .@"256_fg" = 1 });
+    try term.setAttribute(.{ .@"256_underline_color" = 1 });
+    term.screens.active.cursorAbsolute(3, 1);
+    try term.printString("\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}");
+    term.screens.active.cursorAbsolute(3, 2);
+    try term.printString("\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}");
+    var cache: KittyImages = .{};
+    defer cache.deinit(allocator);
+    for (0..2) |_| {
+        try cache.sync(allocator, &term);
+        try std.testing.expectEqual(@as(usize, 2), cache.placements.items.len);
+        for (cache.placements.items, 0..) |p, row| {
+            try std.testing.expectEqual(@as(f64, 30), p.x);
+            try std.testing.expectEqual(@as(f64, @floatFromInt((row + 1) * 10)), p.y);
+            try std.testing.expectEqual(@as(u32, 20), p.width);
+            try std.testing.expectEqual(@as(u32, 10), p.height);
+            // Each placeholder row shows its own half of the source image.
+            try std.testing.expectEqual(@as(u32, @intCast(row * 5)), p.source_y);
+            try std.testing.expectEqual(@as(u32, 5), p.source_height);
+        }
+    }
+    term.eraseDisplay(.complete, false);
+    try cache.sync(allocator, &term);
+    try std.testing.expectEqual(@as(usize, 0), cache.placements.items.len);
+}
+
 test "native image retains pixels after borrowed upload source changes" {
     var source = [_]u8{ 255, 0, 0, 255 };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -177,10 +239,10 @@ test "native image retains pixels after borrowed upload source changes" {
     defer native.release();
     rgba.deinit(failing.allocator());
     @memset(&source, 0);
-    var pixels = [_]u8{0} ** 4;
+    var pixels: [4]u8 = @splat(0);
     const space = try graphics.ColorSpace.createDeviceRGB();
     defer space.release();
-    const context = try graphics.BitmapContext.create(&pixels, 1, 1, 8, 4, space, @intFromEnum(graphics.ImageAlphaInfo.premultiplied_last));
+    const context = try graphics.BitmapContext.create(&pixels, 1, 1, 8, 4, space, @backingInt(graphics.ImageAlphaInfo.premultiplied_last));
     defer graphics.Context.release(context);
     graphics.Context.drawImage(context, graphics.Rect.init(0, 0, 1, 1), native);
     try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, &pixels);

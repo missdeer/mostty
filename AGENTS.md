@@ -41,7 +41,7 @@ For trivial, documentation-only, or mechanically local changes, use proportionat
 
 # Build & run
 
-Requires Zig `0.16.0`, the Windows SDK shader compilers (`fxc.exe` for SM5/DXBC and `dxc.exe` with `dxil.dll` beside it for signed SM6/DXIL), and the LunarG Vulkan SDK (`dxc.exe`, `spirv-cross.exe`, `glslangValidator.exe`, and `spirv-val.exe` for SPIR-V). The two DXC installs are not interchangeable: the Vulkan SDK one emits SPIR-V but ships no `dxil.dll`, and D3D12 rejects unsigned DXIL. Those shader/SDK tools are required only for the Windows build; the macOS target links Apple frameworks instead and does not discover or depend on them. Dependencies are declared in `build.zig.zon`; `win32` is marked `lazy = true`. The build discovers the newest installed SDK versions from their standard locations or the `WindowsSdkVerBinPath` / `VULKAN_SDK` environment variables; use `-Dfxc-path=<path>`, `-Ddxil-dxc-path=<path>`, `-Ddxc-path=<path>`, `-Dspirv-cross-path=<path>`, `-Dglslang-validator-path=<path>`, or `-Dspirv-val-path=<path>` to override discovery.
+Requires Zig `0.17.1`, the Windows SDK shader compilers (`fxc.exe` for SM5/DXBC and `dxc.exe` with `dxil.dll` beside it for signed SM6/DXIL), and the LunarG Vulkan SDK (`dxc.exe`, `spirv-cross.exe`, `glslangValidator.exe`, and `spirv-val.exe` for SPIR-V). The two DXC installs are not interchangeable: the Vulkan SDK one emits SPIR-V but ships no `dxil.dll`, and D3D12 rejects unsigned DXIL. Those shader/SDK tools are required only for the Windows build; the macOS target links Apple frameworks instead and does not discover or depend on them. Dependencies are declared in `build.zig.zon`; `win32` is marked `lazy = true`. The build discovers the newest installed SDK versions from their standard locations or the `WindowsSdkVerBinPath` / `VULKAN_SDK` environment variables; use `-Dfxc-path=<path>`, `-Ddxil-dxc-path=<path>`, `-Ddxc-path=<path>`, `-Dspirv-cross-path=<path>`, `-Dglslang-validator-path=<path>`, or `-Dspirv-val-path=<path>` to override discovery.
 
 - `zig build` — build the `Mostty` executable into `zig-out/bin/`.
 - `zig build run -- [args]` — build and run; everything after `--` is forwarded as cmdline args (see `src/Cmdline.zig`: `--ttf <path>`, `--font-size <float>`).
@@ -63,7 +63,7 @@ When migrating an existing test written in another language, preserve its covera
 
 ## Build Command for Developer
 
-- For the Windows build, use `cmd.exe /c "D:\zig-x86_64-windows-0.16.0\zig.exe build --global-cache-dir .\.zig-cache"`.
+- For the Windows build, use `cmd.exe /c "set ZIG_GLOBAL_CACHE_DIR=.\.zig-cache&& D:\zig-x86_64-windows-0.17.1\zig.exe build"`.
 - Use `./.zig-cache` as the build cache.
 - Invoke non-build commands directly.
 

@@ -64,6 +64,7 @@ pub fn Cache(comptime Image: type) type {
         last_hash: u64 = 0,
         last_tab_id: types.TabId = 0,
         last_tab_valid: bool = false,
+        last_dirty: u64 = 0,
 
         pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
             var it = self.images.iterator();
@@ -106,7 +107,7 @@ pub fn Cache(comptime Image: type) type {
             term: *const vt.Terminal,
         ) bool {
             const storage = &term.screens.active.kitty_images;
-            var invalidated = storage.dirty or !self.last_tab_valid or self.last_tab_id != tab_id;
+            var invalidated = storage.dirty != self.last_dirty or !self.last_tab_valid or self.last_tab_id != tab_id;
 
             pruneRemovedImages(self, alloc, tab_id, storage, &invalidated);
 
@@ -153,7 +154,7 @@ pub fn Cache(comptime Image: type) type {
             self.last_hash = new_hash;
             self.last_tab_id = tab_id;
             self.last_tab_valid = true;
-            storage.dirty = false;
+            self.last_dirty = storage.dirty;
             return invalidated;
         }
 

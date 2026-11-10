@@ -58,7 +58,7 @@ const oom = com.oom;
 // The fields are added unconditionally (two u64 in the renderer struct is
 // negligible); `uploadCellRow` only bumps them under
 // `comptime debug_stats_enabled`, so release builds emit nothing.
-const debug_stats_enabled = builtin.mode == .Debug;
+const debug_stats_enabled = builtin.mode == .debug;
 const DebugStats = struct {
     rows_uploaded: u64 = 0,
     rows_skipped: u64 = 0,

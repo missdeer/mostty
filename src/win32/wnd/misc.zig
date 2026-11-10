@@ -872,7 +872,7 @@ pub fn onAppGlyphReady(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?wi
 }
 
 pub fn onAppTestD3d12Removal(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
-    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    if (@import("builtin").mode != .debug or !@import("../diag.zig").isEnabled()) return 0;
     const active = if (global.renderer.backend) |*backend| backend else return 0;
     if (active.* != .d3d12) return 0;
     var device5: *win32.ID3D12Device5 = undefined;
@@ -888,7 +888,7 @@ pub fn onAppTestD3d12Removal(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?w
 }
 
 pub fn onAppTestOpenGlFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
-    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    if (@import("builtin").mode != .debug or !@import("../diag.zig").isEnabled()) return 0;
     const active = if (global.renderer.backend) |*backend| backend else return 0;
     if (active.* != .opengl) return 0;
     std.log.warn("OpenGL diagnostic presentation failure requested", .{});
@@ -898,7 +898,7 @@ pub fn onAppTestOpenGlFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?
 }
 
 pub fn onAppTestVulkanFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
-    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    if (@import("builtin").mode != .debug or !@import("../diag.zig").isEnabled()) return 0;
     const active = if (global.renderer.backend) |*backend| backend else return 0;
     switch (active.*) {
         inline .vulkan, .@"native-vulkan" => |*backend| backend.test_fail_present = true,
@@ -910,7 +910,7 @@ pub fn onAppTestVulkanFailure(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?
 }
 
 pub fn onAppTestRendererDpi(_: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
-    if (@import("builtin").mode != .Debug or !@import("../diag.zig").isEnabled()) return 0;
+    if (@import("builtin").mode != .debug or !@import("../diag.zig").isEnabled()) return 0;
     const dpi = std.math.cast(u32, wparam) orelse return 0;
     if (dpi != 96 and dpi != 144 and dpi != 192) return 0;
     const window = if (global.window) |*value| value else return 0;

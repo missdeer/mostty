@@ -256,12 +256,12 @@ fn onClipboardWrite(context: *anyopaque, request: vt.clipboard.Write) void {
 fn initialWorkingDirectory(launcher: ?*const Config.Launcher) std.mem.Allocator.Error!?[:0]u8 {
     if (launcher) |item| {
         const wd = item.working_directory;
-        if (wd.len > 0) return try allocator.dupeZ(u8, wd);
+        if (wd.len > 0) return try allocator.dupeSentinel(u8, wd, 0);
     }
     const home = std.c.getenv("HOME") orelse return null;
     const span = std.mem.span(home);
     if (span.len == 0) return null;
-    return try allocator.dupeZ(u8, span);
+    return try allocator.dupeSentinel(u8, span, 0);
 }
 
 // The selected launcher's command line.
@@ -269,7 +269,7 @@ fn initialWorkingDirectory(launcher: ?*const Config.Launcher) std.mem.Allocator.
 fn launcherCommand(launcher: ?*const Config.Launcher) std.mem.Allocator.Error!?[:0]u8 {
     const command_line = (launcher orelse return null).command_line;
     if (command_line.len == 0) return null;
-    return try allocator.dupeZ(u8, command_line);
+    return try allocator.dupeSentinel(u8, command_line, 0);
 }
 
 /// Re-read the config file. Returns false when it could not be read (an editor
@@ -1260,7 +1260,7 @@ test "256-byte host feeds preserve Unicode OSC DCS and alternate screen pixels" 
     defer mostty_tab_destroy(whole);
     const sliced = mostty_tab_create(640, 192, 1) orelse return error.TabCreateFailed;
     defer mostty_tab_destroy(sliced);
-    const bytes = ("x" ** 255) ++ "界e\u{301}👍\x1b]2;ordered title\x07" ++
+    const bytes = @as([255]u8, @splat('x')) ++ "界e\u{301}👍\x1b]2;ordered title\x07" ++
         "\x1b[?1049hother screen\x1b[?1049l\r\n\x1b[31mfi -> \x1b[0m" ++
         "\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\" ++
         "\x1bP0;1q\"1;1;2;12#1;2;100;0;0!2~-!2~\x1b\\AFTER";

@@ -63,7 +63,7 @@ test "runtime benchmark multipart scratch throughput and retention" {
         var session: Session = undefined;
         try session.init(.{ .io = std.testing.io, .terminal_allocator = B.allocator(), .stream_allocator = counted.allocator(), .cols = 80, .rows = 24, .hooks = .{ .context = &context } });
         defer session.deinit();
-        const part = [_]u8{'A'} ** 4096;
+        const part: [4096]u8 = @splat('A');
         const allocations = counted.allocations;
         const start = B.now();
         for (0..4) |_| {

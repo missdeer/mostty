@@ -2,7 +2,7 @@
     .name = .mostty,
     .fingerprint = 0x5632e72feab3ca7c,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .win32 = .{
             .url = "git+https://github.com/marlersoft/zigwin32#ab1c05ff1da857ec500c4da42e190032a8639717",
@@ -10,15 +10,15 @@
             .lazy = true,
         },
         .ghostty = .{
-            .url = "git+https://github.com/ghostty-org/ghostty#a557f010cb73cf73363963a0e37b24d14292e820",
-            .hash = "ghostty-1.3.2-dev-5UdBC8RvfAUGb6kRmO8NDgl3HJrlkvRjBcgYh4hOHdEz",
+            .url = "https://github.com/ghostty-org/ghostty/archive/bd1e6a43476325dbf37939de939eac326696b08f.tar.gz",
+            .hash = "ghostty-1.4.1-dev-5UdBC1WypQX1Jj8RGjZr1KyQzd8O3EKnAfO1OEMj3dFO",
         },
         // Pure-Zig 2D vector graphics; backs ghostty's sprite Canvas. We vendor
         // the sprite-drawing source under src/vendor/ghostty-sprite and need
         // z2d as a direct module import for that code.
         .z2d = .{
-            .url = "https://deps.files.ghostty.org/z2d-7dbae85c81784dba9988320bf9543ed9a81350c8.tar.gz",
-            .hash = "z2d-0.12.1-j5P_Hsw8EQAKyZTQICCQnAH2xYkLDW8k9uefbsYdfPZ-",
+            .url = "https://deps.files.ghostty.org/z2d-8787d71bac42d9aab00428ccb37a4fd453418761.tar.gz",
+            .hash = "z2d-0.13.2-j5P_HkkVFAAtOSQPRTS7wbZLbYs7oETRn7nUKSUwDjM_",
         },
     },
     .paths = .{

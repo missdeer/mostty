@@ -20,7 +20,7 @@ pub fn rgbToU24(rgb: anytype) u24 {
 }
 
 pub fn resolveColor(color: vt.Style.Color, palette: *const vt.color.Palette, fallback: u24) u24 {
-    return switch (color) {
+    return switch (color.value()) {
         .none => fallback,
         .palette => |index| rgbToU24(palette[index]),
         .rgb => |rgb| rgbToU24(rgb),
@@ -31,7 +31,7 @@ pub fn resolve(style: vt.Style, palette: *const vt.color.Palette, foreground: u2
     var result: Resolved = .{
         .foreground = resolveColor(style.fg_color, palette, foreground),
         .background = resolveColor(style.bg_color, palette, background),
-        .default_background = style.bg_color == .none and !style.flags.inverse,
+        .default_background = style.bg_color.tag == .none and !style.flags.inverse,
         .flags = style.flags,
     };
     if (style.flags.inverse) std.mem.swap(u24, &result.foreground, &result.background);
@@ -72,7 +72,7 @@ test "default backgrounds remain translucent candidates while explicit and inver
     const defaults = resolve(.{}, &palette, 0x112233, 0x445566);
     try std.testing.expect(defaults.default_background);
     try std.testing.expectEqual(@as(u24, 0x112233), defaults.foreground);
-    const explicit = resolve(.{ .bg_color = .{ .palette = 1 } }, &palette, 0, 0);
+    const explicit = resolve(.{ .bg_color = .palette(1) }, &palette, 0, 0);
     try std.testing.expect(!explicit.default_background);
     try std.testing.expectEqual(@as(u24, 0x0a141e), explicit.background);
     const inverse = resolve(.{ .flags = .{ .inverse = true, .faint = true, .blink = true } }, &palette, 0x112233, 0x445566);
