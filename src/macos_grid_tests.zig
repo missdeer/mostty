@@ -1,4 +1,5 @@
 test {
+    _ = @import("cmdline.zig");
     _ = @import("renderer/completion_prefix.zig");
     _ = @import("terminal/drain_round.zig");
     _ = @import("win32/glyph_index_cache.zig");

@@ -1,8 +1,8 @@
 # Mostty — Architecture & Workflow
 
 A reading guide to the source tree, the runtime model, and the end-to-end data flow
-of every key path. Mostty's runnable application is currently a Windows terminal
-emulator that pairs Ghostty's VT state machine (`libghostty-vt`) with a hand-rolled
+of every key path. Mostty is a Windows and macOS terminal emulator built on
+Ghostty's VT state machine (`libghostty-vt`). Windows uses a hand-rolled
 Win32 / D3D11 / DirectWrite shell. The macOS target builds the platform-neutral
 terminal core, a native PTY/session layer, and a CoreText/Metal renderer, driven
 by a Swift/AppKit application (`src/macos/app/`) through a C-ABI boundary
@@ -20,21 +20,21 @@ Pinned versions: Zig `0.16.0`, Vulkan SDK `1.4.350.0` in CI. The Windows applica
 src/
   mosttywindows.zig        process entry, WinMain shim, main message loop
   mosttymacos.zig          macOS static-core library entry
-  terminal/Session.zig     platform-neutral VT state, stream, and effects owner
+  terminal/session.zig     platform-neutral VT state, stream, and effects owner
   terminal/url_hover.zig   shared viewport URL detection for Windows and macOS
   terminal/mouse_report.zig shared VT mouse-report encoding for Windows and macOS
   terminal/key_encode.zig shared xterm special-key encoding
   terminal/paste.zig       shared streaming paste framing and normalization
-  SplitLayout.zig          platform-neutral split tree, pane IDs, focus and geometry
+  split_layout.zig          platform-neutral split tree, pane IDs, focus and geometry
   layout_capi.zig          UI-thread-only C ABI for the shared split model
   ssh_config.zig          shared top-level SSH Host alias iterator
   input_capi.zig          allocation-free host bridge for keys, paste, SSH aliases
-  macos/PtySession.zig     macOS shell process, PTY, and VT session owner
-  macos/GridModel.zig      VT viewport to resolved renderer-cell conversion
-  macos/CoreTextRenderer.zig CoreText rasterization and renderer resource owner
-  macos/MetalBackend.zig   Metal texture upload and render-pass submission
-  Cmdline.zig              startup options, including the per-process renderer override
-  Config.zig               1.4 kLOC — config file parser, theme resolution, arena owner
+  macos/pty_session.zig     macOS shell process, PTY, and VT session owner
+  macos/grid_model.zig      VT viewport to resolved renderer-cell conversion
+  macos/core_text_renderer.zig CoreText rasterization and renderer resource owner
+  macos/metal_backend.zig   Metal texture upload and render-pass submission
+  cmdline.zig              startup options, including the per-process renderer override
+  config.zig               config file parser, theme resolution, arena owner
   vendor/ghostty-sprite/   vendored Ghostty sprite face (block/box/braille/...)
   renderer/sprite.zig      shared ghostty-sprite dispatcher and alpha/BGRA output
   renderer/cell_style.zig  shared VT colors, SGR flags, explicit-background resolution
@@ -75,10 +75,10 @@ src/
     wnd/misc.zig           timers, config reload, fullscreen, theme submenu, app messages
 
     # Renderer
-    Renderer.zig          stable facade + tagged backend union
-    PaneSurface.zig       pane backend dispatch, synchronization and cache lifetime
-    RendererCommon.zig    backend-independent metrics/adapter state
-    FontService.zig       process-lifetime DirectWrite/D2D + font D3D11 owner
+    renderer.zig          stable facade + tagged backend union
+    pane_surface.zig       pane backend dispatch, synchronization and cache lifetime
+    renderer_common.zig    backend-independent metrics/adapter state
+    font_service.zig       process-lifetime DirectWrite/D2D + font D3D11 owner
     d3d11.zig              top-level renderer struct; init / render / resize / deinit
     d3d12/renderer.zig     selectable D3D12 research renderer
     dcomp.zig              shared DXGI composition swapchain + DComp visual
@@ -91,7 +91,7 @@ src/
     vulkan/bridge.zig      Vulkan/D3D11 memory + timeline interop
     vulkan/loader.zig      checked runtime Vulkan procedure tables
     render.zig             renderWindow orchestration (state → renderer.render)
-    GlyphIndexCache.zig    circular-LRU mapping (codepoint,half,style) → atlas slot
+    glyph_index_cache.zig    circular-LRU mapping (codepoint,half,style) → atlas slot
     d3d11/gpu.zig          device, shaders, const buffer, staging textures
     d3d11/swap_chain.zig   DirectComposition flip-model + adapter classification
     d3d11/grid.zig         persistent grid RTV, scissor draw, blit to back buffer
@@ -398,7 +398,7 @@ a full ring. Retry-until-stop, with `Sleep(1 ms)` between attempts, is
 the only safe option: (a) clears within a frame once the UI drains; (b)
 is paired with `reader_stop` being set by `destroyTab`.
 
-### 5.3 Terminal session and effects (`terminal/Session.zig`, `tab_mgmt.zig`)
+### 5.3 Terminal session and effects (`terminal/session.zig`, `tab_mgmt.zig`)
 
 Each Windows `Pane` owns a platform-neutral `TerminalSession`, which owns the upstream
 `vt.Terminal`, its independently freeing allocator, and the persistent `vt.TerminalStream`. Wide-character
@@ -595,7 +595,7 @@ Kitty graphics support is wired through `Pane.session` and
 
 ### 5.5 Sixel and iTerm2 images
 
-`terminal/InlineImages.zig` intercepts Sixel DCS and iTerm2 file transfers
+`terminal/inline_images.zig` intercepts Sixel DCS and iTerm2 file transfers
 strings at the shared session input boundary because the pinned VT library
 does not implement these image protocols. Other input continues through the
 upstream stream. Interception preserves state across PTY chunks and cancels
@@ -603,7 +603,7 @@ unfinished image strings on CAN/SUB or an unrelated escape sequence. Captured
 payloads and final RGBA images are bounded to 64 MiB and dimensions to 10,000
 pixels. iTerm2 multipart transfers assemble file parts until `FileEnd`.
 
-`terminal/Sixel.zig` decodes raster data and RGB/HLS palettes; iTerm2 files use
+`terminal/sixel.zig` decodes raster data and RGB/HLS palettes; iTerm2 files use
 WIC on Windows and ImageIO on macOS. Resized RGBA images enter the existing
 Kitty image store with implicit IDs and tracked cursor pins, so every renderer
 uses its existing image upload and clipping path. The cursor advances to the
@@ -619,7 +619,7 @@ and removes Sixel from the shared DA1 capability response.
 
 ### 6.1 Renderer facade and backends
 
-The process-global `Renderer` (`Renderer.zig`) owns the selected backend and a process-lifetime
+The process-global `Renderer` (`renderer.zig`) owns the selected backend and a process-lifetime
 `FontService`, a backend-independent `RendererCommon` (cell size, tab-bar
 height, ligature setting, and adapter classification), plus a tagged backend
 union. D3D11 remains the default validated variant; D3D12, OpenGL 4.6, Vulkan
@@ -918,7 +918,7 @@ The completed grid texture is then copied to the swap-chain back buffer.
 
 ### 6.5 Glyph atlas, cache, rasterization
 
-`GlyphIndexCache.zig` is a circular doubly-linked list + hashmap LRU keyed
+`glyph_index_cache.zig` is a circular doubly-linked list + hashmap LRU keyed
 by `(codepoint, grapheme, half, style)`. Capacity equals atlas slots
 (`tex_cell_count.x * tex_cell_count.y`). Two important quirks:
 
@@ -1037,7 +1037,7 @@ soft frame cap:
 
 ## 8. Configuration & Hot Reload
 
-`Config.zig` (1.4 kLOC) owns:
+`config.zig` owns:
 
 - An optional `arena: ?std.heap.ArenaAllocator` from which **every** slice
   in the struct allocates (font families, theme name, launcher cmdlines,

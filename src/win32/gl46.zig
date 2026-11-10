@@ -1727,7 +1727,7 @@ test "OpenGL panes share context and programs but own DCs buffers and glyph cach
         try std.testing.expect(gl.IsProgram(parent.grid_program) == gl.TRUE);
         if (mode == .pure_wgl) {
             var hook_context: u8 = 0;
-            var session: @import("../terminal/Session.zig") = undefined;
+            var session: @import("../terminal/session.zig") = undefined;
             try session.init(.{ .io = std.Io.Threaded.global_single_threaded.io(), .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 8, .rows = 4, .hooks = .{ .context = &hook_context } });
             defer session.deinit();
             common.tab_bar_height = 0;

@@ -11,7 +11,10 @@ for side in base head; do
   rev=$base; if [[ $side == head ]]; then rev=$head; fi
   tree="$out/$side"
   git worktree add --detach "$tree" "$rev"
-  cmp "$root/build.zig.zon" "$tree/build.zig.zon" # Never compare different dependency pins.
+  # Package inclusion paths do not affect the runtime or dependency pins.
+  # Compare everything else, including compiler requirements and dependency hashes.
+  cmp <(sed '/^    \.paths = \.{$/,/^    },$/d' "$root/build.zig.zon") \
+      <(sed '/^    \.paths = \.{$/,/^    },$/d' "$tree/build.zig.zon")
   cp "$root/build.zig" "$tree/build.zig"
   cp "$root"/src/runtime_bench*.zig "$tree/src/"
   # Match the head's test-only hash instrumentation on every platform, even

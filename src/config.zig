@@ -606,8 +606,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-image-opacity '{s}'", .{ source_name, line_no, value });
                 continue;
             };
-            if (!(n >= 0.0)) {
-                reportDiagnostic(&diagnostic_count, "config: {s}:{}: background-image-opacity must be >= 0 (got {d})", .{ source_name, line_no, n });
+            if (!std.math.isFinite(n) or n < 0.0) {
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: background-image-opacity must be finite and >= 0 (got {d})", .{ source_name, line_no, n });
                 continue;
             }
             background_image_opacity = n;
@@ -1576,6 +1576,15 @@ test "parse background-image keys" {
 }
 
 test "parse background-image: defaults and invalid values rejected" {
+    // Reject infinities as well as NaN before passing opacity to native renderers.
+    for ([_][]const u8{ "nan", "inf", "-inf", "1e40" }) |value| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "background-image-opacity = {s}", .{value});
+        defer std.testing.allocator.free(source);
+        var cfg = parse(std.testing.allocator, source, "test");
+        defer cfg.deinit();
+        try std.testing.expectEqual(@as(f32, 1.0), cfg.background_image_opacity);
+        try std.testing.expectEqual(@as(usize, 1), cfg.diagnostic_count);
+    }
     // No keys: defaults hold (empty path, opacity 1.0, center, contain, no repeat).
     {
         var cfg = parse(std.testing.allocator, "", "test");

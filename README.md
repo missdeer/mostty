@@ -60,8 +60,8 @@ Mostty.exe --renderer native-vulkan --background-opacity 1 --background-blur fal
 matching config values at startup without editing the file; a later config
 reload can replace those opacity and blur overrides. The active renderer stays
 fixed until restart. See [Command-line options](configurations.md#command-line-options)
-for all accepted options, including legacy font options that are parsed but
-not applied.
+for all accepted options. `--font-size` overrides the configured point size at
+startup; the legacy `--ttf` option is still parsed but not applied.
 
 All six Windows renderer choices support native panes within each tab: use the split shortcuts below,
 click or navigate by direction to focus a pane, and drag dividers to resize.
@@ -82,7 +82,7 @@ Renderer changes require a restart. Unsupported drivers or presentation capabili
 - **Window appearance:** background images with fit, position, repeat, and opacity controls; DWM blur-behind; and live system light/dark theme switching with `theme = light:..., dark:...`.
 - **Desktop integration:** open/create `%LOCALAPPDATA%\Mostty\config` through **Open Settings File...** in the window system menu, switch themes from that menu, and accept Explorer file drops even when running elevated.
 
-Windows always prompts before manually closing sessions; `confirm-close-surface` currently only controls the macOS behavior.
+Set `confirm-close-surface = false` to disable manual-close prompts on either platform.
 
 **Bundled ConPTY for Kitty graphics.** On Windows, the inbox ConPTY can filter Kitty's APC image sequences before Mostty's VT parser sees them. Mostty therefore looks for an experimental Microsoft Terminal ConPTY in this order:
 
@@ -103,7 +103,8 @@ A native Swift/AppKit application using PTY sessions, CoreText text rendering, a
 Configuration is read from `~/Library/Application Support/com.dfordsoft.mostty.terminal/Config`;
 use **Mostty > Open Configuration File** (`Cmd+,`) to open or create it.
 See [Configuration](configurations.md#platform-support) for supported keys,
-platform differences, and examples; macOS does not use the Windows command-line overrides.
+platform differences, and examples. macOS accepts `--font-size`,
+`--background-opacity`, and `--background-blur` command-line overrides.
 
 - **Login-shell startup.** New tabs use the first configured launcher, or the user's login shell, and start in the configured working directory or `$HOME`. Tab titles reflect the shell-provided title and current directory.
 - **Native session and window commands.** The **Tabs** menu provides tab navigation; `Ctrl+Cmd+F` toggles native fullscreen. Closing an active session, the window, or the app prompts by default; `confirm-close-surface = false` disables these prompts.
