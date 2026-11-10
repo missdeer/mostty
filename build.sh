@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT_DIR"
 
-zig build -Doptimize=ReleaseFast --global-cache-dir .zig-cache
+export ZIG_GLOBAL_CACHE_DIR="$ROOT_DIR/.zig-cache"
+zig build -Doptimize=ReleaseFast
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
     SIGN_ID="${SIGN_ID:-Developer ID Application: Fan Yang (Y73SBCN2CG)}"
