@@ -91,6 +91,17 @@ pub fn invalidatePresentation(self: *PaneSurface) void {
     }
 }
 
+/// Called on config publication, including for panes that never draw again.
+pub fn releaseTerminalImages(self: *PaneSurface, pane_id: types.TabId) void {
+    switch (self.backend) {
+        inline else => |*backend| {
+            backend.releaseKittyImagesForTab(pane_id);
+            backend.grid_force_full = true;
+            backend.common.pane_present_valid = false;
+        },
+    }
+}
+
 pub fn cacheGeneration(self: *const PaneSurface) u32 {
     return switch (self.backend) {
         inline else => |backend| backend.cache_gen,

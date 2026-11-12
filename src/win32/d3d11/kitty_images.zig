@@ -74,28 +74,21 @@ pub fn Cache(comptime Image: type) type {
             self.* = .{};
         }
 
-        pub fn releaseForTab(self: *Self, alloc: std.mem.Allocator, tab_id: types.TabId) void {
-            var keys_to_remove: std.ArrayListUnmanaged(Key) = .empty;
-            defer keys_to_remove.deinit(alloc);
-
+        pub fn releaseForTab(self: *Self, _: std.mem.Allocator, tab_id: types.TabId) void {
+            // Removal leaves tombstones and does not relocate other entries,
+            // so iteration can continue without allocating a temporary list.
+            // Cleanup must still work when the allocator is exhausted.
             var it = self.images.iterator();
             while (it.next()) |kv| {
                 if (kv.key_ptr.tab_id != tab_id) continue;
-                keys_to_remove.append(alloc, kv.key_ptr.*) catch |err| {
-                    log.warn("leaking Kitty image during tab close after key collection failed: {s}", .{@errorName(err)});
-                };
-            }
-
-            for (keys_to_remove.items) |key| {
-                if (self.images.fetchRemove(key)) |removed| {
-                    var entry = removed.value;
-                    entry.release();
-                }
+                kv.value_ptr.release();
+                self.images.removeByPtr(kv.key_ptr);
             }
             if (self.last_tab_valid and self.last_tab_id == tab_id) {
                 self.placements.clearRetainingCapacity();
                 self.last_hash = 0;
                 self.last_tab_valid = false;
+                self.last_dirty = 0;
             }
         }
 
@@ -165,6 +158,42 @@ pub fn Cache(comptime Image: type) type {
             return false;
         }
     };
+}
+
+test "hidden-pane image cleanup allocates nothing, invalidates placements and releases each image once" {
+    const Image = struct {
+        released: *u32,
+        pub fn release(self: *@This()) void {
+            self.released.* += 1;
+        }
+    };
+    var released: u32 = 0;
+    {
+        var cache: Cache(Image) = .{};
+        defer cache.deinit(std.testing.allocator);
+        for (0..64) |i| {
+            try cache.images.put(std.testing.allocator, .{ .tab_id = if (i % 2 == 0) 4 else 9, .image_id = @intCast(i) }, .{
+                .image = .{ .released = &released },
+                .generation = 1,
+                .width = 1,
+                .height = 1,
+            });
+        }
+        try cache.placements.append(std.testing.allocator, std.mem.zeroes(Placement));
+        cache.last_tab_id = 4;
+        cache.last_tab_valid = true;
+        cache.last_dirty = 123;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        cache.releaseForTab(failing.allocator(), 4);
+        cache.releaseForTab(failing.allocator(), 4);
+        try std.testing.expectEqual(@as(u32, 32), released);
+        try std.testing.expectEqual(@as(u32, 32), cache.images.count());
+        try std.testing.expectEqual(@as(usize, 0), cache.placements.items.len);
+        try std.testing.expect(!cache.last_tab_valid);
+        try std.testing.expectEqual(@as(u64, 0), cache.last_dirty);
+        try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    }
+    try std.testing.expectEqual(@as(u32, 64), released);
 }
 
 fn pruneRemovedImages(

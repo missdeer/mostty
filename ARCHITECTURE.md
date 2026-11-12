@@ -611,7 +611,12 @@ first full row below the image. VT owns scrolling, clear, and teardown.
 
 `images-enabled` defaults to true. Startup and config reload apply it to each
 session; disabling clears image storage across screens, drops new images,
-and removes Sixel from the shared DA1 capability response.
+and removes Sixel from the shared DA1 capability response. Config publication
+also clears every pane's renderer image/placement cache and invalidates its
+snapshot, including detached, minimized, and background panes. Windows releases
+use the same backend resource retirement as tab closure; macOS releases retained
+CoreGraphics images directly. This does not clear wallpaper. Re-enabling accepts
+new images and cannot resurrect deleted terminal images.
 
 ---
 
