@@ -312,6 +312,9 @@ snapshot: FrameSnapshot = .{},
 rasterized_frames: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 kitty_images: KittyImages = .{},
 background_image: BackgroundImage = .{},
+trim_count: u64 = 0,
+trim_logical_bytes: u64 = 0,
+restore_ns: u64 = 0,
 
 pub fn init(options: Options) !CoreTextRenderer {
     if (options.font.size <= 0 or options.scale <= 0) return error.InvalidFontSize;
@@ -370,6 +373,40 @@ pub fn releaseTerminalImages(self: *CoreTextRenderer) void {
     self.snapshot.state = null;
 }
 
+/// Logical capacity, excluding CoreText internals, drawables and allocator /
+/// driver overhead. This is not physical footprint on unified-memory devices.
+pub fn cacheBytes(self: *const CoreTextRenderer) u64 {
+    var result: u64 = self.pixels.len;
+    const texture_bytes = @as(u64, self.metal.width) * self.metal.height * 4;
+    if (self.metal.source != null) result += texture_bytes;
+    if (self.metal.target != null) result += texture_bytes;
+    result += @as(u64, self.frame_cells.capacity + self.snapshot.cells.capacity) * @sizeOf(GridModel.Cell);
+    result += @as(u64, self.snapshot.graphemes.capacity) * @sizeOf(u21);
+    var masks = self.sprite_masks.valueIterator();
+    while (masks.next()) |mask| result += mask.len;
+    var images = self.kitty_images.images.valueIterator();
+    while (images.next()) |image| result += @as(u64, image.width) * image.height * 4;
+    return result;
+}
+
+pub fn trimResources(self: *CoreTextRenderer) void {
+    if (self.pixels.len == 0) return;
+    self.trim_logical_bytes +|= self.cacheBytes();
+    self.trim_count += 1;
+    self.snapshot.deinit(self.allocator);
+    self.frame_cells.deinit(self.allocator);
+    self.frame_cells = .empty;
+    self.shaping_cache.deinit(self.allocator);
+    self.shaping_cache = .{};
+    self.releaseTerminalImages();
+    self.clearSpriteMasks();
+    self.sprite_masks.deinit(self.allocator);
+    self.sprite_masks = .empty;
+    self.metal.trimTargets();
+    self.allocator.free(self.pixels);
+    self.pixels = &.{};
+}
+
 /// Adopt font settings from a reloaded config. Returns true when the cell
 /// metrics changed, so the caller knows the grid must be re-derived. Rebuilds
 /// everything before publishing so a failure leaves the current fonts intact.
@@ -408,12 +445,15 @@ pub fn resize(self: *CoreTextRenderer, pixel_width: u32, pixel_height: u32, scal
         replacement_metrics = try metricsForFont(replacement_fonts.?.regular);
     }
 
-    const replacement = try self.allocator.alloc(u8, try pixelBufferLength(pixel_width, pixel_height));
-    errdefer self.allocator.free(replacement);
-    try self.metal.resize(pixel_width, pixel_height);
-
-    self.allocator.free(self.pixels);
-    self.pixels = replacement;
+    // Hidden font/scale/geometry reloads must not undo a trim. Metadata and
+    // fonts still update, but pixels/textures are allocated only when rendered.
+    if (self.pixels.len != 0) {
+        const replacement = try self.allocator.alloc(u8, try pixelBufferLength(pixel_width, pixel_height));
+        errdefer self.allocator.free(replacement);
+        try self.metal.resize(pixel_width, pixel_height);
+        self.allocator.free(self.pixels);
+        self.pixels = replacement;
+    }
     // A resized surface must not retain the cell capacity of an old huge grid.
     self.frame_cells.deinit(self.allocator);
     self.frame_cells = .empty;
@@ -443,6 +483,17 @@ pub fn gridSize(self: *const CoreTextRenderer) GridModel.Size {
 }
 
 pub fn render(self: *CoreTextRenderer, session: *TerminalSession, cursor: ?Cursor) !RenderResult {
+    if (self.pixels.len == 0) {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const start = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        const pixels = try self.allocator.alloc(u8, try pixelBufferLength(self.pixel_width, self.pixel_height));
+        self.metal.resize(self.pixel_width, self.pixel_height) catch |err| {
+            self.allocator.free(pixels);
+            return err;
+        };
+        self.pixels = pixels;
+        self.restore_ns = @intCast(@max(0, std.Io.Timestamp.now(io, .awake).nanoseconds - start));
+    }
     session.syncPixelSize(self.metrics.cell_width, self.metrics.cell_height);
     try self.kitty_images.sync(self.allocator, session.term);
     var frame = try GridModel.buildRetained(self.allocator, &self.frame_cells, session.term, .{

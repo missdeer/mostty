@@ -37,18 +37,8 @@ fn create(window: *state.Window, pane: *state.Pane) void {
         if (win32.RegisterClassExW(&wc) == 0) win32.panicWin32("RegisterClassExW(pane)", win32.GetLastError());
         class_registered = true;
     }
-    pane.common = global.renderer.common;
-    pane.common.surface_id = pane.id;
-    pane.common.tab_bar_height = 0;
-    pane.common.blink_timer_armed = false;
-    pane.renderer = global.renderer.initPaneSurface(&pane.common) catch |err| {
-        pane.closing = true;
-        std.log.err("cannot create pane {} for {s}: {s}", .{ pane.id, @tagName(global.renderer.configured_backend), @errorName(err) });
-        _ = win32.MessageBoxW(window.hwnd, win32.L("The selected renderer could not create this pane. Its session will close; the renderer has not been changed."), win32.L("Mostty pane unavailable"), .{ .ICONHAND = 1 });
-        _ = win32.PostMessageW(window.hwnd, types.WM_APP_CLOSE_PANE, pane.id, 0);
-        return;
-    };
-    if (pane.renderer == null) std.debug.panic("selected renderer cannot create a pane surface", .{});
+    initRenderer(window, pane);
+    if (pane.closing) return;
     pane.hwnd = win32.CreateWindowExW(
         .{ .NOREDIRECTIONBITMAP = if (global.config.renderer.usesDwmRedirection()) 0 else 1 },
         class_name,
@@ -67,6 +57,27 @@ fn create(window: *state.Window, pane: *state.Pane) void {
     win32.DragAcceptFiles(pane.hwnd.?, 1);
     _ = win32.ChangeWindowMessageFilterEx(pane.hwnd.?, win32.WM_DROPFILES, win32.MSGFLT_ALLOW, null);
     _ = win32.ChangeWindowMessageFilterEx(pane.hwnd.?, 0x0049, win32.MSGFLT_ALLOW, null);
+}
+
+fn initRenderer(window: *state.Window, pane: *state.Pane) void {
+    if (pane.renderer != null) return;
+    const start = state.qpcNow();
+    pane.common = global.renderer.common;
+    pane.common.surface_id = pane.id;
+    pane.common.tab_bar_height = 0;
+    pane.common.blink_timer_armed = false;
+    pane.renderer = global.renderer.initPaneSurface(&pane.common) catch |err| {
+        pane.closing = true;
+        std.log.err("cannot create pane {} for {s}: {s}", .{ pane.id, @tagName(global.renderer.configured_backend), @errorName(err) });
+        _ = win32.MessageBoxW(window.hwnd, win32.L("The selected renderer could not create this pane. Its session will close; the renderer has not been changed."), win32.L("Mostty pane unavailable"), .{ .ICONHAND = 1 });
+        _ = win32.PostMessageW(window.hwnd, types.WM_APP_CLOSE_PANE, pane.id, 0);
+        return;
+    };
+    if (pane.renderer == null) std.debug.panic("selected renderer cannot create a pane surface", .{});
+    // A restored cache must never accept a pre-trim or pre-device-recovery job.
+    const surface = &pane.renderer.?;
+    surface.setCacheGeneration(@max(pane.render_generation, surface.font_generation +% 1));
+    if (pane.hwnd != null) pane.render_restore_us = state.qpcUsSince(start);
 }
 
 pub fn destroy(window: *state.Window, pane: *state.Pane) void {
@@ -125,7 +136,10 @@ pub fn reflow(window: *state.Window) void {
         if (pane.closing) continue;
         if (pane.hwnd == null) create(window, pane);
         if (pane.closing) continue;
-        syncSurface(pane);
+        const visible = window.paneVisible(pane);
+        pane.render_cache.setVisible(visible, win32.GetTickCount64());
+        if (visible or pane.renderer != null) syncSurface(pane);
+        if (pane.closing) continue;
         const rect = pane.tab.layout.paneRect(pane.id);
         if (rect) |r| {
             const x: i32 = @intFromFloat(@round(r.x));
@@ -135,15 +149,60 @@ pub fn reflow(window: *state.Window) void {
             _ = win32.SetWindowPos(pane.hwnd.?, null, x, y, width, height, .{ .NOZORDER = 1, .NOACTIVATE = 1 });
             resizePane(window, pane, geom.computeGridCellCount(pane.hwnd.?, cs));
         }
-        const visible = window.paneVisible(pane);
         if (!visible) pane.common.syncBlinkTimer(pane.hwnd.?, false);
         _ = win32.ShowWindow(pane.hwnd.?, if (visible) win32.SW_SHOWNA else win32.SW_HIDE);
     }
+    armTrim(window);
     window.requestRender();
 }
 
 pub fn syncSurface(pane: *state.Pane) void {
-    pane.renderer.?.sync(&global.renderer, pane.tab.layout.active == pane.id);
+    initRenderer(pane.tab.window, pane);
+    if (pane.renderer) |*renderer| renderer.sync(&global.renderer, pane.tab.layout.active == pane.id);
+}
+
+pub fn updateVisibility(window: *state.Window) void {
+    if (!supported()) return;
+    const now = win32.GetTickCount64();
+    for (window.panes.items) |pane| {
+        if (pane.closing or pane.hwnd == null) continue;
+        const visible = win32.IsIconic(window.hwnd) == 0 and window.paneVisible(pane);
+        pane.render_cache.setVisible(visible, now);
+        if (!visible) pane.common.syncBlinkTimer(pane.hwnd.?, false);
+        if (visible and pane.renderer == null) syncSurface(pane);
+    }
+    armTrim(window);
+}
+
+fn armTrim(window: *state.Window) void {
+    const now = win32.GetTickCount64();
+    var delay: ?u32 = null;
+    for (window.panes.items) |pane| {
+        if (pane.closing) continue;
+        if (pane.render_cache.remaining(now)) |remaining| delay = @min(delay orelse remaining, remaining);
+    }
+    if (delay) |ms| {
+        _ = win32.SetTimer(window.hwnd, types.TIMER_PANE_TRIM, @max(1, ms), null);
+    } else {
+        _ = win32.KillTimer(window.hwnd, types.TIMER_PANE_TRIM);
+    }
+}
+
+pub fn trimHidden(window: *state.Window) void {
+    // Recheck visibility: queued timer messages may survive a tab switch.
+    updateVisibility(window);
+    const now = win32.GetTickCount64();
+    for (window.panes.items) |pane| {
+        if (pane.closing or !pane.render_cache.trimDue(now)) continue;
+        if (pane.renderer) |*renderer| {
+            pane.render_trim_bytes +|= renderer.cacheBytes();
+            pane.render_generation = renderer.cacheGeneration() +% 1;
+            renderer.deinit();
+            pane.renderer = null;
+            pane.render_trim_count += 1;
+        }
+    }
+    armTrim(window);
 }
 
 pub fn focusActive(window: *state.Window) void {

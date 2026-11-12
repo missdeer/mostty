@@ -86,6 +86,7 @@ pub fn onWindowPosChanged(hwnd: win32.HWND, _: win32.WPARAM, lparam: win32.LPARA
 
     // Nothing to paint while minimized; leave render_pending alone so any
     // request that landed before this message still fires on restore.
+    @import("../pane_native.zig").updateVisibility(window);
     if (iconic) return 0;
 
     // Pure move (no size change): the swap-chain back buffer is unchanged

@@ -75,6 +75,7 @@ pub fn renderWindow(window: *Window) void {
         for (window.panes.items) |pane| {
             if (pane.closing or pane.tab != window.activeTab() or pane.tab.layout.paneRect(pane.id) == null) continue;
             @import("pane_native.zig").syncSurface(pane);
+            if (pane.closing or pane.renderer == null) continue;
             const highlight: ?types.UrlHighlight = if (window.hovered_url) |h| blk: {
                 if (h.tab_id != pane.id) break :blk null;
                 break :blk .{ .start_row = h.hit.start_row, .start_col = h.hit.start_col, .end_row = h.hit.end_row, .end_col = h.hit.end_col, .hit = &window.hovered_url.?.hit };

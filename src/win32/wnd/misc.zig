@@ -30,6 +30,11 @@ var config_reload_retries: u32 = 0;
 const config_reload_max_retries: u32 = 3;
 
 pub fn onTimer(hwnd: win32.HWND, wparam: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
+    if (wparam == types.TIMER_PANE_TRIM) {
+        _ = win32.KillTimer(hwnd, types.TIMER_PANE_TRIM);
+        @import("../pane_native.zig").trimHidden(global_mod.windowFromHwnd(hwnd));
+        return 0;
+    }
     if (wparam == types.TIMER_CONFIG_RELOAD) {
         _ = win32.KillTimer(hwnd, types.TIMER_CONFIG_RELOAD);
         reloadConfig(hwnd);

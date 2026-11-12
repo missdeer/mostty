@@ -1,6 +1,7 @@
 test {
     _ = @import("cmdline.zig");
     _ = @import("renderer/completion_prefix.zig");
+    _ = @import("renderer/hidden_cache.zig");
     _ = @import("terminal/drain_round.zig");
     _ = @import("win32/glyph_index_cache.zig");
     _ = @import("win32/atlas_budget.zig");

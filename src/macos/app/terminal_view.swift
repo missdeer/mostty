@@ -132,6 +132,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     private var renderTimer: Timer?
     private var blinkTimer: Timer?
+    private var cacheTrimWork: DispatchWorkItem?
+    private var cacheTrimGeneration: UInt64 = 0
+    private var renderCacheTrimmed = false
     private var blinkOn = true
     private var readerThread: Thread?
     private let readerDone = DispatchSemaphore(value: 0)
@@ -225,6 +228,12 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         layoutSurface()
         updateScroller()
         registerForDraggedTypes([.fileURL])
+        for name in [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,
+                     NSApplication.didUnhideNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(renderVisibilityChanged(_:)),
+                                                   name: name, object: nil)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }
@@ -256,6 +265,57 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         } else {
             updateURLHover(at: nil)
         }
+        updateRenderVisibility()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        updateRenderVisibility()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        updateRenderVisibility()
+    }
+
+    private var renderVisible: Bool {
+        guard let window = window else { return false }
+        return !closed && !isHiddenOrHasHiddenAncestor && !window.isMiniaturized && window.isVisible && !NSApp.isHidden
+    }
+
+    @objc private func renderVisibilityChanged(_ notification: Notification) {
+        if let eventWindow = notification.object as? NSWindow, eventWindow !== window { return }
+        updateRenderVisibility()
+    }
+
+    private func updateRenderVisibility() {
+        guard !closed, let tab = tab else { return }
+        mostty_tab_set_visible(tab, renderVisible)
+        if renderVisible {
+            cacheTrimGeneration &+= 1
+            cacheTrimWork?.cancel(); cacheTrimWork = nil
+            renderCacheTrimmed = false
+            dirty = true
+            needsDisplay = true
+        } else if cacheTrimWork == nil && !renderCacheTrimmed {
+            scheduleCacheTrim(after: Double(mostty_render_cache_grace_ms()) / 1000)
+        }
+    }
+
+    private func scheduleCacheTrim(after delay: TimeInterval) {
+        let generation = cacheTrimGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, generation == self.cacheTrimGeneration,
+                  !self.closed, !self.renderVisible, let tab = self.tab else { return }
+            self.cacheTrimWork = nil
+            if mostty_tab_trim_hidden(tab) {
+                self.renderCacheTrimmed = true
+            } else {
+                self.scheduleCacheTrim(after: 1)
+            }
+        }
+        cacheTrimWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     override func layout() {
@@ -329,10 +389,14 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         startTimer()
         startBlink()
         updateTitle()
+        updateRenderVisibility()
     }
 
     func shutdown() {
         closed = true
+        cacheTrimGeneration &+= 1
+        cacheTrimWork?.cancel(); cacheTrimWork = nil
+        NotificationCenter.default.removeObserver(self)
         endMouseCapture()
         updateURLHover(at: nil)
         guard alive else {
@@ -471,7 +535,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         // Background tabs are detached from the window; skip rendering entirely
         // so they don't retry an unavailable offscreen drawable at 60 Hz.
         // The reader still feeds VT state; the next present happens when shown.
-        guard window != nil else { return }
+        guard renderVisible else { return }
         syncSurfaceIfNeeded()
         updateScroller()
         guard alive, dirty, let t = tab, let layer = metalLayer, let queue = commandQueue else { return }

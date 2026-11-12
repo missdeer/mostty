@@ -1,4 +1,5 @@
 const PaneSurface = @This();
+const std = @import("std");
 
 const win32 = @import("win32").everything;
 const vt = @import("vt");
@@ -7,6 +8,7 @@ const d3d11 = @import("d3d11.zig");
 const d3d12 = @import("d3d12/renderer.zig");
 const gl46 = @import("gl46.zig");
 const vulkan = @import("vulkan.zig");
+const gpu = @import("d3d11/gpu.zig");
 pub const InitError = d3d12.StartupError || gl46.StartupError || vulkan.StartupError;
 const types = @import("types.zig");
 
@@ -108,10 +110,54 @@ pub fn cacheGeneration(self: *const PaneSurface) u32 {
     };
 }
 
+pub fn setCacheGeneration(self: *PaneSurface, generation: u32) void {
+    switch (self.backend) {
+        inline else => |*backend| backend.cache_gen = generation,
+    }
+}
+
+/// Logical cache capacity lower bound; excludes presentation, allocator and
+/// driver overhead, and must not be added to OS memory measurements.
+pub fn cacheBytes(self: *const PaneSurface) u64 {
+    return switch (self.backend) {
+        inline else => |*backend, tag| bytes: {
+            var result: u64 = @as(u64, backend.shadow_cells.len) * @sizeOf(gpu.shader.Cell);
+            const atlas_size = if (comptime tag == .d3d11) backend.glyph_texture.size else backend.atlas_size;
+            if (atlas_size) |size| result += @as(u64, size.x) * size.y * 4;
+            if (backend.glyph_cache) |cache| result += @as(u64, cache.nodes.len) * @sizeOf(@TypeOf(cache.nodes[0]));
+            var images = backend.kitty_images.images.valueIterator();
+            while (images.next()) |image| result += @as(u64, image.width) * image.height * 4;
+            break :bytes result;
+        },
+    };
+}
+
 pub fn applyGlyphResult(self: *PaneSurface, result: *Renderer.RasterResult) bool {
     return switch (self.backend) {
         inline else => |*backend| backend.applyGlyphResult(result),
     };
+}
+
+test "restored surface rejects a late job even when the key, slot and slot generation match" {
+    const Cache = @import("glyph_index_cache.zig");
+    var common: Renderer.RendererCommon = undefined;
+    common.surface_id = 4;
+    var surface: PaneSurface = .{ .backend = .{ .d3d11 = undefined }, .font_generation = 0 };
+    const backend = &surface.backend.d3d11;
+    backend.common = &common;
+    backend.glyph_cache = try Cache.init(std.testing.allocator, 2);
+    defer backend.glyph_cache.?.deinit(std.testing.allocator);
+    surface.setCacheGeneration(10);
+    const key = Cache.Key.init('x', &.{}, .single, .regular);
+    const old = (try backend.glyph_cache.?.reserve(std.testing.allocator, key)).newly_reserved_pending;
+    var result: Renderer.RasterResult = .{ .surface_id = 4, .cache_gen = 10, .slot = old.index, .slot_gen = old.slot_gen, .key = key, .bytes = &.{}, .w = 0, .h = 0, .is_color = false, .failed = true };
+    backend.glyph_cache.?.clearRetainingCapacity();
+    const current = (try backend.glyph_cache.?.reserve(std.testing.allocator, key)).newly_reserved_pending;
+    try std.testing.expectEqual(old.index, current.index);
+    try std.testing.expectEqual(old.slot_gen, current.slot_gen);
+    surface.setCacheGeneration(11);
+    try std.testing.expect(!surface.applyGlyphResult(&result));
+    try std.testing.expect((try backend.glyph_cache.?.reserve(std.testing.allocator, key)) == .already_pending);
 }
 
 pub fn render(
