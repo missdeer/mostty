@@ -132,6 +132,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 
     private var renderTimer: Timer?
     private var blinkTimer: Timer?
+    private var renderTimerCallbacks: UInt64 = 0
+    private var blinkTimerCallbacks: UInt64 = 0
+    private var renderTimerRegistrations: UInt64 = 0
     private var cacheTrimWork: DispatchWorkItem?
     private var cacheTrimGeneration: UInt64 = 0
     private var renderCacheTrimmed = false
@@ -179,8 +182,14 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 #if MOSTTY_APP_TESTS
     var testDirty: Bool { dirty }
     func testClearDirty() { dirty = false }
-    func testBlinkTick() { blinkTick() }
+    func testBlinkTick() { blinkTick(now: blinkOn ? 0.54 : 0.01) }
     func testRenderTick() { renderTick() }
+    var testTimersRunning: Bool { renderTimer != nil && blinkTimer != nil }
+    var testTimerCounts: (render: UInt64, blink: UInt64, registrations: UInt64) {
+        (renderTimerCallbacks, blinkTimerCallbacks, renderTimerRegistrations)
+    }
+    func testRefreshVisibility() { updateRenderVisibility() }
+    static func testBlinkPhase(at time: TimeInterval) -> Bool { blinkPhase(at: time) }
     var testPresentTexture: ((MTLTexture) -> Bool)?
     var testSession: OpaquePointer? { tab }
     func testUpdateTitle(session: OpaquePointer? = nil) {
@@ -295,10 +304,16 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
             cacheTrimGeneration &+= 1
             cacheTrimWork?.cancel(); cacheTrimWork = nil
             renderCacheTrimmed = false
+            blinkOn = Self.blinkPhase(at: Date.timeIntervalSinceReferenceDate)
             dirty = true
             needsDisplay = true
-        } else if cacheTrimWork == nil && !renderCacheTrimmed {
-            scheduleCacheTrim(after: Double(mostty_render_cache_grace_ms()) / 1000)
+            startTimer()
+            startBlink()
+        } else {
+            stopTimers()
+            if cacheTrimWork == nil && !renderCacheTrimmed {
+                scheduleCacheTrim(after: Double(mostty_render_cache_grace_ms()) / 1000)
+            }
         }
     }
 
@@ -390,8 +405,6 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         alive = true
         dirty = true
         startReader(t)
-        startTimer()
-        startBlink()
         updateTitle()
         updateRenderVisibility()
     }
@@ -401,6 +414,7 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         cacheTrimGeneration &+= 1
         cacheTrimWork?.cancel(); cacheTrimWork = nil
         NotificationCenter.default.removeObserver(self)
+        stopTimers()
         endMouseCapture()
         updateURLHover(at: nil)
         guard alive else {
@@ -411,8 +425,6 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         setStop(true)
         feedQueue.cancel()
         if readerThread != nil { readerDone.wait() }
-        renderTimer?.invalidate(); renderTimer = nil
-        blinkTimer?.invalidate(); blinkTimer = nil
         if let t = tab { mostty_tab_destroy(t); tab = nil }
     }
 
@@ -478,11 +490,23 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     // MARK: Rendering
 
     private func startTimer() {
+        guard alive, renderVisible, renderTimer == nil else { return }
         let timer = Timer(timeInterval: Double(renderIntervalMs) / 1000.0, repeats: true) { [weak self] _ in
-            self?.renderTick()
+            guard let self = self else { return }
+            self.renderTimerCallbacks &+= 1
+            self.renderTick()
         }
+        // Restoration has a pending frame even without new PTY output. A
+        // failed drawable is retried at the configured cadence after this tick.
+        timer.fireDate = Date()
         RunLoop.main.add(timer, forMode: .common)
         renderTimer = timer
+        renderTimerRegistrations &+= 1
+    }
+
+    private func stopTimers() {
+        renderTimer?.invalidate(); renderTimer = nil
+        blinkTimer?.invalidate(); blinkTimer = nil
     }
 
     /// Adopt a reloaded config. Fonts and colors are re-applied inside the
@@ -496,10 +520,8 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         let interval = max(UInt32(1), mostty_config_render_interval_ms())
         if interval != renderIntervalMs {
             renderIntervalMs = interval
-            if renderTimer != nil {
-                renderTimer?.invalidate()
-                startTimer()
-            }
+            renderTimer?.invalidate(); renderTimer = nil
+            startTimer()
         }
 
         if let t = tab, mostty_tab_apply_config(t) {
@@ -521,17 +543,27 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     }
 
     private func startBlink() {
+        guard alive, renderVisible, blinkTimer == nil else { return }
         let timer = Timer(timeInterval: 0.53, repeats: true) { [weak self] _ in
-            self?.blinkTick()
+            guard let self = self else { return }
+            self.blinkTimerCallbacks &+= 1
+            self.blinkTick()
         }
+        let next = (floor(Date.timeIntervalSinceReferenceDate / 0.53) + 1) * 0.53
+        timer.fireDate = Date(timeIntervalSinceReferenceDate: next)
         RunLoop.main.add(timer, forMode: .common)
         blinkTimer = timer
     }
 
-    private func blinkTick() {
-        // Keep phase while hidden; restoration schedules a frame explicitly.
-        blinkOn.toggle()
-        guard let window = window, let tab = tab, alive else { return }
+    private static func blinkPhase(at time: TimeInterval) -> Bool {
+        Int64(floor(time / 0.53)) & 1 == 0
+    }
+
+    private func blinkTick(now: TimeInterval = Date.timeIntervalSinceReferenceDate) {
+        guard renderVisible, let window = window, let tab = tab, alive else { return }
+        let phase = Self.blinkPhase(at: now)
+        guard blinkOn != phase else { return }
+        blinkOn = phase
         if mostty_tab_blink_visible(tab, window.firstResponder === self) { dirty = true }
     }
 
