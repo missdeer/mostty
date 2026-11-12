@@ -120,6 +120,8 @@ struct ClipboardTests {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         let view = MosttyTerminalView(frame: window.contentView!.bounds)
         window.contentView = view
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
         defer { view.shutdown() }
         // Force grid synchronization without running timers or the fake EOF callback.
         view.setFrameSize(NSSize(width: 410, height: 200))

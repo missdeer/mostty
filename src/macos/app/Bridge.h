@@ -65,6 +65,9 @@ bool mostty_config_select_theme(const char *name);
 uint32_t mostty_config_render_interval_ms(void);
 /* Returns true when the cell metrics changed and the drawable must be re-synced. */
 bool mostty_tab_apply_config(MosttyTab *tab);
+uint32_t mostty_render_cache_grace_ms(void);
+void mostty_tab_set_visible(MosttyTab *tab, bool visible);
+bool mostty_tab_trim_hidden(MosttyTab *tab);
 
 void *mostty_tab_metal_device(MosttyTab *tab);
 

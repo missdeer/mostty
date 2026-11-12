@@ -46,6 +46,7 @@ fn runtimeIo() std.Io {
 const Tab = struct {
     pty: PtySession,
     renderer: CoreTextRenderer,
+    render_cache: @import("../renderer/hidden_cache.zig") = .{},
     clipboard_writer: ?ClipboardWriter = null,
     exit_code: ?i32 = null,
     mouse_last_cell: ?vt.Coordinate = null,
@@ -169,6 +170,7 @@ fn createTab(pixel_width: u32, pixel_height: u32, scale: f32, launcher: ?*const 
 
     const tab = try allocator.create(Tab);
     errdefer allocator.destroy(tab);
+    tab.render_cache = .{};
 
     tab.renderer = try CoreTextRenderer.init(.{
         .allocator = allocator,
@@ -307,6 +309,29 @@ export fn mostty_tab_apply_config(tab_opt: ?*Tab) bool {
         std.log.warn("font config reload: {t}; keeping previous fonts", .{err});
         return false;
     };
+}
+
+fn awakeMillis() u64 {
+    return @intCast(std.Io.Clock.awake.now(runtimeIo()).toMilliseconds());
+}
+
+export fn mostty_render_cache_grace_ms() u32 {
+    return @import("../renderer/hidden_cache.zig").grace_ms;
+}
+
+export fn mostty_tab_set_visible(tab_opt: ?*Tab, visible: bool) void {
+    const tab = tab_opt orelse return;
+    tab.render_cache.setVisible(visible, awakeMillis());
+}
+
+fn trimHiddenTab(tab: *Tab, now_ms: u64) bool {
+    if (!tab.render_cache.trimDue(now_ms)) return false;
+    tab.renderer.trimResources();
+    return true;
+}
+
+export fn mostty_tab_trim_hidden(tab_opt: ?*Tab) bool {
+    return trimHiddenTab(tab_opt orelse return false, awakeMillis());
 }
 
 /// Path of the config file the host watches for changes. Returns the byte count
@@ -873,6 +898,48 @@ export fn mostty_tab_selection_text(tab_opt: ?*Tab, buf: [*]u8, cap: usize) usiz
 
 comptime {
     _ = @import("../input_capi.zig");
+}
+
+test "hidden trim releases render resources, preserves VT state and restores the current geometry pixel-exactly" {
+    var cfg = Config.parse(allocator, "", "trim-test");
+    defer cfg.deinit();
+    const previous = loaded_config;
+    loaded_config = cfg;
+    defer loaded_config = previous;
+    const tab = mostty_tab_create(320, 160, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(tab);
+    const oracle = mostty_tab_create(320, 160, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(oracle);
+    const input = "hello \x1b[1mwide\x1b[0m\r\n\x1b_Ga=T,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\";
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    for ([_]*Tab{ tab, oracle }) |surface| {
+        mostty_tab_feed(surface, input.ptr, input.len);
+        try std.testing.expect(mostty_tab_render(surface, false, true, &cols, &rows) != null);
+    }
+    const term = tab.pty.terminal.term;
+    tab.render_cache.setVisible(false, 100);
+    try std.testing.expect(!trimHiddenTab(tab, 100 + mostty_render_cache_grace_ms() - 1));
+    try std.testing.expect(tab.renderer.cacheBytes() > 0);
+    try std.testing.expect(trimHiddenTab(tab, 100 + mostty_render_cache_grace_ms()));
+    try std.testing.expectEqual(@as(u64, 0), tab.renderer.cacheBytes());
+    try std.testing.expectEqual(@as(u64, 1), tab.renderer.trim_count);
+    try std.testing.expect(!trimHiddenTab(tab, 100_000));
+    try std.testing.expect(tab.pty.terminal.term == term);
+    try std.testing.expectEqual(@as(u32, 1), term.screens.active.kitty_images.images.count());
+    for ([_]*Tab{ tab, oracle }) |surface| {
+        try std.testing.expect(mostty_tab_set_surface(surface, 400, 200, 2, &cols, &rows));
+        const output = "hidden-output\r\n";
+        mostty_tab_feed(surface, output.ptr, output.len);
+    }
+    // Geometry/font scale changes while hidden must not regrow trimmed buffers.
+    try std.testing.expectEqual(@as(usize, 0), tab.renderer.pixels.len);
+    try std.testing.expect(tab.renderer.metal.texture() == null);
+    mostty_tab_set_visible(tab, true);
+    for ([_]*Tab{ tab, oracle }) |surface| try std.testing.expect(mostty_tab_render(surface, false, true, &cols, &rows) != null);
+    try std.testing.expectEqualSlices(u8, oracle.renderer.pixels, tab.renderer.pixels);
+    try std.testing.expect(tab.renderer.cacheBytes() > 0);
+    try std.testing.expect(tab.renderer.trim_logical_bytes > 0);
 }
 
 test "config disable and budget lowering release hidden terminal images without another render" {

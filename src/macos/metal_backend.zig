@@ -126,14 +126,24 @@ pub fn init() !MetalBackend {
 }
 
 pub fn deinit(self: *MetalBackend) void {
-    if (self.source) |resource| resource.release();
-    if (self.target) |resource| resource.release();
+    self.trimTargets();
     self.sampler.release();
     self.pipeline.release();
     self.library.release();
     self.queue.release();
     self.device.release();
     self.* = undefined;
+}
+
+pub fn trimTargets(self: *MetalBackend) void {
+    // Core rendering completes before it returns. Submitted Swift command
+    // buffers retain any target still being presented until their completion.
+    if (self.source) |resource| resource.release();
+    if (self.target) |resource| resource.release();
+    self.source = null;
+    self.target = null;
+    self.width = 0;
+    self.height = 0;
 }
 
 pub fn resize(self: *MetalBackend, width: u32, height: u32) !void {

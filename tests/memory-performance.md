@@ -28,3 +28,21 @@ Commands: `zig test src/win32/glyph_index_cache.zig` and the same command with
 `-O ReleaseFast`. The suite is also imported by the shared/native aggregates.
 Native backend font/DPI reload and pane-close unit paths run in Windows CI;
 dedicated Release memory and lookup/insert latency measurements remain pending.
+
+## Hidden render caches (#18)
+
+The shared visibility policy asserts a 30-second warm period, no deadline reset
+from repeated hidden activity, no trim during quick switches, stale-timer safety
+and idempotent trimming. Windows native tests exercise rejection of a late job
+whose key/slot/slot generation would otherwise alias a restored cache. macOS
+native tests trim rendered content/images, keep receiving output and changing
+scale/geometry while trimmed, then compare restored pixels against a full-render
+oracle. Cache capacity is checked before/after trim; terminal state remains live.
+
+Windows counters live on each `Pane` (`render_trim_count`, `render_trim_bytes`,
+`render_restore_us`); macOS counters live on `CoreTextRenderer` (`trim_count`,
+`trim_logical_bytes`, `restore_ns`). Byte counts are logical lower bounds and
+recreation timings exclude first raster, GPU presentation and input latency.
+Native 1/8/16-tab steady/peak OS/GPU memory and p95/p99 restoration measurements
+remain pending; hidden fonts/wallpaper/host drawables retained on macOS must be
+reported separately.

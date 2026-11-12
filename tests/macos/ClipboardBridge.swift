@@ -112,6 +112,12 @@ func stubCopyTabbarFont() -> UnsafeMutableRawPointer? {
 func stubRenderInterval() -> UInt32 { 16 }
 @_cdecl("mostty_tab_apply_config")
 func stubApplyConfig(_ tab: OpaquePointer?) -> Bool { false }
+@_cdecl("mostty_render_cache_grace_ms")
+func stubRenderCacheGrace() -> UInt32 { 30_000 }
+@_cdecl("mostty_tab_set_visible")
+func stubSetVisible(_ tab: OpaquePointer?, _ visible: Bool) {}
+@_cdecl("mostty_tab_trim_hidden")
+func stubTrimHidden(_ tab: OpaquePointer?) -> Bool { true }
 @_cdecl("mostty_tab_metal_device")
 func stubMetalDevice(_ tab: OpaquePointer?) -> UnsafeMutableRawPointer? {
     if device == nil { device = MTLCreateSystemDefaultDevice() }

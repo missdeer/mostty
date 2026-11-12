@@ -70,6 +70,7 @@ pub fn onClose(_: win32.HWND, _: win32.WPARAM, _: win32.LPARAM) ?win32.LRESULT {
             win32.L("Mostty"),
         )) return 0;
         tab_mgmt.destroyAllTabs(window);
+        _ = win32.KillTimer(window.hwnd, types.TIMER_PANE_TRIM);
         win32.PostQuitMessage(0);
     } else {
         win32.PostQuitMessage(0);

@@ -840,7 +840,36 @@ retain the M5a CPU handoff. Observed vendor results live in
 `render.zig:renderWindow` dispatches main chrome through `Renderer` and paints
 every visible pane through `PaneSurface`, with
 its own terminal, selection, hover and focused-cursor state. Hidden sessions
-continue consuming PTY output. All selected Windows backends use the pane facade after startup. A pane frame runs:
+continue consuming PTY output. All selected Windows backends use the pane facade after startup.
+
+Hidden render caches transition active → warm → trimmed after 30 seconds.
+Repeated output/layout events do not restart that deadline, and quick tab
+switches cancel it. Windows releases the complete borrowing pane surface while
+retaining HWND, PTY, terminal, selection and layout. Restore uses current font/
+DPI/geometry and a fresh cache epoch above the prior surface/device epoch, so
+late raster results cannot alias recreated slots. A window timer tracks only
+the earliest warm deadline; minimized windows and maximized-away siblings count
+as hidden. Trimming does not hold terminal/PTY locks while backend teardown
+settles GPU work.
+
+macOS drops CPU pixels, frame/snapshot/shaping/sprite/terminal-image caches and
+both Metal targets. It retains fonts, wallpaper, the Metal device and immutable
+pipeline objects. Hidden resize/font changes update metadata without allocating
+new pixels; the first visible render recreates targets and fully rasterizes.
+AppKit attachment, hidden ancestors, minimization and app hiding drive a guarded
+one-shot task; canceled old tasks cannot trim a newly shown surface. Ordinary
+occlusion does not trim a still-visible window. Submitted command buffers retain
+old presentation resources until GPU completion. Host drawables are not included
+in this first trim phase.
+
+Counters record trim count, released logical cache-capacity estimates and
+resource/surface recreation duration (excluding first raster/presentation).
+These estimates exclude allocator, driver and some presentation resources and
+are not OS footprint savings. The initial 30-second grace is a conservative
+anti-thrashing policy; native 1/8/16-tab memory/recovery-latency measurement is
+required before tuning it.
+
+A pane frame runs:
 
 1. **prepareFrame** (`d3d11.zig`): client-size query; swap-chain
    create-or-resize; cheap occlusion test (`Present(0, TEST)`);
