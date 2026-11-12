@@ -54,6 +54,7 @@ pub fn sync(self: *PaneSurface, parent: *Renderer, focused: bool) void {
             backend.common.focused = focused;
             backend.common.cell_size = parent.common.cell_size;
             backend.common.font_ligatures = parent.common.font_ligatures;
+            backend.common.glyph_atlas_budget_bytes = parent.common.glyph_atlas_budget_bytes;
             backend.common.remote_or_software_adapter = parent.common.remote_or_software_adapter;
             backend.syncSurface(source);
         },
@@ -79,8 +80,8 @@ pub fn runtimeFailure(self: *PaneSurface) ?Renderer.RuntimeFailure {
 
 pub fn needsFrame(self: *const PaneSurface) bool {
     return switch (self.backend) {
-        inline .d3d12, .opengl, .vulkan, .@"native-vulkan" => |backend| backend.frame_pending,
-        else => false,
+        inline .d3d12, .opengl, .vulkan, .@"native-vulkan" => |backend| backend.frame_pending or backend.common.glyph_retry,
+        .d3d11 => |backend| backend.common.glyph_retry,
     };
 }
 

@@ -900,7 +900,7 @@ fn prepareFrame(
     // Hoist per-frame atlas setup out of the per-cell loop; the cache /
     // texture state is identical for every cell in a single frame. Also
     // produces `tex_cell_count` needed by the const-buffer below.
-    const atlas = glyph_mod.setupGlyphAtlas(self);
+    const atlas = glyph_mod.setupGlyphAtlas(self, shader_col * term_shader_row);
     const tex_cell_count = atlas.tex_cell_count;
 
     // Compute scrollbar geometry once so both the const-buffer write and
@@ -1327,7 +1327,9 @@ test "chrome preparation leaves atlas lazy across font changes while panes retai
     defer pane.deinit();
     const terminal = prepareFrame(&pane, child, session.term, false) orelse return error.TestFrameUnavailable;
     try std.testing.expect(terminal.atlas != null and pane.glyph_texture.obj != null and pane.glyph_cache != null);
-    try std.testing.expect(terminal.tex_cell_count.eql(gpu.getTextureMaxCellCount(fonts.cell_size_xy)));
+    const maximum = gpu.getTextureMaxCellCount(fonts.cell_size_xy);
+    try std.testing.expectEqual(maximum.x, terminal.tex_cell_count.x);
+    try std.testing.expect(terminal.tex_cell_count.y < maximum.y);
     session.feed("pane glyphs");
     pane.render(child, 1, session.term, tabbar, false, false, null, null, null, 1, false, null);
     try std.testing.expect(pane.shader_cells.count > 0 and pane.shadow_cells.len > 0);

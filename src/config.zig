@@ -257,6 +257,8 @@ background_image_fit: BackgroundImageFit = .contain,
 background_image_repeat: bool = false,
 // Controls terminal image protocols, independently of the wallpaper.
 images_enabled: bool = true,
+// Windows per-pane atlas cache budget; visible-frame capacity is a floor.
+glyph_atlas_budget_bytes: u32 = 64 * 1024 * 1024,
 // Scope of the input method remembered and restored across switches (Windows).
 smart_ime: SmartIme = .tab,
 
@@ -407,6 +409,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var background_image_fit = defaults.background_image_fit;
     var background_image_repeat = defaults.background_image_repeat;
     var images_enabled = defaults.images_enabled;
+    var glyph_atlas_budget_bytes = defaults.glyph_atlas_budget_bytes;
     var smart_ime = defaults.smart_ime;
     var maximize = defaults.maximize;
     var fullscreen = defaults.fullscreen;
@@ -588,6 +591,13 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
                 continue;
             };
+        } else if (std.mem.eql(u8, key, "glyph-atlas-budget-bytes")) {
+            const n = std.fmt.parseInt(u32, value, 10) catch 0;
+            if (n < 1024 * 1024 or n > 64 * 1024 * 1024) {
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid glyph-atlas-budget-bytes '{s}' (expect 1048576..67108864 bytes)", .{ source_name, line_no, value });
+                continue;
+            }
+            glyph_atlas_budget_bytes = n;
         } else if (std.mem.eql(u8, key, "images-enabled")) {
             images_enabled = parseStrictBool(value) orelse {
                 reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid images-enabled '{s}' (expect true/false)", .{ source_name, line_no, value });
@@ -708,6 +718,7 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .background_image_fit = background_image_fit,
         .background_image_repeat = background_image_repeat,
         .images_enabled = images_enabled,
+        .glyph_atlas_budget_bytes = glyph_atlas_budget_bytes,
         .smart_ime = smart_ime,
         .maximize = maximize,
         .fullscreen = fullscreen,
@@ -1546,6 +1557,20 @@ test "parse reads color keys into theme" {
     try std.testing.expectEqual(@as(?u24, 0x445566), cfg.theme.selection_background);
     // Index not set by the theme keeps the standard xterm cube (non-zero).
     try std.testing.expectEqual(vt.color.default[16], cfg.theme.palette[16]);
+}
+
+test "glyph atlas budget validates bytes" {
+    var cfg = parse(std.testing.allocator, "glyph-atlas-budget-bytes = 4194304", "test");
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(u32, 4194304), cfg.glyph_atlas_budget_bytes);
+    for ([_][]const u8{ "0", "-1", "1048575", "67108865", "4294967296", "4MiB" }) |value| {
+        const text = try std.fmt.allocPrint(std.testing.allocator, "glyph-atlas-budget-bytes = {s}", .{value});
+        defer std.testing.allocator.free(text);
+        var invalid = parse(std.testing.allocator, text, "test");
+        defer invalid.deinit();
+        try std.testing.expectEqual(@as(usize, 1), invalid.diagnostic_count);
+        try std.testing.expectEqual(@as(u32, 67108864), invalid.glyph_atlas_budget_bytes);
+    }
 }
 
 test "inline images can be disabled independently of the wallpaper" {

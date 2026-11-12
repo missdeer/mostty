@@ -3,6 +3,7 @@ test {
     _ = @import("renderer/completion_prefix.zig");
     _ = @import("terminal/drain_round.zig");
     _ = @import("win32/glyph_index_cache.zig");
+    _ = @import("win32/atlas_budget.zig");
     _ = @import("terminal/write_queue.zig");
     _ = @import("macos/grid_model.zig");
     _ = @import("renderer/image_pixels.zig");

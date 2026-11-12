@@ -129,6 +129,14 @@ back: u32,
 /// Monotonic frame counter bumped by `beginFrame()`. Wraps cleanly;
 /// equality compare against `Node.touched_frame` is the only use.
 frame: u32 = 0,
+// Renderers protect every slot referenced by the frame being assembled.
+// Other users may retain the ordinary LRU contract.
+protect_current_frame: bool = false,
+hits: u64 = 0,
+misses: u64 = 0,
+evictions: u64 = 0,
+frame_evictions: u32 = 0,
+frame_no_slot: u32 = 0,
 
 pub fn init(allocator: std.mem.Allocator, capacity: u32) error{OutOfMemory}!GlyphIndexCache {
     var result: GlyphIndexCache = .{
@@ -161,6 +169,8 @@ pub fn clearRetainingCapacity(self: *GlyphIndexCache) void {
 /// the per-frame LRU dampening below works.
 pub fn beginFrame(self: *GlyphIndexCache) void {
     self.frame +%= 1;
+    self.frame_evictions = 0;
+    self.frame_no_slot = 0;
 }
 
 pub fn deinit(self: *GlyphIndexCache, allocator: std.mem.Allocator) void {
@@ -190,6 +200,7 @@ pub const ReserveResult = union(enum) {
 pub fn reserve(self: *GlyphIndexCache, allocator: std.mem.Allocator, key: Key) error{OutOfMemory}!ReserveResult {
     const entry = try self.map.getOrPut(allocator, key);
     if (entry.found_existing) {
+        self.hits +%= 1;
         const idx = entry.value_ptr.*;
         // Per-frame LRU dampening: a single render frame visits many cells
         // that hit the same glyph (think every space in a row). Promoting
@@ -206,15 +217,18 @@ pub fn reserve(self: *GlyphIndexCache, allocator: std.mem.Allocator, key: Key) e
     // Miss path: walk LRU forward from `front` and take the first
     // non-pending node as victim. Pending slots are skipped because their
     // in-flight raster owns those pixels — evicting would orphan the upload.
+    self.misses +%= 1;
     var victim_opt: ?u32 = self.front;
     while (victim_opt) |idx| : (victim_opt = self.nodes[idx].next) {
-        if (!self.nodes[idx].pending) break;
+        const node = &self.nodes[idx];
+        if (!node.pending and !(self.protect_current_frame and node.key != null and node.touched_frame == self.frame)) break;
     }
     const victim = victim_opt orelse {
         // All slots pending. Roll back the getOrPut so the map stays
         // consistent (the entry's value was never written).
         const removed = self.map.remove(key);
         std.debug.assert(removed);
+        self.frame_no_slot +|= 1;
         return .no_slot;
     };
 
@@ -229,6 +243,8 @@ pub fn reserve(self: *GlyphIndexCache, allocator: std.mem.Allocator, key: Key) e
     self.nodes[victim].gen +%= 1;
     const slot_gen = self.nodes[victim].gen;
     if (replaced) |r| {
+        self.evictions +%= 1;
+        self.frame_evictions +|= 1;
         const removed = self.map.remove(r);
         std.debug.assert(removed);
     }
@@ -300,6 +316,30 @@ pub fn cancelPending(self: *GlyphIndexCache, idx: u32, slot_gen: u32, expected_k
 pub fn touch(self: *GlyphIndexCache, index: u32) void {
     self.nodes[index].touched_frame = self.frame;
     self.moveToBack(index);
+}
+
+test "protected frames retain ready references and pending slots until the next frame" {
+    const allocator = std.testing.allocator;
+    var cache = try init(allocator, 2);
+    defer cache.deinit(allocator);
+    cache.protect_current_frame = true;
+    cache.beginFrame();
+    const blank = Key.init(' ', &.{}, .single, .regular);
+    const left = Key.init(0x4e00, &.{}, .wide_left, .bold);
+    const right = Key.init(0x4e00, &.{}, .wide_right, .bold);
+    const a = (try cache.reserve(allocator, blank)).newly_reserved_pending;
+    try std.testing.expect(cache.markReady(a.index, a.slot_gen, blank));
+    const b = (try cache.reserve(allocator, left)).newly_reserved_pending;
+    try std.testing.expectEqual(ReserveResult.no_slot, try cache.reserve(allocator, right));
+    try std.testing.expect(cache.markReady(b.index, b.slot_gen, left));
+    try std.testing.expectEqual(ReserveResult.no_slot, try cache.reserve(allocator, right));
+    try std.testing.expectEqual(@as(u32, 2), cache.map.count());
+    cache.beginFrame();
+    _ = try cache.reserve(allocator, blank);
+    const replacement = (try cache.reserve(allocator, right)).newly_reserved_pending;
+    try std.testing.expectEqual(b.index, replacement.index);
+    try std.testing.expect(!cache.markReady(b.index, b.slot_gen, left));
+    try std.testing.expectEqual(@as(u64, 1), cache.evictions);
 }
 
 fn moveToBack(self: *GlyphIndexCache, index: u32) void {

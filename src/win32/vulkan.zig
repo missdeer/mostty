@@ -572,7 +572,7 @@ fn prepareFrame(
     const term_shader_row = @divTrunc(term_pixel_h + cs.y - 1, cs.y);
     if (shader_col > cell_buffer.max_shader_col) return null;
 
-    const atlas = glyph_mod.setupGlyphAtlas(self);
+    const atlas = glyph_mod.setupGlyphAtlas(self, shader_col * term_shader_row);
     const tex_cell_count = atlas.tex_cell_count;
 
     var scrollbar: struct { x: f32, y: f32, w: f32, h: f32 } = .{ .x = @floatFromInt(grid_w), .y = 0, .w = 0, .h = 0 };

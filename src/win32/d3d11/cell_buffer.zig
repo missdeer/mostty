@@ -374,6 +374,10 @@ pub fn buildAndUpload(
         drawResizeOverlay(self, term, glyph_cache, tex_cell_count, shader_col, term_shader_row, scratch, &result);
     }
 
+    self.common.glyph_retry = glyph_cache.frame_no_slot != 0;
+    // A reused slot can keep the same numeric cell index while its pixels
+    // change; row shadow comparison alone cannot detect that change.
+    if (glyph_cache.frame_evictions != 0) self.grid_force_full = true;
     return result;
 }
 

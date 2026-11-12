@@ -14,6 +14,7 @@ const global = global_mod.global;
 
 pub fn renderWindow(window: *Window) void {
     if (window.confirming_renderer_fallback or window.tabs.items.len == 0 or window.layout_updating) return;
+    global.renderer.common.glyph_atlas_budget_bytes = global.config.glyph_atlas_budget_bytes;
 
     // Revalidate cached URL hover against current viewport contents. Anything
     // that asked for a repaint (PTY data, resize, keyboard-driven viewport

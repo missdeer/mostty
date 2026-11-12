@@ -1057,7 +1057,7 @@ fn prepareFrame(
     const term_shader_row: u32 = @divTrunc(term_pixel_h + cs.y - 1, cs.y);
     if (shader_col > cell_buffer.max_shader_col) return null;
 
-    const atlas = glyph_mod.setupGlyphAtlas(self);
+    const atlas = glyph_mod.setupGlyphAtlas(self, shader_col * term_shader_row);
     if (!self.healthy()) return null;
     const tex_cell_count = atlas.tex_cell_count;
 
