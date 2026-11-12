@@ -15,15 +15,26 @@ expected: [26][glyph.max_ligature_run_cells]u32 = undefined,
 text: [glyph.max_ligature_run_cells]u8 = undefined,
 style: Cache.Style = .regular,
 blank: u32 = 0,
+// The comparison runner overlays this same fixture on both revisions.
+const reclaiming_cache = @hasField(Renderer, "glyph_cache_allocator");
+
+fn cacheAllocator(self: *Fixture) std.mem.Allocator {
+    return if (comptime reclaiming_cache) self.renderer.glyph_cache_allocator else self.renderer.glyph_cache_arena.allocator();
+}
 
 pub fn init(self: *Fixture, allocator: std.mem.Allocator, style: Cache.Style) !void {
     self.style = style;
-    self.renderer.glyph_cache_allocator = allocator;
+    if (comptime reclaiming_cache) {
+        self.renderer.glyph_cache_allocator = allocator;
+    } else {
+        self.renderer.glyph_cache_arena = .init(allocator);
+    }
+    errdefer if (comptime !reclaiming_cache) self.renderer.glyph_cache_arena.deinit();
     self.renderer.font_service = &self.font;
     self.font.glyph_worker_started = true;
     self.font.cell_size_xy = .{ .x = 8, .y = 16 };
-    self.cache = try Cache.init(self.renderer.glyph_cache_allocator, 1024);
-    errdefer self.cache.deinit(allocator);
+    self.cache = try Cache.init(self.cacheAllocator(), 1024);
+    errdefer self.cache.deinit(self.cacheAllocator());
     self.blank = try self.ready(Cache.Key.init(' ', &.{}, .single, .regular));
     for (&self.text, 0..) |*ch, i| ch.* = @intCast('a' + i % 26);
     for (0..26) |variant| {
@@ -33,13 +44,14 @@ pub fn init(self: *Fixture, allocator: std.mem.Allocator, style: Cache.Style) !v
 }
 
 fn ready(self: *Fixture, key: Cache.Key) !u32 {
-    const reserved = (try self.cache.reserve(self.renderer.glyph_cache_allocator, key)).newly_reserved_pending;
+    const reserved = (try self.cache.reserve(self.cacheAllocator(), key)).newly_reserved_pending;
     try std.testing.expect(self.cache.markReady(reserved.index, reserved.slot_gen, key));
     return reserved.index;
 }
 
 pub fn deinit(self: *Fixture) void {
-    self.cache.deinit(self.renderer.glyph_cache_allocator);
+    self.cache.deinit(self.cacheAllocator());
+    if (comptime !reclaiming_cache) self.renderer.glyph_cache_arena.deinit();
 }
 
 pub fn run(self: *Fixture, iteration: usize) !u64 {
