@@ -1,6 +1,7 @@
 const MetalBackend = @This();
 
 const builtin = @import("builtin");
+const std = @import("std");
 const macos = @import("apple.zig");
 const objc = @import("objc.zig");
 
@@ -90,6 +91,10 @@ source: ?objc.Object = null,
 target: ?objc.Object = null,
 width: u32 = 0,
 height: u32 = 0,
+last_upload_bytes: u64 = 0,
+uploaded_bytes: u64 = 0,
+last_wait_ns: u64 = 0,
+wait_ns: u64 = 0,
 
 pub fn init() !MetalBackend {
     const device_id = MTLCreateSystemDefaultDevice() orelse return error.MetalUnavailable;
@@ -164,24 +169,31 @@ pub fn resize(self: *MetalBackend, width: u32, height: u32) !void {
 }
 
 pub fn render(self: *MetalBackend, pixels: []const u8) !void {
+    return self.renderRows(pixels, 0, self.height);
+}
+
+pub fn renderRows(self: *MetalBackend, pixels: []const u8, first_row: u32, row_count: u32) !void {
     const source = self.source orelse return error.DrawableNotConfigured;
     const target = self.target orelse return error.DrawableNotConfigured;
     const expected = try stdMathMul(@as(usize, self.width), @as(usize, self.height), 4);
     if (pixels.len != expected) return error.InvalidPixelBuffer;
+    if (first_row > self.height or row_count == 0 or row_count > self.height - first_row) return error.InvalidPixelBuffer;
 
     source.msgSend(
         void,
         objc.sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
         .{
             Region{
-                .origin = .{ .x = 0, .y = 0, .z = 0 },
-                .size = .{ .width = self.width, .height = self.height, .depth = 1 },
+                .origin = .{ .x = 0, .y = first_row, .z = 0 },
+                .size = .{ .width = self.width, .height = row_count, .depth = 1 },
             },
             @as(c_ulong, 0),
-            @as(*const anyopaque, @ptrCast(pixels.ptr)),
+            @as(*const anyopaque, @ptrCast(pixels.ptr + @as(usize, first_row) * self.width * 4)),
             @as(c_ulong, self.width * 4),
         },
     );
+    self.last_upload_bytes = @as(u64, self.width) * row_count * 4;
+    self.uploaded_bytes +|= self.last_upload_bytes;
 
     const command_buffer = self.queue.msgSend(objc.Object, objc.sel("commandBuffer"), .{});
     const descriptor_class = objc.getClass("MTLRenderPassDescriptor") orelse return error.MetalUnavailable;
@@ -220,7 +232,11 @@ pub fn render(self: *MetalBackend, pixels: []const u8) !void {
     );
     encoder.msgSend(void, objc.sel("endEncoding"), .{});
     command_buffer.msgSend(void, objc.sel("commit"), .{});
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const start = std.Io.Timestamp.now(io, .awake).nanoseconds;
     command_buffer.msgSend(void, objc.sel("waitUntilCompleted"), .{});
+    self.last_wait_ns = @intCast(@max(0, std.Io.Timestamp.now(io, .awake).nanoseconds - start));
+    self.wait_ns +|= self.last_wait_ns;
     if (command_buffer.getProperty(c_ulong, "status") == 5) return error.MetalCommandFailed;
 }
 
@@ -313,7 +329,6 @@ fn stdMathMul(a: usize, b: usize, c: usize) !usize {
 }
 
 test "Metal creates upload and render textures, draws, and resizes" {
-    const std = @import("std");
     var backend = try init();
     defer backend.deinit();
     try backend.resize(2, 2);

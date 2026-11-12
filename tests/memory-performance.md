@@ -46,3 +46,20 @@ recreation timings exclude first raster, GPU presentation and input latency.
 Native 1/8/16-tab steady/peak OS/GPU memory and p95/p99 restoration measurements
 remain pending; hidden fonts/wallpaper/host drawables retained on macOS must be
 reported separately.
+
+## macOS row damage (#19)
+
+Native tests compare incremental pixels with a forced complete raster for ASCII,
+CJK, emoji, combining marks, styles/decorations, old/new cursors, SGR blink,
+selection, reverse video and palette changes. A single ASCII change must raster
+and upload less than a full window; stable frames upload zero bytes. Failed
+snapshot allocation must leave the snapshot invalid and retry completely.
+Resize/scale, image/wallpaper and hidden restoration retain their existing full
+paths and tests. Core and host presentation share one ordered Metal queue.
+
+`last_rasterized_pixels`, Metal `last_upload_bytes`/`uploaded_bytes` and
+`last_wait_ns`/`wait_ns` separate work reduction from storage and UI waiting.
+The CPU bitmap and two Metal textures remain allocated while active. Apple
+Silicon CI is native evidence; Intel/AMD managed/private storage, physical
+footprint, bandwidth and p95/p99 input-to-present measurements require separate
+hardware runs and are not inferred from logical upload area.

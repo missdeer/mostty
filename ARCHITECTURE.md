@@ -466,19 +466,34 @@ before publishing replacement fonts. Colors, clipping and cell fitting remain
 dynamic, so repainting selections or blink phases reuses the same shapes.
 For text-only frames without wallpaper, an owned snapshot compares resolved
 cells, graphemes, paint and cursor/blink state against the last successful
-raster/upload. Identical TUI redraws reuse that texture; font changes invalidate
-the snapshot and surface resize releases it. Snapshot allocation failure falls
-back to a full render. Plain spaces skip text drawing while retaining their
-backgrounds and any decorations. Image frames keep the full-render path.
+raster/upload. Identical TUI redraws reuse that texture. Changed text cells,
+graphemes, selection/colors, old/new cursor rows and visible SGR blink rows
+produce a conservative dirty-row interval (including neighboring rows for ink
+bounds). CoreGraphics clips to that interval and skips shaping unchanged rows;
+Metal replaces only those source pixel rows. A blink phase with no visible
+blinking element causes no raster/upload. Font, geometry, paint/background,
+cell-count changes and snapshot allocation failure use the full render path.
+Images and wallpaper also retain the full path as a pixel-correctness oracle.
+Snapshots become reusable only after successful raster/upload completion.
+Plain spaces skip text drawing while retaining backgrounds and decorations.
 Without wallpaper, the bitmap background uses copy blending to replace all
 pixels including alpha, then restores normal blending for text and images.
 Wallpaper retains clear/draw/source-over composition beneath the background.
 Shaped clusters are scaled down as
 needed to fit their VT cell spans, preserving color glyphs in the BGRA buffer.
 The renderer submits that buffer through
-`MetalBackend` to an offscreen Metal texture. Resize and backing-scale changes
-replace the font metrics, pixel buffer, and Metal textures together. The later
-AppKit shell owns presentation of that texture and all input/window lifecycle.
+`MetalBackend` to an offscreen Metal texture. The AppKit shell retains the Core
+command queue and submits its presentation blit on that same ordered queue.
+Core's existing completion wait protects CPU source reuse; queue ordering puts
+each host target read before the next Core target write. Resize replaces both
+targets, while submitted command buffers retain old resources through completion.
+The CPU bitmap and source/target textures remain three logical pixel surfaces;
+this phase reduces raster/upload area, not steady-state pixel storage. Removing
+an intermediate surface would change the borrowed-texture presentation contract
+and requires native storage-mode/latency validation. Device-wide pipeline pooling
+is deferred until its lifetime and hardware benefit are measured. Last raster
+pixels, uploaded bytes and UI wait nanoseconds are counted separately.
+The AppKit shell owns all input/window lifecycle.
 `AppDelegate` creates the window and native menus; `ContentView` lays out the
 tab bar above the terminal container. Model property observers refresh native
 tab buttons and swap the selected pane host; theme menus rebuild on opening.

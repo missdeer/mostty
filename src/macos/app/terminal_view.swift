@@ -375,7 +375,11 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         layer.drawableSize = CGSize(width: Int(pw), height: Int(ph))
         layer.isOpaque = !translucent
         metalLayer = layer
-        commandQueue = dev.makeCommandQueue()
+        // Share the Core queue so its next target write follows this host's
+        // preceding presentation blit. Core still waits before CPU reuse.
+        commandQueue = mostty_tab_metal_queue(t).flatMap {
+            Unmanaged<AnyObject>.fromOpaque($0).takeUnretainedValue() as? MTLCommandQueue
+        }
 
         var cw: UInt32 = 1, ch: UInt32 = 1
         mostty_tab_cell_size(t, &cw, &ch)
