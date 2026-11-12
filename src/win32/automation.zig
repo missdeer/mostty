@@ -8,6 +8,7 @@ const native = @import("pane_native.zig");
 const integration = @import("shell_integration.zig");
 const Config = @import("../config.zig");
 const util = @import("util.zig");
+const memory = @import("resource_snapshot.zig");
 
 const request_tag = 0x4d545931;
 const response_tag = 0x4d545932;
@@ -16,7 +17,7 @@ var busy = false;
 var instance: u64 = 0;
 
 const Request = struct {
-    action: enum { list, get, new_tab, focus, split, input, close },
+    action: enum { list, get, new_tab, focus, split, input, close, resources },
     id: ?[]const u8 = null,
     direction: enum { right, down } = .right,
     text: []const u8 = "",
@@ -35,6 +36,7 @@ const Response = struct {
     @"error": ?[]const u8 = null,
     terminal: ?Detail = null,
     terminals: []const Detail = &.{},
+    resources: ?memory.Snapshot = null,
 };
 
 fn detail(a: std.mem.Allocator, window: *state.Window, pane: *state.Pane) !Detail {
@@ -65,6 +67,7 @@ fn resolve(window: *state.Window, id: ?[]const u8) !*state.Pane {
 }
 
 fn execute(a: std.mem.Allocator, window: *state.Window, request: Request) !Response {
+    if (request.action == .resources) return .{ .resources = try memory.capture(a, window, &global.renderer, &global.config) };
     if (request.action == .list) {
         var list: std.ArrayList(Detail) = .empty;
         for (window.panes.items) |pane| {

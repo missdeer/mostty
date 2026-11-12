@@ -390,6 +390,38 @@ pub fn cacheBytes(self: *const CoreTextRenderer) u64 {
     return result;
 }
 
+pub fn memoryResources(self: *const CoreTextRenderer) @import("../renderer/resource_stats.zig").Renderer {
+    var result: @import("../renderer/resource_stats.zig").Renderer = .{
+        .cache_lower_bound_bytes = self.cacheBytes(),
+        .cpu_pixel_bytes = self.pixels.len,
+        .cpu_grid_bytes = @as(u64, self.frame_cells.capacity + self.snapshot.cells.capacity) * @sizeOf(GridModel.Cell) + @as(u64, self.snapshot.graphemes.capacity) * @sizeOf(u21),
+        .shaping_storage_bytes = @as(u64, self.shaping_cache.entries.len) * @sizeOf(@TypeOf(self.shaping_cache.entries[0])),
+        .renderer_image_count = self.kitty_images.images.count(),
+        .metal_source_logical_bytes = if (self.metal.source != null) @as(u64, self.metal.width) * self.metal.height * 4 else 0,
+        .metal_target_logical_bytes = if (self.metal.target != null) @as(u64, self.metal.width) * self.metal.height * 4 else 0,
+        .metal_source_storage_mode = if (self.metal.source) |texture| texture.getProperty(c_ulong, "storageMode") else null,
+        .metal_target_storage_mode = if (self.metal.target) |texture| texture.getProperty(c_ulong, "storageMode") else null,
+        // Device scope: repeated pane snapshots for the same device overlap.
+        .metal_device_allocated_bytes = self.metal.device.getProperty(c_ulong, "currentAllocatedSize"),
+        .last_upload_bytes = self.metal.last_upload_bytes,
+        .uploaded_bytes = self.metal.uploaded_bytes,
+        .last_gpu_wait_ns = self.metal.last_wait_ns,
+        .gpu_wait_ns = self.metal.wait_ns,
+        .last_rasterized_pixels = self.last_rasterized_pixels,
+        .trim_count = self.trim_count,
+        .trimmed_logical_bytes = self.trim_logical_bytes,
+        .restore_ns = self.restore_ns,
+    };
+    for (self.shaping_cache.entries) |entry| result.shaping_entries += @intFromBool(entry != null);
+    var masks = self.sprite_masks.valueIterator();
+    while (masks.next()) |mask| result.sprite_mask_bytes += mask.len;
+    var images = self.kitty_images.images.valueIterator();
+    while (images.next()) |image| result.renderer_image_logical_bytes += @as(u64, image.width) * image.height * 4;
+    if (self.background_image.image) |image| result.wallpaper_logical_bytes += @as(u64, image.getWidth()) * image.getHeight() * 4;
+    if (self.background_image.boosted) |image| result.wallpaper_logical_bytes += @as(u64, image.getWidth()) * image.getHeight() * 4;
+    return result;
+}
+
 pub fn trimResources(self: *CoreTextRenderer) void {
     if (self.pixels.len == 0) return;
     self.trim_logical_bytes +|= self.cacheBytes();
@@ -575,8 +607,8 @@ fn rasterize(
     if (builtin.is_test) self.rasterized_frames += 1;
     const color_space = try graphics.ColorSpace.createDeviceRGB();
     defer color_space.release();
-    const bitmap_info = @intFromEnum(graphics.BitmapInfo.byte_order_32_little) |
-        @intFromEnum(graphics.ImageAlphaInfo.premultiplied_first);
+    const bitmap_info = @backingInt(graphics.BitmapInfo.byte_order_32_little) |
+        @backingInt(graphics.ImageAlphaInfo.premultiplied_first);
     const context = try graphics.BitmapContext.create(
         self.pixels,
         self.pixel_width,
@@ -1345,8 +1377,8 @@ test "background replacement matches clear then source-over across colors and al
     defer std.testing.allocator.free(reference);
     const space = try graphics.ColorSpace.createDeviceRGB();
     defer space.release();
-    const context = try graphics.BitmapContext.create(reference, 128, 96, 8, 128 * 4, space, @intFromEnum(graphics.BitmapInfo.byte_order_32_little) |
-        @intFromEnum(graphics.ImageAlphaInfo.premultiplied_first));
+    const context = try graphics.BitmapContext.create(reference, 128, 96, 8, 128 * 4, space, @backingInt(graphics.BitmapInfo.byte_order_32_little) |
+        @backingInt(graphics.ImageAlphaInfo.premultiplied_first));
     defer graphics.BitmapContext.context.release(context);
     for ([_][]const u8{ "#000000", "#ffffff", "#123456", "#282c34" }) |color| {
         var command: [64]u8 = undefined;
@@ -1829,7 +1861,7 @@ test "shaping cache preserves pixels Unicode font identity and dynamic color" {
     var pixels: [128 * 64 * 4]u8 = @splat(0);
     const space = try graphics.ColorSpace.createDeviceRGB();
     defer space.release();
-    const context = try graphics.BitmapContext.create(&pixels, 128, 64, 8, 128 * 4, space, @intFromEnum(graphics.ImageAlphaInfo.premultiplied_last));
+    const context = try graphics.BitmapContext.create(&pixels, 128, 64, 8, 128 * 4, space, @backingInt(graphics.ImageAlphaInfo.premultiplied_last));
     defer graphics.Context.release(context);
     const samples = [_][]const u16{
         &.{'A'},                                      &.{ 'f', 'i' },       &.{ 'a', 0x301 },

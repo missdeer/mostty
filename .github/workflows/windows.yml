@@ -17,6 +17,7 @@ permissions:
   contents: read
 env:
   ZIG_GLOBAL_CACHE_DIR: .zig-cache
+  MOSTTY_CONPTY_VERSION: 1.25.261109001
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,7 +27,7 @@ jobs:
   conpty:
     runs-on: windows-latest
     steps:
-      - name: Fetch latest stable Microsoft ConPTY
+      - name: Fetch pinned Microsoft ConPTY
         shell: pwsh
         run: |
           $retry = @{ MaximumRetryCount = 3; RetryIntervalSec = 5; TimeoutSec = 120 }
@@ -34,9 +35,8 @@ jobs:
           $base = ($service.resources | Where-Object { $_.'@type' -eq 'PackageBaseAddress/3.0.0' } | Select-Object -First 1).'@id'
           if (-not $base) { throw 'NuGet package content endpoint not found' }
           $id = 'microsoft.windows.console.conpty'
-          $versions = Invoke-RestMethod -Uri "$base$id/index.json" @retry
-          $version = $versions.versions | Where-Object { $_ -notmatch '-' } | Sort-Object { [version]$_ } -Descending | Select-Object -First 1
-          if (-not $version) { throw 'No stable Microsoft ConPTY version found' }
+          $version = $env:MOSTTY_CONPTY_VERSION
+          if (-not $version) { throw 'Pinned Microsoft ConPTY version missing' }
           $url = "$base$id/$version/$id.$version.nupkg"
           Write-Host "Downloading Microsoft ConPTY $version from $url"
           Invoke-WebRequest -Uri $url -OutFile conpty.nupkg @retry
@@ -114,6 +114,7 @@ jobs:
           if (Test-Path zig-out/bin/Mostty.pdb) { Copy-Item zig-out/bin/Mostty.pdb dist/ }
           Copy-Item zig-out/bin/themes dist/themes -Recurse
           Copy-Item zig-out/share dist/share -Recurse
+          @{ commit=(& git rev-parse HEAD); compiler=(& zig version); mode='${{ matrix.optimize }}'; target_cpu='${{ matrix.cpu }}'; dependency_manifest_sha256=(Get-FileHash build.zig.zon -Algorithm SHA256).Hash; conpty_version=$env:MOSTTY_CONPTY_VERSION } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM dist/build-metadata.json
 
       - uses: actions/download-artifact@v4
         with:

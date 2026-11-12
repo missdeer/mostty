@@ -208,6 +208,31 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
 #endif
     var launcher: TerminalLauncher?
     var hasStartedSession: Bool { tab != nil }
+    func resourceData(id: String) -> String {
+        guard let tab = tab else { return "{}" }
+        var bytes = [UInt8](repeating: 0, count: 16_384)
+        var count = mostty_tab_resource_snapshot(tab, &bytes, bytes.count)
+        if count > bytes.count {
+            bytes = [UInt8](repeating: 0, count: count)
+            count = mostty_tab_resource_snapshot(tab, &bytes, bytes.count)
+        }
+        guard count > 0, count <= bytes.count,
+              var data = try? JSONSerialization.jsonObject(with: Data(bytes.prefix(count))) as? [String: Any] else { return "{}" }
+        data["host"] = ["visible": renderVisible, "render_timer_running": renderTimer != nil,
+                        "blink_timer_running": blinkTimer != nil, "render_callbacks": renderTimerCallbacks,
+                        "blink_callbacks": blinkTimerCallbacks, "render_registrations": renderTimerRegistrations]
+        data["id"] = id
+        if let window = AppModel.shared.terminalWindow(), let content = window.contentView {
+            data["window_pixels"] = [Int((content.bounds.width * window.backingScaleFactor).rounded()),
+                                      Int((content.bounds.height * window.backingScaleFactor).rounded())]
+        }
+        data["metal_device_name"] = device?.name
+        data["metal_device_registry_id"] = device?.registryID
+        data["metal_unified_memory"] = device?.hasUnifiedMemory
+        guard let json = try? JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]),
+              let text = String(data: json, encoding: .utf8) else { return "{}" }
+        return text
+    }
     var hasActiveSession: Bool {
         guard alive, !terminated, let tab = tab else { return false }
         var code: Int32 = 0

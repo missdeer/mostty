@@ -134,3 +134,21 @@ UI; it is not a process RAM peak. WIC's existing 16384-square dimension cap
 still limits a returned BGRA buffer to 1 GiB. Native large-wallpaper storms,
 first/final image latency, CPU and sampled OS/GPU peaks remain pending hardware
 measurements; single-image loads are the control workload.
+
+## Native evidence pipeline (#23)
+
+`tests/memory/README.md` defines ABBA/BAAB trials, target/control workloads,
+raw schema, PID scopes and explicit missing hardware evidence. PowerShell/Swift
+collectors preserve OS and app snapshots separately. Windows `+control` action
+`resources` and macOS AppleScript `resource data` expose page estimates, image
+storage, atlas/cache/request bytes, renderer buffers, upload/retirement/trim and
+host timer counters. Unknown presentation/driver bytes are null. Fixed-capacity
+glyph initialization forwards/counts allocator requests; the existing counting
+regression verifies the exact total without changing the production allocator.
+
+CI preserves real collector-self JSONL, verifies native CJK fixture bytes match,
+and produces a separate report with Mostty/GPU/latency/energy evidence blocked.
+This validates the evidence pipeline, not native Release performance gains.
+Portable tests reject missing samples/conditions, content drift, budget and
+cleanup regressions. ConPTY is pinned at the preceding CI's actual version,
+1.25.261109001, retaining Microsoft signature/hash validation.

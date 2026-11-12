@@ -49,6 +49,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/bench/run.ps1
+      - name: Native Windows memory collector smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tests/memory/fixture.ps1 -Case cjk-cold -Output tmp/runtime-bench/memory-fixture.bin
+          ./tests/memory/fixture.ps1 -Case wallpaper-control -Output tmp/runtime-bench/memory-fixture-wallpaper.bin
+          ./tests/memory/collect.ps1 -Smoke -Output tmp/runtime-bench/memory-smoke.jsonl -Samples 2 -IntervalMs 50
+      - name: Native macOS memory collector smoke
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          swiftc tests/memory/collect.swift -framework AppKit -framework Metal -o tmp/runtime-bench/memory-collect
+          tmp/runtime-bench/memory-collect --smoke tmp/runtime-bench/memory-smoke.jsonl
+          swiftc tests/memory/fixture.swift -o tmp/runtime-bench/memory-fixture
+          tmp/runtime-bench/memory-fixture tests/memory/workloads.json cjk-cold tmp/runtime-bench/memory-fixture.bin
+          tmp/runtime-bench/memory-fixture tests/memory/workloads.json wallpaper-control tmp/runtime-bench/memory-fixture-wallpaper.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -56,6 +72,8 @@ jobs:
           path: |
             tmp/runtime-bench/*.log
             tmp/runtime-bench/metadata.json
+            tmp/runtime-bench/memory-smoke.jsonl
+            tmp/runtime-bench/memory-fixture*.json
           if-no-files-found: error
   report:
     needs: measure
@@ -74,6 +92,8 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s tests/bench -p 'test_*.py'
           python3 tests/bench/report.py tmp/benchmark-artifacts tmp/benchmark-report | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -m unittest discover -s tests/memory -p 'test_*.py'
+          python3 tests/memory/report.py tmp/benchmark-artifacts tmp/benchmark-report/memory --require-native-smoke | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

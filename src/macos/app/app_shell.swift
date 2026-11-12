@@ -180,7 +180,7 @@ final class AppModel {
 
     // The terminal's own window, rather than whichever window AppKit lists
     // first — a font panel or similar auxiliary window must not be restyled.
-    private func terminalWindow() -> NSWindow? {
+    func terminalWindow() -> NSWindow? {
         container?.window ?? NSApp.windows.first { $0.contentView != nil }
     }
 
