@@ -102,7 +102,7 @@ shader_cells: ShaderCells = .{},
 // the GPU and shadow are seeded consistently.
 shadow_cells: []shader.Cell = &.{},
 glyph_texture: GlyphTexture = .{},
-glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
+glyph_cache_allocator: std.mem.Allocator = std.heap.page_allocator,
 glyph_cache: ?GlyphIndexCache = null,
 glyph_cache_cell_size: ?CellXY = null,
 glyph_staging_bridge: gpu.SharedTexture = .{},
@@ -554,10 +554,9 @@ pub fn kittyImageUpload(
 pub fn onFontStateChanged(self: *D3d11Renderer) void {
     self.cache_gen +%= 1;
     if (self.glyph_cache) |*cache| {
-        cache.deinit(self.glyph_cache_arena.allocator());
+        cache.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_cache_cell_size = null;
     self.grid_force_full = true;
 }
@@ -573,10 +572,9 @@ pub fn deinit(self: *D3d11Renderer) void {
     if (self.band_local) |t| _ = t.IUnknown.Release();
     self.kitty_images.deinit(std.heap.page_allocator);
     if (self.glyph_cache) |*c| {
-        c.deinit(self.glyph_cache_arena.allocator());
+        c.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_texture.release();
     self.shader_cells.release();
     std.heap.page_allocator.free(self.shadow_cells);

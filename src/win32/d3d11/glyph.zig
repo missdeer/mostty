@@ -72,8 +72,7 @@ pub fn setupGlyphAtlas(self: anytype, visible_cells: u32) gpu.AtlasFrame {
         // a different key.
         self.cache_gen +%= 1;
         if (self.glyph_cache) |*c| {
-            c.deinit(self.glyph_cache_arena.allocator());
-            _ = self.glyph_cache_arena.reset(.retain_capacity);
+            c.deinit(self.glyph_cache_allocator);
             self.glyph_cache = null;
         }
         // Glyph cache reset → atlas slot assignments will change; any
@@ -87,7 +86,7 @@ pub fn setupGlyphAtlas(self: anytype, visible_cells: u32) gpu.AtlasFrame {
 
     if (self.glyph_cache == null) {
         self.glyph_cache = GlyphIndexCache.init(
-            self.glyph_cache_arena.allocator(),
+            self.glyph_cache_allocator,
             tex_total,
         ) catch com.oom(error.OutOfMemory);
     }
@@ -109,7 +108,7 @@ pub fn generateGlyph(
 ) u32 {
     const cs = self.font_service.cell_size_xy;
     const key = GlyphIndexCache.Key.init(codepoint, grapheme, half, style);
-    const arena = self.glyph_cache_arena.allocator();
+    const arena = self.glyph_cache_allocator;
 
     // U+0020 single regular IS the placeholder returned for in-flight rasters
     // of other glyphs. It must reach the atlas synchronously — going through
@@ -307,7 +306,7 @@ pub fn generateRun(
     if (text.len < 2 or text.len > max_ligature_run_cells) return null;
     if (!self.font_service.glyph_worker_started) return null;
 
-    const arena = self.glyph_cache_arena.allocator();
+    const arena = self.glyph_cache_allocator;
     const blank = blankGlyphSlot(self, cache, tex_cell_count);
     var out: RunGlyphs = .{
         .glyphs = undefined,
@@ -457,7 +456,7 @@ pub fn generateWidePair(
     grapheme: []const u21,
     style: GlyphIndexCache.Style,
 ) WidePair {
-    const arena = self.glyph_cache_arena.allocator();
+    const arena = self.glyph_cache_allocator;
     // Wide-pair stays fully synchronous: one DirectWrite raster fills both
     // halves, so there's no win to splitting them across the worker. The
     // touch + reserve dance below mirrors the pre-async version; with the

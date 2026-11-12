@@ -18,12 +18,12 @@ blank: u32 = 0,
 
 pub fn init(self: *Fixture, allocator: std.mem.Allocator, style: Cache.Style) !void {
     self.style = style;
-    self.renderer.glyph_cache_arena = .init(allocator);
-    errdefer self.renderer.glyph_cache_arena.deinit();
+    self.renderer.glyph_cache_allocator = allocator;
     self.renderer.font_service = &self.font;
     self.font.glyph_worker_started = true;
     self.font.cell_size_xy = .{ .x = 8, .y = 16 };
-    self.cache = try Cache.init(self.renderer.glyph_cache_arena.allocator(), 1024);
+    self.cache = try Cache.init(self.renderer.glyph_cache_allocator, 1024);
+    errdefer self.cache.deinit(allocator);
     self.blank = try self.ready(Cache.Key.init(' ', &.{}, .single, .regular));
     for (&self.text, 0..) |*ch, i| ch.* = @intCast('a' + i % 26);
     for (0..26) |variant| {
@@ -33,13 +33,13 @@ pub fn init(self: *Fixture, allocator: std.mem.Allocator, style: Cache.Style) !v
 }
 
 fn ready(self: *Fixture, key: Cache.Key) !u32 {
-    const reserved = (try self.cache.reserve(self.renderer.glyph_cache_arena.allocator(), key)).newly_reserved_pending;
+    const reserved = (try self.cache.reserve(self.renderer.glyph_cache_allocator, key)).newly_reserved_pending;
     try std.testing.expect(self.cache.markReady(reserved.index, reserved.slot_gen, key));
     return reserved.index;
 }
 
 pub fn deinit(self: *Fixture) void {
-    self.renderer.glyph_cache_arena.deinit();
+    self.cache.deinit(self.renderer.glyph_cache_allocator);
 }
 
 pub fn run(self: *Fixture, iteration: usize) !u64 {

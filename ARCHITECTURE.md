@@ -926,7 +926,12 @@ bounded by the configured cache budget with a visible-frame correctness floor
 and the existing 4096-pixel dimension limit. Rebuilds advance `cache_gen`, force
 full grid drawing, and use each backend's existing safe texture retirement.
 `GlyphIndexCache` records hit/miss/eviction and frame saturation counts;
-`RendererCommon.atlas_growths` counts capacity increases. Two important quirks:
+`RendererCommon.atlas_growths` counts capacity increases. Nodes and the index
+map use a reclaiming per-cache allocator (page allocator in production), not
+an arena. Initialization reserves the current slot capacity plus one transient
+insertion; fill and eviction do not rehash. Font/DPI/atlas rebuilds and pane
+destruction free both allocations rather than retaining an old high-water mark.
+The process-global allocator is unchanged. Two important quirks:
 
 - **Per-frame dampening**: a hit only promotes to MRU once per frame
   (`touched_frame` matches the renderer's `frame_id`). Without this, a

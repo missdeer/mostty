@@ -308,7 +308,7 @@ test_fail_present: bool = false,
 swap_interval: ?WglSwapInterval = null,
 font_service: *FontService,
 shadow_cells: []shader.Cell = &.{},
-glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
+glyph_cache_allocator: std.mem.Allocator = std.heap.page_allocator,
 glyph_cache: ?GlyphIndexCache = null,
 glyph_cache_cell_size: ?CellXY = null,
 cache_gen: u32 = 0,
@@ -437,10 +437,9 @@ pub fn deinit(self: *Gl46Renderer) void {
 
 fn releaseGlyphState(self: *Gl46Renderer) void {
     if (self.glyph_cache) |*cache| {
-        cache.deinit(self.glyph_cache_arena.allocator());
+        cache.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     std.heap.page_allocator.free(self.shadow_cells);
     self.shadow_cells = &.{};
 }
@@ -448,10 +447,9 @@ fn releaseGlyphState(self: *Gl46Renderer) void {
 pub fn onFontStateChanged(self: *Gl46Renderer) void {
     self.cache_gen +%= 1;
     if (self.glyph_cache) |*cache| {
-        cache.deinit(self.glyph_cache_arena.allocator());
+        cache.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_cache_cell_size = null;
     self.grid_force_full = true;
 }
@@ -1697,14 +1695,14 @@ test "OpenGL panes share context and programs but own DCs buffers and glyph cach
         try std.testing.expect(b.cellsResize(4));
         _ = b.atlasEnsure(.{ .x = 32, .y = 32 });
         try std.testing.expect(a.cells.name != b.cells.name and a.atlas != b.atlas);
-        a.glyph_cache = try GlyphIndexCache.init(a.glyph_cache_arena.allocator(), 2);
-        b.glyph_cache = try GlyphIndexCache.init(b.glyph_cache_arena.allocator(), 2);
+        a.glyph_cache = try GlyphIndexCache.init(a.glyph_cache_allocator, 2);
+        b.glyph_cache = try GlyphIndexCache.init(b.glyph_cache_allocator, 2);
         const key: GlyphIndexCache.Key = .init('x', &.{}, .single, .regular);
-        const slot = (try a.glyph_cache.?.reserve(a.glyph_cache_arena.allocator(), key)).newly_reserved_pending;
-        _ = try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key);
+        const slot = (try a.glyph_cache.?.reserve(a.glyph_cache_allocator, key)).newly_reserved_pending;
+        _ = try b.glyph_cache.?.reserve(b.glyph_cache_allocator, key);
         var result: RasterResult = .{ .surface_id = 1, .slot = slot.index, .slot_gen = slot.slot_gen, .cache_gen = a.cache_gen, .key = key, .bytes = &.{}, .w = 0, .h = 0, .is_color = false, .failed = true };
         try std.testing.expect(!b.applyGlyphResult(&result));
-        try std.testing.expect((try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key)) == .already_pending);
+        try std.testing.expect((try b.glyph_cache.?.reserve(b.glyph_cache_allocator, key)) == .already_pending);
         try std.testing.expect(a.applyGlyphResult(&result));
         try std.testing.expect(win32.wglGetCurrentDC() == a.dc);
         try std.testing.expect(parent.activate());

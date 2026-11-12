@@ -128,7 +128,7 @@ core: ?core_mod.Core = null,
 bridge: ?bridge_mod.Bridge = null,
 
 shadow_cells: []shader.Cell = &.{},
-glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
+glyph_cache_allocator: std.mem.Allocator = std.heap.page_allocator,
 glyph_cache: ?GlyphIndexCache = null,
 glyph_cache_cell_size: ?CellXY = null,
 cache_gen: u32 = 0,
@@ -293,10 +293,9 @@ pub fn deinit(self: *VulkanRenderer) void {
 
 fn releaseGlyphState(self: *VulkanRenderer) void {
     if (self.glyph_cache) |*cache| {
-        cache.deinit(self.glyph_cache_arena.allocator());
+        cache.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     std.heap.page_allocator.free(self.shadow_cells);
     self.shadow_cells = &.{};
 }
@@ -304,10 +303,9 @@ fn releaseGlyphState(self: *VulkanRenderer) void {
 pub fn onFontStateChanged(self: *VulkanRenderer) void {
     self.cache_gen +%= 1;
     if (self.glyph_cache) |*cache| {
-        cache.deinit(self.glyph_cache_arena.allocator());
+        cache.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_cache_cell_size = null;
     self.grid_force_full = true;
 }

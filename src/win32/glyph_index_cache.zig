@@ -139,12 +139,18 @@ frame_evictions: u32 = 0,
 frame_no_slot: u32 = 0,
 
 pub fn init(allocator: std.mem.Allocator, capacity: u32) error{OutOfMemory}!GlyphIndexCache {
+    std.debug.assert(capacity >= 2 and capacity < std.math.maxInt(u32));
     var result: GlyphIndexCache = .{
         .map = .{},
         .nodes = try allocator.alloc(Node, capacity),
         .front = undefined,
         .back = undefined,
     };
+    errdefer allocator.free(result.nodes);
+    // reserve temporarily inserts the new key before removing the victim.
+    // Reserve only the current atlas capacity, including that transient key,
+    // so fill/eviction never rehashes or retains superseded map allocations.
+    try result.map.ensureTotalCapacity(allocator, capacity + 1);
     result.clearRetainingCapacity();
     return result;
 }
@@ -176,6 +182,48 @@ pub fn beginFrame(self: *GlyphIndexCache) void {
 pub fn deinit(self: *GlyphIndexCache, allocator: std.mem.Allocator) void {
     allocator.free(self.nodes);
     self.map.deinit(allocator);
+}
+
+test "current-capacity reservation makes fill and eviction allocation-free and teardown reclaims all bytes" {
+    for ([_]u32{ 32, 3272, 83436 }) |capacity| {
+        var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = counted.allocator();
+        {
+            var cache = try init(allocator, capacity);
+            defer cache.deinit(allocator);
+            const initial_bytes = counted.allocated_bytes;
+            const initial_allocations = counted.allocations;
+            for (0..capacity + 128) |i| {
+                cache.beginFrame();
+                const key = Key.init(@intCast(i + 32), &.{}, .single, .regular);
+                const reserved = (try cache.reserve(allocator, key)).newly_reserved_pending;
+                try std.testing.expect(cache.markReady(reserved.index, reserved.slot_gen, key));
+            }
+            try std.testing.expectEqual(capacity, cache.map.count());
+            try std.testing.expectEqual(initial_bytes, counted.allocated_bytes);
+            try std.testing.expectEqual(initial_allocations, counted.allocations);
+            std.debug.print("cache capacity={} map_capacity={} live_requested_bytes={} allocations={}\n", .{ capacity, cache.map.capacity(), initial_bytes, initial_allocations });
+        }
+        try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+    }
+}
+
+fn allocationFailureCycle(allocator: std.mem.Allocator) !void {
+    var cache = try init(allocator, 8);
+    defer cache.deinit(allocator);
+    for (0..32) |i| {
+        cache.beginFrame();
+        const key = Key.init(@intCast(i + 32), &.{}, .single, .italic);
+        const reserved = (try cache.reserve(allocator, key)).newly_reserved_pending;
+        try std.testing.expect(cache.markReady(reserved.index, reserved.slot_gen, key));
+    }
+    cache.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(u32, 0), cache.map.count());
+}
+
+test "cache allocation failures unwind nodes and map and rebuilding does not leak" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureCycle, .{});
+    for (0..8) |_| try allocationFailureCycle(std.testing.allocator);
 }
 
 pub const NewlyReservedPending = struct {

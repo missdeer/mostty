@@ -20,7 +20,7 @@
 //!   * `backgroundImageUpload(decoded)`
 //!
 //! plus the fields the shared layer reads directly: `common`, `font_service`,
-//! `shadow_cells`, `glyph_cache`, `glyph_cache_arena`, `glyph_cache_cell_size`,
+//! `shadow_cells`, `glyph_cache`, `glyph_cache_allocator`, `glyph_cache_cell_size`,
 //! `cache_gen`, `grid_force_full`, `background_image`, `kitty_images`.
 
 /// Which form the font service hands rasterized glyph pixels to a backend in.
