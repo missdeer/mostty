@@ -4,6 +4,16 @@ const std = @import("std");
 const vt = @import("vt");
 const InlineImages = @import("inline_images.zig");
 
+pub const MemoryResources = struct {
+    page_virtual_bytes: u64 = 0,
+    page_resident_estimate_bytes: u64 = 0,
+    pages: u64 = 0,
+    primary_image_bytes: u64 = 0,
+    alternate_image_bytes: u64 = 0,
+    scrollback_limit_bytes: u64 = 0,
+    image_limit_per_screen_bytes: u64 = 0,
+};
+
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
 pub const DEFAULT_IMAGE_STORAGE_BYTES: usize = 320_000_000;
 
@@ -111,8 +121,8 @@ pub fn feed(self: *Session, bytes: []const u8) void {
 
 /// Diagnostic-only page accounting, including the viewport and both screens.
 /// Upstream resident bytes are an estimate, not an OS RSS measurement.
-pub fn memoryResources(self: *const Session) @import("../renderer/resource_stats.zig").Terminal {
-    var result: @import("../renderer/resource_stats.zig").Terminal = .{
+pub fn memoryResources(self: *const Session) MemoryResources {
+    var result: MemoryResources = .{
         .scrollback_limit_bytes = self.scrollback_limit_bytes,
         .image_limit_per_screen_bytes = self.image_storage_limit_bytes,
     };

@@ -94,4 +94,9 @@ class MemoryReportTests(unittest.TestCase):
         self.assertEqual(result["application_resources"], "blocked")
         self.assertEqual(result["gpu_status"], ["blocked"])
 
+    def test_unknown_hardware_blocks_comparison_identity(self):
+        rows = [run(i) for i in range(8)]
+        for row in rows: row["metadata"]["hardware"] = {"status":"blocked","reason":"not available"}
+        self.assertTrue(report.analyze(rows)[0]["status"].startswith("blocked"))
+
 if __name__ == "__main__": unittest.main()

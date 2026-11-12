@@ -23,9 +23,11 @@ $meta.kind='metadata'; $meta.schema=1; $meta.platform='Windows'; $meta.role=$(if
 if (-not $meta.ContainsKey('presentation')) { throw 'Missing presentation metadata (null for D3D11/D3D12)' }
 $meta.pid=$TargetPid; $meta.samples=$Samples; $meta.interval_ms=$IntervalMs
 $meta.scope='Target PID only, including in-process conpty.dll; OpenConsole and shell excluded. related_pids are separate.'
-$meta.hardware=@{ os=[Environment]::OSVersion.VersionString;
-    cpu=@(Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors);
-    gpu=@(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,PNPDeviceID) }
+try {
+    $meta.hardware=@{ os=[Environment]::OSVersion.VersionString;
+        cpu=@(Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors);
+        gpu=@(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,PNPDeviceID) }
+} catch { $meta.hardware=@{os=[Environment]::OSVersion.VersionString; status='blocked'; reason=$_.Exception.Message} }
 $parent = Split-Path -Parent $Output
 if ($parent) { $null=New-Item -ItemType Directory -Force $parent }
 $meta | ConvertTo-Json -Depth 15 -Compress | Set-Content -Encoding utf8NoBOM $Output
@@ -63,9 +65,11 @@ for ($i=0; $i -lt $Samples; $i++) {
         try {
             $counters=Get-Counter '\GPU Process Memory(*)\Dedicated Usage','\GPU Process Memory(*)\Shared Usage' -ErrorAction Stop
             $matching=@($counters.CounterSamples | Where-Object { $_.InstanceName -match "^pid_$($TargetPid)_" })
-            if ($matching.Count -eq 0) { throw 'No target GPU counter instance' }
-            $gpu=@{status='ok'; dedicated_bytes=[long](($matching | Where-Object Path -Like '*\dedicated usage' | Measure-Object CookedValue -Sum).Sum);
-                shared_bytes=[long](($matching | Where-Object Path -Like '*\shared usage' | Measure-Object CookedValue -Sum).Sum);
+            $dedicated=@($matching | Where-Object Path -Like '*\dedicated usage')
+            $shared=@($matching | Where-Object Path -Like '*\shared usage')
+            if ($dedicated.Count -eq 0 -or $shared.Count -eq 0) { throw 'Target dedicated/shared GPU counter unavailable' }
+            $gpu=@{status='ok'; dedicated_bytes=[long](($dedicated | Measure-Object CookedValue -Sum).Sum);
+                shared_bytes=[long](($shared | Measure-Object CookedValue -Sum).Sum);
                 scope='Sum across target PID adapter instances; do not add to logical textures or process memory'}
         } catch { $gpu.reason=$_.Exception.Message }
     }

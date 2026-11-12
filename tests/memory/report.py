@@ -164,6 +164,9 @@ def analyze(runs):
             assert [r["metadata"]["trial"] for r in group] == list(range(8)), "require eight distinct ABBA/BAAB trials"
             assert [r["metadata"]["side"] for r in group] == ORDER, "trial order must be ABBA BAAB"
             first = group[0]["metadata"]
+            hardware = first["hardware"]
+            if not hardware.get("cpu") or not hardware.get("gpu") or hardware.get("status") == "blocked":
+                result["status"] = "blocked: incomplete hardware identity; OS samples are report-only"
             for run in group:
                 assert all(run["metadata"][field] == first[field] for field in CONDITIONS), "comparison conditions differ"
             for side in ("base", "head"):

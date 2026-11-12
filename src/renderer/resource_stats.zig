@@ -1,14 +1,6 @@
 //! Requested allocations and logical resource extents. These are separate
 //! measurements from OS commit/resident/footprint and must never be added to it.
-pub const Terminal = struct {
-    page_virtual_bytes: u64 = 0,
-    page_resident_estimate_bytes: u64 = 0,
-    pages: u64 = 0,
-    primary_image_bytes: u64 = 0,
-    alternate_image_bytes: u64 = 0,
-    scrollback_limit_bytes: u64 = 0,
-    image_limit_per_screen_bytes: u64 = 0,
-};
+pub const Terminal = @import("../terminal/session.zig").MemoryResources;
 
 pub const Uploads = struct {
     active_bytes: u64,
