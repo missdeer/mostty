@@ -109,6 +109,7 @@ final class MosttyScriptTerminal: NSObject {
     @objc var workingDirectory: String { pane?.view.workingDirectory ?? "" }
     @objc var atPrompt: Bool { pane?.view.atPrompt ?? false }
     @objc var selected: Bool { AppModel.shared.selectedTab?.activePane?.automationID == terminalID }
+    @objc var resourceData: String { pane?.view.resourceData(id: terminalID) ?? "{}" }
     override var objectSpecifier: NSScriptObjectSpecifier? {
         guard let description = NSScriptClassDescription(for: NSApplication.self) else { return nil }
         return NSUniqueIDSpecifier(containerClassDescription: description, containerSpecifier: nil,

@@ -59,6 +59,7 @@ stream: SessionStream,
 hooks: Hooks,
 images: InlineImages,
 image_storage_limit_bytes: usize,
+scrollback_limit_bytes: usize = DEFAULT_SCROLLBACK_BYTES,
 
 pub fn init(self: *Session, options: Options) !void {
     self.terminal_allocator = options.terminal_allocator;
@@ -75,6 +76,7 @@ pub fn init(self: *Session, options: Options) !void {
     self.hooks = options.hooks;
     self.images = .{ .allocator = options.stream_allocator, .enabled = options.images_enabled };
     self.image_storage_limit_bytes = options.image_storage_limit_bytes;
+    self.scrollback_limit_bytes = options.scrollback_limit_bytes;
     self.setImagesEnabled(options.images_enabled);
 
     var handler = self.term.vtHandler();
@@ -105,6 +107,59 @@ pub fn deinit(self: *Session) void {
 
 pub fn feed(self: *Session, bytes: []const u8) void {
     self.images.feed(&self.stream, bytes);
+}
+
+/// Diagnostic-only page accounting, including the viewport and both screens.
+/// Upstream resident bytes are an estimate, not an OS RSS measurement.
+pub fn memoryResources(self: *const Session) @import("../renderer/resource_stats.zig").Terminal {
+    var result: @import("../renderer/resource_stats.zig").Terminal = .{
+        .scrollback_limit_bytes = self.scrollback_limit_bytes,
+        .image_limit_per_screen_bytes = self.image_storage_limit_bytes,
+    };
+    inline for (.{ .primary, .alternate }) |key| {
+        if (self.term.screens.get(key)) |screen| {
+            const memory = screen.memoryUsage();
+            result.pages += memory.pages.pages;
+            result.page_virtual_bytes += memory.pages.virtual_bytes;
+            result.page_resident_estimate_bytes += memory.pages.resident_bytes;
+            if (comptime key == .primary) result.primary_image_bytes = memory.image_bytes else result.alternate_image_bytes = memory.image_bytes;
+        }
+    }
+    return result;
+}
+
+/// Allocation-free VT viewport/SGR checksum. This excludes cursor blink,
+/// host selection, images and final GPU pixels; native pixel oracles are separate.
+pub fn viewportHash(self: *const Session) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&hash, self.term.cols);
+    std.hash.autoHash(&hash, self.term.rows);
+    std.hash.autoHash(&hash, self.term.colors.foreground.get());
+    std.hash.autoHash(&hash, self.term.colors.background.get());
+    std.hash.autoHash(&hash, self.term.colors.palette.current);
+    std.hash.autoHash(&hash, self.term.modes.get(.reverse_colors));
+    const screen = self.term.screens.active;
+    var rows = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
+    while (rows.next()) |pin| {
+        const page = pin.node.page();
+        const cells = page.getCells(pin.rowAndCell().row);
+        for (cells, 0..) |cell, index| {
+            std.hash.autoHash(&hash, cell.wide);
+            std.hash.autoHash(&hash, cell.content_tag);
+            switch (cell.content_tag) {
+                .codepoint, .codepoint_grapheme => std.hash.autoHash(&hash, @as(u32, cell.content.codepoint.data)),
+                .bg_color_palette => std.hash.autoHash(&hash, cell.content.color_palette.data),
+                .bg_color_rgb => std.hash.autoHash(&hash, cell.content.color_rgb),
+            }
+            const grapheme = if (cell.content_tag == .codepoint_grapheme) page.lookupGrapheme(&cells[index]) orelse &.{} else &.{};
+            std.hash.autoHash(&hash, grapheme.len);
+            for (grapheme) |cp| std.hash.autoHash(&hash, @as(u32, cp));
+            const style: vt.Style = if (cell.style_id != 0) page.styles.get(page.memory, cell.style_id).* else .{};
+            std.hash.autoHash(&hash, style);
+        }
+        hash.update("\n");
+    }
+    return hash.final();
 }
 
 pub fn setImagesEnabled(self: *Session, enabled: bool) void {
@@ -470,6 +525,31 @@ test "zero scrollback retains the final ordered stream without accumulating hist
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.endsWith(u8, std.mem.trim(u8, text, "\n"), "final-ordered-output"));
     try std.testing.expectEqual(@as(usize, 3), session.term.screens.active.pages.scrollbar().total);
+}
+
+test "resource snapshots allocate nothing, distinguish SGR content and reflect immediate image release" {
+    var context: u8 = 0;
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = counted.allocator(), .stream_allocator = counted.allocator(), .cols = 20, .rows = 3, .hooks = .{ .context = &context }, .scrollback_limit_bytes = 0, .image_storage_limit_bytes = 4 });
+    defer session.deinit();
+    session.feed("a");
+    const initial = session.viewportHash();
+    const allocations = counted.allocations;
+    const memory = session.memoryResources();
+    for (0..10) |_| try std.testing.expectEqual(initial, session.viewportHash());
+    try std.testing.expectEqual(allocations, counted.allocations);
+    try std.testing.expect(memory.pages > 0 and memory.page_virtual_bytes >= memory.page_resident_estimate_bytes);
+    try std.testing.expectEqual(@as(u64, 0), memory.scrollback_limit_bytes);
+    session.feed("\r\x1b[31ma");
+    try std.testing.expect(initial != session.viewportHash());
+    session.feed("\r\x1b[0ma");
+    try std.testing.expectEqual(initial, session.viewportHash());
+    session.feed("\x1b_Ga=T,f=32,s=1,v=1,i=1;/wAA/w==\x1b\\");
+    try std.testing.expectEqual(@as(u64, 4), session.memoryResources().primary_image_bytes);
+    session.configureImages(false, 4);
+    try std.testing.expectEqual(@as(u64, 0), session.memoryResources().primary_image_bytes);
+    try std.testing.expectEqual(@as(u64, 0), session.memoryResources().alternate_image_bytes);
 }
 
 test "image budgets bound each screen, lower immediately, and survive disable and new alternate screens" {

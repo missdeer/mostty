@@ -15,6 +15,7 @@
       <property name="working directory" code="Mcwd" type="text" access="r"><cocoa key="workingDirectory"/></property>
       <property name="at prompt" code="Mprm" type="boolean" access="r"><cocoa key="atPrompt"/></property>
       <property name="selected" code="Msel" type="boolean" access="r"/>
+      <property name="resource data" code="Mmem" type="text" access="r" description="Diagnostic JSON; logical resources and device counters are not OS footprint."><cocoa key="resourceData"/></property>
     </class>
     <command name="new tab" code="MstyMnew" description="Open a terminal tab; omit directory to inherit the active directory.">
       <cocoa class="MosttyScriptCommand"/>

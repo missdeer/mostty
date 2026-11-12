@@ -589,6 +589,35 @@ export fn mostty_tab_metal_queue(tab_opt: ?*Tab) ?*anyopaque {
     return tab.renderer.metal.queue.value;
 }
 
+/// UI-thread diagnostic JSON. Returns required bytes; copies only when cap is
+/// sufficient. Logical counts exclude CoreText/driver overhead and OS footprint.
+export fn mostty_tab_resource_snapshot(tab_opt: ?*Tab, buf: [*]u8, cap: usize) usize {
+    const tab = tab_opt orelse return 0;
+    var hash_buf: [16]u8 = undefined;
+    const hash = std.fmt.bufPrint(&hash_buf, "{x:0>16}", .{tab.pty.terminal.viewportHash()}) catch unreachable;
+    const json = std.json.Stringify.valueAlloc(allocator, .{
+        .schema = @as(u32, 1),
+        .compiler = builtin.zig_version_string,
+        .mode = @tagName(builtin.mode),
+        .target_cpu = builtin.cpu.model.name,
+        .backend = "coretext-metal",
+        .presentation = "metal",
+        .font = tab.renderer.families.options.family,
+        .font_fallbacks = tab.renderer.families.options.fallback_families,
+        .font_size_pt = tab.renderer.font_size,
+        .backing_scale = tab.renderer.scale,
+        .dpi = tab.renderer.scale * 72, // Raster points-to-pixels scale, not monitor physical PPI.
+        .surface_pixels = .{ tab.renderer.pixel_width, tab.renderer.pixel_height },
+        .cache_state = @tagName(tab.render_cache.state),
+        .viewport_hash = hash,
+        .terminal = tab.pty.terminal.memoryResources(),
+        .renderer = tab.renderer.memoryResources(),
+    }, .{}) catch return 0;
+    defer allocator.free(json);
+    if (cap >= json.len) @memcpy(buf[0..json.len], json);
+    return json.len;
+}
+
 /// Bare read from the PTY master, waiting up to ~50ms for data. Safe to call
 /// off the main thread; never touches VT state. Returns the byte count (>0), 0
 /// on EOF/hangup, -1 on error, or -2 on timeout (the caller should re-check its
@@ -738,7 +767,7 @@ export fn mostty_tab_poll_exit(tab_opt: ?*Tab, out_code: *i32) bool {
     const result = exit orelse return false;
     const code: i32 = switch (result) {
         .exited => |v| v,
-        .signaled => |sig| -@as(i32, @intCast(@intFromEnum(sig) & 0x7fff_ffff)),
+        .signaled => |sig| -@as(i32, @intCast(@backingInt(sig) & 0x7fff_ffff)),
         .stopped => return false,
         .unknown => -1,
     };
@@ -930,6 +959,12 @@ test "hidden trim releases render resources, preserves VT state and restores the
     try std.testing.expect(tab.renderer.cacheBytes() > 0);
     try std.testing.expect(trimHiddenTab(tab, 100 + mostty_render_cache_grace_ms()));
     try std.testing.expectEqual(@as(u64, 0), tab.renderer.cacheBytes());
+    const memory = tab.renderer.memoryResources();
+    try std.testing.expectEqual(@as(u64, 0), memory.cpu_pixel_bytes);
+    try std.testing.expectEqual(@as(u64, 0), memory.renderer_image_count);
+    try std.testing.expectEqual(@as(u64, 0), memory.shaping_storage_bytes);
+    try std.testing.expectEqual(@as(?u64, 0), memory.metal_source_logical_bytes);
+    try std.testing.expectEqual(@as(?u64, 0), memory.metal_target_logical_bytes);
     try std.testing.expectEqual(@as(u64, 1), tab.renderer.trim_count);
     try std.testing.expect(!trimHiddenTab(tab, 100_000));
     try std.testing.expect(tab.pty.terminal.term == term);
@@ -947,6 +982,13 @@ test "hidden trim releases render resources, preserves VT state and restores the
     try std.testing.expectEqualSlices(u8, oracle.renderer.pixels, tab.renderer.pixels);
     try std.testing.expect(tab.renderer.cacheBytes() > 0);
     try std.testing.expect(tab.renderer.trim_logical_bytes > 0);
+    var json: [16_384]u8 = undefined;
+    const length = mostty_tab_resource_snapshot(tab, &json, json.len);
+    try std.testing.expect(length > 0 and length <= json.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json[0..length], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("schema").?.integer);
+    try std.testing.expect(parsed.value.object.get("renderer").?.object.get("cpu_pixel_bytes").?.integer > 0);
 }
 
 test "config disable and budget lowering release hidden terminal images without another render" {

@@ -71,6 +71,8 @@ bool mostty_tab_trim_hidden(MosttyTab *tab);
 
 void *mostty_tab_metal_device(MosttyTab *tab);
 void *mostty_tab_metal_queue(MosttyTab *tab);
+/* Main thread; returns required bytes, copies only when cap is sufficient. */
+size_t mostty_tab_resource_snapshot(MosttyTab *tab, uint8_t *buf, size_t cap);
 
 intptr_t mostty_tab_read(MosttyTab *tab, uint8_t *buf, size_t cap);
 void mostty_tab_feed(MosttyTab *tab, const uint8_t *ptr, size_t len);

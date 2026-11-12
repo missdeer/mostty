@@ -124,6 +124,8 @@ const Node = struct {
 
 map: std.AutoHashMapUnmanaged(Key, u32) = .{},
 nodes: []Node,
+/// Live allocator requests for the fixed-capacity node and hash allocations.
+requested_bytes: usize = 0,
 front: u32,
 back: u32,
 /// Monotonic frame counter bumped by `beginFrame()`. Wraps cleanly;
@@ -140,17 +142,20 @@ frame_no_slot: u32 = 0,
 
 pub fn init(allocator: std.mem.Allocator, capacity: u32) error{OutOfMemory}!GlyphIndexCache {
     std.debug.assert(capacity >= 2 and capacity < std.math.maxInt(u32));
+    var counter: InitialAllocationCounter = .{ .parent = allocator };
+    const measured = counter.allocator();
     var result: GlyphIndexCache = .{
         .map = .{},
-        .nodes = try allocator.alloc(Node, capacity),
+        .nodes = try measured.alloc(Node, capacity),
         .front = undefined,
         .back = undefined,
     };
-    errdefer allocator.free(result.nodes);
+    errdefer measured.free(result.nodes);
     // reserve temporarily inserts the new key before removing the victim.
     // Reserve only the current atlas capacity, including that transient key,
     // so fill/eviction never rehashes or retains superseded map allocations.
-    try result.map.ensureTotalCapacity(allocator, capacity + 1);
+    try result.map.ensureTotalCapacity(measured, capacity + 1);
+    result.requested_bytes = counter.live_bytes;
     result.clearRetainingCapacity();
     return result;
 }
@@ -192,6 +197,7 @@ test "current-capacity reservation makes fill and eviction allocation-free and t
             var cache = try init(allocator, capacity);
             defer cache.deinit(allocator);
             const initial_bytes = counted.allocated_bytes;
+            try std.testing.expectEqual(initial_bytes, cache.requested_bytes);
             const initial_allocations = counted.allocations;
             for (0..capacity + 128) |i| {
                 cache.beginFrame();
@@ -684,3 +690,38 @@ test "markReady rejects stale slot generation" {
     // Fresh c-result still lands.
     try std.testing.expect(cache.markReady(c_p.index, c_p.slot_gen, k_c));
 }
+
+// Only initialization uses this stack wrapper; later operations/deinit use the
+// original allocator. Fixed capacity makes the captured request total stable.
+const InitialAllocationCounter = struct {
+    parent: std.mem.Allocator,
+    live_bytes: usize = 0,
+
+    pub fn allocator(self: *InitialAllocationCounter) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, address: usize) ?[*]u8 {
+        const self: *InitialAllocationCounter = @ptrCast(@alignCast(context));
+        const bytes = self.parent.rawAlloc(len, alignment, address) orelse return null;
+        self.live_bytes += len;
+        return bytes;
+    }
+    fn resize(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, address: usize) bool {
+        const self: *InitialAllocationCounter = @ptrCast(@alignCast(context));
+        if (!self.parent.rawResize(bytes, alignment, len, address)) return false;
+        self.live_bytes = self.live_bytes - bytes.len + len;
+        return true;
+    }
+    fn remap(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, address: usize) ?[*]u8 {
+        const self: *InitialAllocationCounter = @ptrCast(@alignCast(context));
+        const result = self.parent.rawRemap(bytes, alignment, len, address) orelse return null;
+        self.live_bytes = self.live_bytes - bytes.len + len;
+        return result;
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, address: usize) void {
+        const self: *InitialAllocationCounter = @ptrCast(@alignCast(context));
+        self.parent.rawFree(bytes, alignment, address);
+        self.live_bytes -= bytes.len;
+    }
+};

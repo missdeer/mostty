@@ -1,0 +1,15 @@
+{
+  "idle-control": {"kind":"text","text":"","iterations":0},
+  "wallpaper-control": {"kind":"bmp","width":256,"height":256,"iterations":1,"bgra":[0,0,255,255]},
+  "wallpaper-large-red": {"kind":"bmp","width":4096,"height":4096,"iterations":1,"bgra":[0,0,255,255]},
+  "wallpaper-large-blue": {"kind":"bmp","width":4096,"height":4096,"iterations":1,"bgra":[255,0,0,255]},
+  "ascii-control": {"kind":"text","text":"Mostty ASCII -> === control 0123456789\r\n","iterations":2000},
+  "cjk-cold": {"kind":"cjk","start":19968,"count":8000,"iterations":1,"styles":["\u001b[0m","\u001b[1m","\u001b[3m","\u001b[1;3m"]},
+  "cache-churn": {"kind":"cjk","start":19968,"count":12000,"iterations":4,"styles":["\u001b[0m","\u001b[1m","\u001b[3m","\u001b[4;9m"]},
+  "emoji-combining": {"kind":"text","text":"🙂 👩‍💻 🏳️‍🌈 é ä \u001b[1mBold\u001b[0m -> ===\r\n","iterations":2000},
+  "scrollback": {"kind":"text","text":"ordered scrollback 0123456789 abcdefghijklmnopqrstuvwxyz\r\n","iterations":100000},
+  "small-image-control": {"kind":"rgba","width":16,"height":16,"iterations":1,"replace":false},
+  "large-images": {"kind":"rgba","width":1024,"height":1024,"iterations":4,"replace":false},
+  "replace-image": {"kind":"rgba","width":1024,"height":1024,"iterations":4,"replace":true},
+  "delete-images": {"kind":"text","text":"\u001b_Ga=d,d=A;\u001b\\","iterations":1}
+}

@@ -100,6 +100,10 @@ struct AutomationTests {
         let ids = try script("get id of terminals")
         expect(ids.numberOfItems == TerminalAutomation.terminals.count,
                "AppleScript enumerates real terminal panes through the published dictionary")
+        let memoryText = try script("get resource data of first terminal").stringValue ?? ""
+        let memory = try JSONSerialization.jsonObject(with: Data(memoryText.utf8)) as? [String: Any]
+        expect(memory?["schema"] as? Int == 1 && memory?["renderer"] != nil && memory?["terminal"] != nil && memory?["host"] != nil,
+               "AppleScript exposes machine-readable native resource and timer snapshots")
         _ = try script("focus terminal \"\(inherited.automationID)\"")
         expect(model.selectedTab?.activePane === inherited, "AppleScript focus command reaches the model")
         let previousCount = TerminalAutomation.terminals.count
