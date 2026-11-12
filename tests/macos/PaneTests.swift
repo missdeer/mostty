@@ -230,10 +230,11 @@ struct PaneTests {
         settle()
         expect(tab.host.subviews.count == 1 && panes.map { $0.view.testSession } == sessions,
                "maximize detaches other views without recreating any session")
-        expect(panes.filter { $0 !== tab.activePane }.allSatisfy { !$0.view.testTimersRunning },
+        let attached = panes.filter { $0.view.window === window && !$0.view.isHiddenOrHasHiddenAncestor }
+        expect(panes.filter { $0.view.window == nil }.allSatisfy { !$0.view.testTimersRunning },
                "maximize pauses every detached pane's timers")
-        expect(tab.activePane!.view.testTimersRunning,
-               "the visible maximized pane keeps its timers after the window's initial show: \(tab.activePane!.view.testTimerState)")
+        expect(attached.count == 1 && attached.allSatisfy { $0.view.testTimersRunning },
+               "the attached maximized pane keeps its timers after reflow: \(panes.map { $0.view.testTimerState })")
         model.focusDirection(0)
         expect(window.firstResponder === tab.activePane?.view, "directional focus while maximized updates firstResponder")
         model.togglePaneMaximize()
