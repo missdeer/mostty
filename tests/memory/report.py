@@ -113,7 +113,15 @@ def checksum(run):
     for sample in rows:
         if sample["app"]["status"] != "ok":
             return None
-        values.append(sorted(p["viewport_hash"] for p in sample["app"]["data"]["panes"]))
+        panes = sample["app"]["data"]["panes"]
+        order = run["metadata"].get("pane_order")
+        if order is not None:
+            by_id = {str(p["id"]): p for p in panes}
+            assert len(order) == len(panes) and set(map(str, order)) == by_id.keys(), "pane order mapping differs"
+            panes = [by_id[str(pane)] for pane in order]
+        # IDs may differ by process, but fixture-to-pane association must not.
+        # Sorting hashes would silently accept output swapped between panes.
+        values.append([p["viewport_hash"] for p in panes])
     assert values and all(v == values[0] for v in values), "steady viewport is still changing"
     return values[0]
 

@@ -69,6 +69,10 @@ OpenConsole/shell are excluded. Supply `related_pids` to sample them separately.
 
 Use the fixture catalog plus existing automation/config/GUI tools. Each stable
 checkpoint is its own eight-trial group. Finish input before steady samples.
+Keep pane registry/creation order deterministic. If necessary, include a
+per-trial `pane_order` list of current pane IDs in logical fixture order. The
+report compares hashes in that order, preserving fixture-to-pane association;
+it does not sort away output accidentally swapped between panes.
 Record fresh Release idle with zero warmup and warmed idle separately. Sampling
 starts after hardware metadata gathering; launch-to-first-frame peaks are not
 captured. Report the actual observation window.

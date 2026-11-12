@@ -53,6 +53,19 @@ class MemoryReportTests(unittest.TestCase):
         for sample in rows[1]["samples"]: sample["app"]["data"]["panes"][0]["viewport_hash"] = "wrong"
         with self.assertRaises(AssertionError): report.analyze(rows)
 
+    def test_swapped_pane_output_is_not_a_matching_checksum(self):
+        rows = [run(i) for i in range(8)]
+        for row in rows:
+            row["metadata"]["panes"] = 2
+            for sample in row["samples"]:
+                data = sample["app"]["data"]
+                second = copy.deepcopy(data["panes"][0]); second["id"] = 2; second["viewport_hash"] = "other"
+                data["panes"].append(second); data["pane_count"] = data["active_panes"] = 2
+        for sample in rows[1]["samples"]:
+            panes = sample["app"]["data"]["panes"]
+            panes[0]["viewport_hash"], panes[1]["viewport_hash"] = panes[1]["viewport_hash"], panes[0]["viewport_hash"]
+        with self.assertRaises(AssertionError): report.analyze(rows)
+
     def test_upload_and_worker_bounds_are_hard_gates(self):
         data = run()["samples"][0]["app"]["data"]
         data["panes"][0]["renderer"]["uploads"] = dict(active_tasks=2, pending_tasks=0, idle_bytes=0, idle_tasks=0, active_bytes=17*1024**2)
