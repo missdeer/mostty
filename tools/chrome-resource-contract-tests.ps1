@@ -29,7 +29,7 @@ foreach ($path in @('src/win32/d3d11.zig', 'src/win32/d3d12/renderer.zig', 'src/
         throw "$path panes must retain full terminal preparation"
     }
     $earlyReturn = $prepare.IndexOf('const term = terminal orelse return')
-    $atlas = $prepare.IndexOf('glyph_mod.setupGlyphAtlas(self)')
+    $atlas = $prepare.IndexOf('glyph_mod.setupGlyphAtlas(')
     if ($earlyReturn -lt 0 -or $atlas -le $earlyReturn) {
         throw "$path chrome must return before allocating the glyph atlas/cache"
     }
