@@ -655,12 +655,16 @@ pub const Core = struct {
 
     fn settlePendingUploads(self: *Core) void {
         if (self.pending_uploads.items.len == 0) return;
-        self.flushUploads() catch { self.upload_failed = true; };
+        self.flushUploads() catch {
+            self.upload_failed = true;
+        };
         const idle = self.dp.device_wait_idle(self.device);
         if (idle != vk.VK_SUCCESS and idle != vk.VK_ERROR_DEVICE_LOST) @panic("Vulkan pending image retirement could not establish completion");
         // A failed submit remains owned until this safe completion point.
         self.discardPendingUploads();
-        self.collectUploads() catch { self.upload_failed = true; };
+        self.collectUploads() catch {
+            self.upload_failed = true;
+        };
     }
 
     fn collectUploads(self: *Core) StartupError!void {
@@ -722,8 +726,7 @@ pub const Core = struct {
         errdefer result.release(self);
         result.staging = try self.createHostBufferInternal(capacity, vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
         self.upload_stats.allocations += 1;
-        self.upload_stats.peak_allocated_bytes = @max(self.upload_stats.peak_allocated_bytes,
-            self.inflight_upload_bytes + self.pending_upload_bytes + self.pooled_upload_bytes + result.staging.allocation_bytes);
+        self.upload_stats.peak_allocated_bytes = @max(self.upload_stats.peak_allocated_bytes, self.inflight_upload_bytes + self.pending_upload_bytes + self.pooled_upload_bytes + result.staging.allocation_bytes);
         const info = vk.VkCommandPoolCreateInfo{ .sType = vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .pNext = null, .flags = vk.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = self.queue_family };
         if (self.dp.create_command_pool(self.device, &info, null, &result.pool) != vk.VK_SUCCESS) return error.CommandResourcesUnavailable;
         self.upload_stats.pools_created += 1;
@@ -1543,8 +1546,7 @@ pub const Core = struct {
         self.pending_upload_bytes += upload.staging.allocation_bytes;
         self.upload_stats.requests += 1;
         self.upload_stats.bytes += byte_count;
-        self.upload_stats.peak_inflight_bytes = @max(self.upload_stats.peak_inflight_bytes,
-            self.inflight_upload_bytes + self.pending_upload_bytes);
+        self.upload_stats.peak_inflight_bytes = @max(self.upload_stats.peak_inflight_bytes, self.inflight_upload_bytes + self.pending_upload_bytes);
         image.layout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (self.pending_uploads.items.len >= upload_budget.batch_tasks or self.pending_upload_bytes >= upload_budget.batch_bytes)
             try self.flushUploads();
@@ -2054,6 +2056,7 @@ test "upload batches retain incomplete resources and recycle only completed time
         var submissions: u32 = 0;
         var commands: u32 = 0;
         var fail: bool = false;
+        var waits: u32 = 0;
         fn submit(_: vk.VkQueue, _: u32, info: [*c]const vk.VkSubmitInfo2, _: vk.VkFence) callconv(.winapi) vk.VkResult {
             submissions += 1;
             commands = info[0].commandBufferInfoCount;
@@ -2063,10 +2066,16 @@ test "upload batches retain incomplete resources and recycle only completed time
             value[0] = completed;
             return vk.VK_SUCCESS;
         }
+        fn wait(_: vk.VkDevice, _: [*c]const vk.VkSemaphoreWaitInfo, timeout: u64) callconv(.winapi) vk.VkResult {
+            std.debug.assert(timeout == 10_000_000_000);
+            waits += 1;
+            return vk.VK_TIMEOUT;
+        }
     };
     Driver.completed = 0;
     Driver.submissions = 0;
     Driver.fail = false;
+    Driver.waits = 0;
     var core: Core = undefined;
     core.uploads = .empty;
     core.uploads_head = 0;
@@ -2083,6 +2092,7 @@ test "upload batches retain incomplete resources and recycle only completed time
     core.timeline_value = 0;
     core.dp.queue_submit2 = Driver.submit;
     core.dp.get_semaphore_counter_value = Driver.counter;
+    core.dp.wait_semaphores = Driver.wait;
     defer core.releaseUploads();
     for (0..upload_budget.batch_tasks) |_| {
         try core.pending_uploads.append(std.heap.page_allocator, .{ .staging = .{ .size = 4096, .allocation_bytes = 4096 } });
@@ -2104,6 +2114,11 @@ test "upload batches retain incomplete resources and recycle only completed time
     defer reused.release(&core);
     try std.testing.expectEqual(@as(u64, 1), core.upload_stats.reuses);
     try std.testing.expectEqual(@as(u64, 2), core.uploads.items[core.uploads_head].completion);
+    // A stalled GPU rejects further admission at the byte limit without
+    // recycling incomplete storage or growing the active queue.
+    try std.testing.expectError(error.ExternalSemaphoreUnavailable, core.admitUpload(upload_budget.active_bytes));
+    try std.testing.expectEqual(@as(u32, 1), Driver.waits);
+    try std.testing.expectEqual(@as(usize, 4096), core.inflight_upload_bytes);
     Driver.completed = 2;
     try core.collectUploads();
     try std.testing.expectEqual(@as(usize, 0), core.inflight_upload_bytes);
