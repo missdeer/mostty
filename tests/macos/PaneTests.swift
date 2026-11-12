@@ -230,6 +230,11 @@ struct PaneTests {
         settle()
         expect(tab.host.subviews.count == 1 && panes.map { $0.view.testSession } == sessions,
                "maximize detaches other views without recreating any session")
+        let attached = panes.filter { $0.view.window === window && !$0.view.isHiddenOrHasHiddenAncestor }
+        expect(panes.filter { $0.view.window == nil }.allSatisfy { !$0.view.testTimersRunning },
+               "maximize pauses every detached pane's timers")
+        expect(attached.count == 1 && attached.allSatisfy { $0.view.testTimersRunning },
+               "the attached maximized pane keeps its timers after reflow: \(panes.map { $0.view.testTimerState })")
         model.focusDirection(0)
         expect(window.firstResponder === tab.activePane?.view, "directional focus while maximized updates firstResponder")
         model.togglePaneMaximize()
@@ -247,6 +252,7 @@ struct PaneTests {
                "switching tabs preserves all hidden sessions")
         expect(mostty_tab_scrollbar(panes[0].view.testSession!).total > beforeHistory,
                "hidden-tab readers continue feeding new output into VT scrollback")
+        expect(panes.allSatisfy { !$0.view.testTimersRunning }, "hidden PTY output does not restart render/blink timers")
         if configReload {
             func cellHeight(_ pane: PaneItem) -> UInt32 {
                 var width: UInt32 = 0, height: UInt32 = 0
@@ -566,10 +572,13 @@ struct PaneTests {
             expect(false, "last-pane probe reaches raw input readiness")
             return 1
         }
-        input(lastPane, "\u{4}")
+        model.selectedID = tab.id
+        showSelected()
+        expect(!lastPane.view.testTimersRunning && lastPane.view.inputText("\u{4}"),
+               "a detached tab receives exit input while both timers are suspended")
         _ = waitUntil { !model.tabs.contains { $0 === lastTab } }
         expect(!model.tabs.contains { $0 === lastTab } && !lastPane.view.hasActiveSession && model.selectedID == tab.id,
-               "last-pane shell exit removes only that tab and selects the surviving tab")
+               "hidden-tab EOF removes only that tab without render/blink timer callbacks")
         showSelected()
         let survivors = tab.panes
         let start = Date()

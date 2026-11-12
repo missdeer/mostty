@@ -89,3 +89,23 @@ latency. Native cold CJK/emoji, image bursts, intentional GPU stalls, bridge and
 native pixel equivalence and small-upload p95/p99 latency are **blocked** here:
 the Linux workspace and hosted Windows tests do not provide an interactive
 Vulkan GPU. Mock counts prove the mechanism, not hardware performance gains.
+
+## macOS hidden timer callbacks (#21)
+
+The production AppKit view invalidates render/blink timers immediately on
+detach, ancestor hide, ordered-out/minimized window or application hide. The
+PTY reader and global feed/EOF pump remain independent. Visible panes retain
+their capped repeating timer so temporary drawable/command failures retry.
+Resume restores the wall-clock blink phase and schedules the pending first
+frame immediately; repeated visibility events and unchanged interval reloads
+do not register additional timers. A window-wide scheduler was considered;
+this change retains per-visible-pane scheduling to preserve existing cadence
+and retry behavior while eliminating all hidden periodic render/blink work.
+
+Native ClipboardTests counts actual run-loop callback deltas for 1/8/16 started,
+detached views over 0.60 seconds (covering both periods), requires zero callbacks,
+and uses a visible control to prove both timers fire. It also exercises repeated
+reload, attach/unhide/order-out/close and the existing failure-retry checks.
+These callback measurements are not OS wakeup, idle CPU or energy measurements.
+Real PTY output/EOF fairness has separate native tests; physical Mac energy and
+minimize/application-hide interaction measurements remain pending.

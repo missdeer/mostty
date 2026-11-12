@@ -145,7 +145,7 @@ struct ClipboardTests {
         window.contentView = NSView()
         view.testClearDirty()
         view.testBlinkTick()
-        expect(!view.testDirty, "detached pane advances phase without scheduling raster")
+        expect(!view.testDirty && !view.testTimersRunning, "detached pane suspends both timers without scheduling raster")
         window.contentView = view
         expect(view.testDirty, "restoring a pane requests its current blink phase")
         textBlinkVisible = false
@@ -510,6 +510,61 @@ struct ClipboardTests {
             } catch {
                 expect(false, "\(shell) path-boundary verification failed: \(error)")
             }
+        }
+        // Count actual run-loop callbacks, including callbacks that would have
+        // returned before drawing. Keep PTY reader/pump lifecycles independent.
+        expect(MosttyTerminalView.testBlinkPhase(at: 0.01) &&
+               !MosttyTerminalView.testBlinkPhase(at: 0.54) &&
+               MosttyTerminalView.testBlinkPhase(at: 53.01),
+               "blink phase follows wall time across missed hidden intervals")
+        for count in [1, 8, 16] {
+            var hidden: [MosttyTerminalView] = []
+            for _ in 0..<count {
+                let pane = MosttyTerminalView(frame: view.frame)
+                window.contentView = pane
+                pane.resyncSurface()
+                pane.testRefreshVisibility()
+                expect(pane.testTimersRunning, "a started visible pane registers both timers")
+                hidden.append(pane)
+            }
+            window.contentView = NSView()
+            let before = hidden.map { $0.testTimerCounts }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.60))
+            let renderDelta = zip(hidden, before).reduce(UInt64(0)) { $0 + $1.0.testTimerCounts.render - $1.1.render }
+            let blinkDelta = zip(hidden, before).reduce(UInt64(0)) { $0 + $1.0.testTimerCounts.blink - $1.1.blink }
+            print("TIMER {\"background_tabs\":\(count),\"seconds\":0.60,\"render_callbacks\":\(renderDelta),\"blink_callbacks\":\(blinkDelta)}")
+            expect(renderDelta == 0 && blinkDelta == 0 && hidden.allSatisfy { !$0.testTimersRunning },
+                   "\(count) started background tabs generate zero render/blink callbacks")
+            let pane = hidden[0]
+            let registrations = pane.testTimerCounts.registrations
+            testRenderInterval = 32
+            for _ in 0..<10 { pane.applyConfig() }
+            expect(!pane.testTimersRunning && pane.testTimerCounts.registrations == registrations,
+                   "interval reload does not register hidden timers")
+            window.contentView = pane
+            pane.testRefreshVisibility()
+            expect(pane.testDirty && pane.testTimersRunning, "attachment restores a pending first frame without PTY output")
+            for _ in 0..<10 { pane.applyConfig(); pane.testRefreshVisibility() }
+            expect(pane.testTimerCounts.registrations == registrations + 1,
+                   "repeated visibility/config notifications cannot duplicate a live timer")
+            let visibleBefore = pane.testTimerCounts
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.60))
+            expect(pane.testTimerCounts.render > visibleBefore.render && pane.testTimerCounts.blink > visibleBefore.blink,
+                   "visible control invokes real timers and retains capped retry after render failure")
+            pane.isHidden = true
+            pane.testRefreshVisibility()
+            expect(!pane.testTimersRunning, "maximized-away/hidden panes pause immediately")
+            pane.isHidden = false
+            pane.testRefreshVisibility()
+            expect(pane.testTimersRunning, "unhide restores timers")
+            window.orderOut(nil)
+            pane.testRefreshVisibility()
+            expect(!pane.testTimersRunning, "ordered-out windows pause their pane timers")
+            window.orderFront(nil)
+            pane.testRefreshVisibility()
+            for item in hidden { item.shutdown() }
+            expect(hidden.allSatisfy { !$0.testTimersRunning }, "shutdown cancels both timer registrations")
+            testRenderInterval = 16
         }
         // Return before exiting so clipboard restoration and shutdown run on failure.
         if failures > 0 {

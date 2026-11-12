@@ -409,6 +409,7 @@ private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
 
     window.miniaturize(nil)
     expect(waitUntil { window.isMiniaturized }, "terminal window can be minimized before a Dock reopen")
+    expect(!second.view.testTimersRunning, "minimization suspends render/blink timers")
     do {
         // The Dock delivers kAEReopenApplication to the application itself.
         let reopen = NSAppleEventDescriptor(eventClass: 0x61657674, eventID: 0x72617070,
@@ -421,6 +422,14 @@ private func testAppShell(_ model: AppModel, expect: (Bool, String) -> Void) {
     }
     if window.isMiniaturized { window.deminiaturize(nil) }
     settle()
+    expect(second.view.testTimersRunning, "Dock restoration restarts visible render/blink timers")
+    NSApp.hide(nil)
+    expect(waitUntil { NSApp.isHidden && !second.view.testTimersRunning },
+           "application hide suspends the surviving pane's timers")
+    NSApp.unhide(nil)
+    window.orderFront(nil)
+    expect(waitUntil { !NSApp.isHidden && second.view.testTimersRunning },
+           "application unhide restores the surviving pane's timers")
 
     let screen = window.screen!.visibleFrame
     window.setFrameOrigin(NSPoint(x: screen.minX + 40, y: screen.minY + 60))

@@ -4,9 +4,9 @@ import ObjectiveC
 
 // Replace only the C bridge: the tests run the production AppKit handlers.
 private var written: [UInt8] = []
-private let tabs = UnsafeMutablePointer<UInt8>.allocate(capacity: 8)
+private let tabs = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
 private var tabCount = 0
-private var scrollbars = [MosttyScrollbar](repeating: MosttyScrollbar(), count: 8)
+private var scrollbars = [MosttyScrollbar](repeating: MosttyScrollbar(), count: 64)
 private var writeTab: OpaquePointer?
 private var bracketedPaste = false
 private var applicationKeypad = false
@@ -81,7 +81,7 @@ func clipboard_test_written(_ buffer: UnsafeMutablePointer<UInt8>, _ capacity: I
 
 @_cdecl("mostty_tab_create")
 func stubCreate(_ width: UInt32, _ height: UInt32, _ scale: Float) -> OpaquePointer? {
-    precondition(tabCount < 8)
+    precondition(tabCount < 64)
     scrollbars[tabCount] = MosttyScrollbar(total: UInt64(height / 20), offset: 0, visible: UInt64(height / 20))
     defer { tabCount += 1 }
     return OpaquePointer(tabs.advanced(by: tabCount))
@@ -109,7 +109,8 @@ func stubCopyTabbarFont() -> UnsafeMutableRawPointer? {
     Unmanaged.passRetained(NSFont(name: "Menlo", size: 13)!).toOpaque()
 }
 @_cdecl("mostty_config_render_interval_ms")
-func stubRenderInterval() -> UInt32 { 16 }
+func stubRenderInterval() -> UInt32 { testRenderInterval }
+var testRenderInterval: UInt32 = 16
 @_cdecl("mostty_tab_apply_config")
 func stubApplyConfig(_ tab: OpaquePointer?) -> Bool { false }
 @_cdecl("mostty_render_cache_grace_ms")
