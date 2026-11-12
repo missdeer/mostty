@@ -17,6 +17,9 @@ blink_timer_armed: bool = false,
 // Only a successfully presented pane can reuse its displayed contents.
 pane_present_valid: bool = false,
 pane_present_size: [2]u32 = .{ 0, 0 },
+glyph_atlas_budget_bytes: u32 = 64 * 1024 * 1024,
+atlas_growths: u64 = 0,
+glyph_retry: bool = false,
 
 pub fn beginPaneSubmission(self: *RendererCommon, width: u32, height: u32, changed: bool) bool {
     if (self.surface_id == 0) return true;

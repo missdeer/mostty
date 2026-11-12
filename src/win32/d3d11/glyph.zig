@@ -44,10 +44,18 @@ const RunPending = struct {
 // per-cell generateGlyph path does only the cache lookup + miss work.
 // Recreates the cache if the cell size changed or the atlas texture
 // was reallocated.
-pub fn setupGlyphAtlas(self: anytype) gpu.AtlasFrame {
+pub fn setupGlyphAtlas(self: anytype, visible_cells: u32) gpu.AtlasFrame {
     const cs = self.font_service.cell_size_xy;
-    const tex_cell_count = gpu.getTextureMaxCellCount(cs);
+    const maximum = gpu.getTextureMaxCellCount(cs);
+    const cache_valid = if (self.glyph_cache_cell_size) |s| s.eql(cs) else false;
+    const previous: u32 = if (self.glyph_cache) |c| if (cache_valid) @intCast(c.nodes.len) else 0 else 0;
+    const pressure = if (self.glyph_cache) |c| c.frame_no_slot != 0 or c.frame_evictions != 0 else false;
+    const tex_cell_count: CellXY = .{
+        .x = maximum.x,
+        .y = @import("../atlas_budget.zig").rows(maximum.x, maximum.y, @as(u32, cs.x) * cs.y * 4, visible_cells, self.common.glyph_atlas_budget_bytes, previous, pressure),
+    };
     const tex_total: u32 = @as(u32, tex_cell_count.x) * @as(u32, tex_cell_count.y);
+    if (previous != 0 and tex_total > previous) self.common.atlas_growths +%= 1;
 
     const tex_pixel: CellXY = .{
         .x = tex_cell_count.x * cs.x,
@@ -55,7 +63,6 @@ pub fn setupGlyphAtlas(self: anytype) gpu.AtlasFrame {
     };
     const tex_retained = self.atlasEnsure(tex_pixel);
 
-    const cache_valid = if (self.glyph_cache_cell_size) |s| s.eql(cs) else false;
     self.glyph_cache_cell_size = cs;
 
     if (!tex_retained or !cache_valid) {
@@ -86,6 +93,7 @@ pub fn setupGlyphAtlas(self: anytype) gpu.AtlasFrame {
     }
 
     const cache = &self.glyph_cache.?;
+    cache.protect_current_frame = true;
     cache.beginFrame();
     return .{ .cache = cache, .tex_cell_count = tex_cell_count };
 }

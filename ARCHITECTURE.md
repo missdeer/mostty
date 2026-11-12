@@ -920,7 +920,13 @@ The completed grid texture is then copied to the swap-chain back buffer.
 
 `glyph_index_cache.zig` is a circular doubly-linked list + hashmap LRU keyed
 by `(codepoint, grapheme, half, style)`. Capacity equals atlas slots
-(`tex_cell_count.x * tex_cell_count.y`). Two important quirks:
+(`tex_cell_count.x * tex_cell_count.y`). `atlas_budget.zig` chooses an initial
+capacity from the visible grid, then doubles rows after eviction/saturation,
+bounded by the configured cache budget with a visible-frame correctness floor
+and the existing 4096-pixel dimension limit. Rebuilds advance `cache_gen`, force
+full grid drawing, and use each backend's existing safe texture retirement.
+`GlyphIndexCache` records hit/miss/eviction and frame saturation counts;
+`RendererCommon.atlas_growths` counts capacity increases. Two important quirks:
 
 - **Per-frame dampening**: a hit only promotes to MRU once per frame
   (`touched_frame` matches the renderer's `frame_id`). Without this, a
@@ -928,6 +934,10 @@ by `(codepoint, grapheme, half, style)`. Capacity equals atlas slots
 - **`touch()` is unconditional**: used by `generateWidePair` to make sure
   the right half can't evict the left half when both are reserved in the
   same call.
+- **Frame protection**: rendering cannot evict pending slots or ready slots
+  referenced by the current frame, including blank placeholders and run offsets.
+  Saturation requests another frame; eviction forces full grid drawing even
+  when a reused numeric glyph index compares equal in the CPU shadow.
 
 On a miss, `glyph.zig:generateGlyph` picks a path:
 

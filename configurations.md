@@ -4,6 +4,22 @@ Mostty is configured through a single plain-text config file on Windows and
 macOS. Both platforms also support the command-line overrides listed below.
 See [Platform support](#platform-support) for each key's applicability.
 
+## Windows glyph atlas budget
+
+`glyph-atlas-budget-bytes = 67108864` sets the per-pane Windows glyph cache
+budget in bytes (1,048,576 through 67,108,864). Invalid values emit a diagnostic
+and retain the preceding value or default. Hot reload applies at the next pane
+render. macOS accepts the setting but does not use a Windows glyph atlas.
+
+Atlases start at the larger of 1,024 slots or the visible grid plus 17 slots,
+rounded to atlas rows, and grow geometrically after eviction or saturation.
+The visible grid is a correctness floor: a very small configured budget may be
+exceeded to fit one frame, up to the existing 4096-pixel geometry limit. This
+avoids permanent blank cells when a frame contains many distinct glyphs.
+For 10×20-pixel cells and a 100×30 grid, the initial atlas is 4090×160,
+2,617,600 logical GPU bytes and 3,272 CPU cache nodes, versus 66,748,800 bytes
+and 83,436 nodes previously. These capacities are not process RSS measurements.
+
 ## File location
 
 ```
