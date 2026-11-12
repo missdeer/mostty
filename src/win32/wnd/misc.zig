@@ -849,11 +849,13 @@ test "continuation skips closed and idle panes and rearms the unvisited tail" {
     try std.testing.expectEqual(@as(u64, 30), window.diag_pty_bytes);
 }
 
-// PostMessage'd by the background-image decode worker. lParam owns a
-// `BgImageDecoded` heap struct (path + pixels). The renderer applies it if
-// the request id still matches the latest reload; either way we free here.
+// Notification only: the worker owns a bounded ready slot until taken here.
+// Accept legacy owning payloads for the existing native message test boundary.
 pub fn onAppBgImageDecoded(_: win32.HWND, _: win32.WPARAM, lparam: win32.LPARAM) ?win32.LRESULT {
-    const result: *Renderer.BgImageDecoded = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    const result: *Renderer.BgImageDecoded = if (lparam == 0)
+        global.renderer.takeDecodedBackgroundImage() orelse return 0
+    else
+        @ptrFromInt(@as(usize, @bitCast(lparam)));
     const gpa = global.gpa.allocator();
     defer result.deinit(gpa);
     global.renderer.applyDecodedBackgroundImage(result);

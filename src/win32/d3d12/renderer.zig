@@ -162,6 +162,7 @@ diag_rows_skipped: u64 = 0,
 
 background_image: BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
+bg_decoder: ?*bg_image.DecodeWorker = null,
 bg_image_allocator: ?std.mem.Allocator = null,
 bg_image_opacity: f32 = 1.0,
 bg_image_position: Config.BackgroundImagePosition = .center,
@@ -404,6 +405,7 @@ fn detectRemoteOrSoftware(adapter: ?*win32.IDXGIAdapter1) bool {
 }
 
 pub fn deinit(self: *D3d12Renderer) void {
+    bg_image.shutdown(self);
     self.tearing_down = true;
     // A removed device has stopped executing. Otherwise drain submitted work
     // even when presentation failed before releasing resources it can reference.
@@ -433,7 +435,6 @@ pub fn deinit(self: *D3d12Renderer) void {
     self.shadow_cells = &.{};
 
     self.background_image.release();
-    if (self.bg_image_allocator) |allocator| allocator.free(self.bg_image_path);
     self.atlas.release();
     self.cells.release();
     self.back_buffer.release();
@@ -762,8 +763,7 @@ pub fn backgroundImageRelease(self: *D3d12Renderer) void {
     self.refreshSharedDescriptors();
 }
 
-pub fn backgroundImageUpload(self: *D3d12Renderer, decoded: gpu.DecodedBackground) void {
-    self.backgroundImageRelease();
+pub fn backgroundImageUpload(self: *D3d12Renderer, decoded: gpu.DecodedBackground) bool {
     const resource = self.uploadTexture(
         .B8G8R8A8_UNORM,
         decoded.w,
@@ -772,10 +772,18 @@ pub fn backgroundImageUpload(self: *D3d12Renderer, decoded: gpu.DecodedBackgroun
         decoded.w * 4,
     ) orelse {
         log.warn("background-image: D3D12 upload failed", .{});
-        return;
+        return false;
     };
+    if (!self.settleBeforeRelease()) {
+        // The replacement may already be referenced by an attempted submit.
+        // Follow the image retirement path until teardown establishes safety.
+        self.retired_after_failure.append(std.heap.page_allocator, resource) catch @panic("D3D12 background retirement allocation failed");
+        return false;
+    }
+    self.background_image.release();
     self.background_image = .{ .resource = resource, .src_w = decoded.w, .src_h = decoded.h };
     self.refreshSharedDescriptors();
+    return true;
 }
 
 pub fn kittyImageUpload(
@@ -1566,7 +1574,6 @@ pub fn reloadBackgroundImage(
     cfg: *const Config,
     hwnd: win32.HWND,
 ) void {
-    self.bg_image_allocator = gpa;
     bg_image.reload(self, gpa, cfg, hwnd);
 }
 
@@ -1645,7 +1652,7 @@ test "D3D12 panes share device and pipelines but own command and cache resources
     try std.testing.expect(a.cells.resource != b.cells.resource);
     try std.testing.expect(a.atlas.resource != b.atlas.resource);
     var pixel = [_]u8{ 0, 64, 128, 255 };
-    parent.backgroundImageUpload(.{ .pixels = &pixel, .w = 1, .h = 1 });
+    try std.testing.expect(parent.backgroundImageUpload(.{ .pixels = &pixel, .w = 1, .h = 1 }));
     a.syncSurface(&parent);
     b.syncSurface(&parent);
     const retained = parent.background_image.resource.?;

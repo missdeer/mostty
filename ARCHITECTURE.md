@@ -138,7 +138,7 @@ Mostty is a single-process, multi-thread program. A Windows tab owns a SplitLayo
 | Reader thread (per pane) | Blocks in `ReadFile` on the ConPTY output pipe; memcpy's bytes into `Pane.pty_ring` (SPSC) and `PostMessageW`s a wake-up | Spawned in `child_process.startConPtyWin32` (before `CreatePseudoConsole`), joined in `tab_mgmt.releasePane` |
 | Input writer (per pane, both platforms) | Services the ordered `terminal/write_queue.zig` queue | UI enqueue never waits for PTY capacity; transport is canceled and joined before closing its handle |
 | Config-watch thread (1) | Blocks in `ReadDirectoryChangesW`, posts `WM_APP_CONFIG_CHANGED` | Detached |
-| Background-image decode (transient) | WIC decode of `background-image` on hot-reload or first paint | Detached, result posted via `WM_APP_BG_IMAGE_DECODED` |
+| Background-image decode | WIC decode of `background-image` on hot-reload or first paint | One owned worker; newest pending request and one ready result; joined on teardown |
 
 Ownership rules:
 
@@ -307,9 +307,10 @@ Handlers by family:
     and return 0.
   - `WM_APP_CONFIG_CHANGED` arms `TIMER_CONFIG_RELOAD` so multiple
     in-burst editor saves collapse into one reload (`CONFIG_RELOAD_DEBOUNCE_MS = 150`).
-  - `WM_APP_BG_IMAGE_DECODED` accepts the heap-owned decoded pixels from
-    the WIC worker, applies the `req_id` staleness check, and uploads to a
-    GPU texture.
+  - `WM_APP_BG_IMAGE_DECODED` is a coalesced notification with no owning
+    payload. The UI takes the worker's ready result, checks `req_id`, uploads
+    the replacement and frees the envelope. Failed decode/upload retains the
+    displayed wallpaper; explicit empty configuration clears it.
   - `WM_INITMENUPOPUP` (system menu) lazily builds the theme submenu —
     bucketed by first character (0-9, A-Z, #), capped at `MAX_THEME_ITEMS
     = 1024` so Ghostty's ~460 themes fit comfortably.
@@ -1062,10 +1063,14 @@ shift monospace alignment.
   exposes selection via Press and an independent Close Tab custom action,
   so closing does not require mouse hover or a visible close glyph.
 - **Background image**: `reloadBackgroundImage` increments
-  `bg_image_req_id` to stale any in-flight worker, then detaches
-  `decodeWorker` which calls `gpu.decodeBackground` (WIC), posts
-  `WM_APP_BG_IMAGE_DECODED` with a heap envelope; `applyDecoded` rechecks
-  `req_id` (drops stale results), then `gpu.uploadBackground`.
+  `bg_image_req_id` to stale active work. One owned worker retains at most
+  one latest pending path and one ready result; reload drops superseded work.
+  `gpu.decodeBackground` checks generation between WIC stages, before the large
+  pixel allocation and before publication. The UI takes ready ownership after
+  `WM_APP_BG_IMAGE_DECODED` (zero payload), and prepares a replacement before
+  releasing the displayed image. Teardown cancels queued/ready work and joins
+  the single active decode before destroying the worker. Individual WIC codec
+  calls cannot be interrupted; shutdown waits for that one call, not a backlog.
   `computeDest` runs each frame for fit (`none/stretch/contain/cover`) and
   position; the pixel shader composites OVER cell bg with premultiplied
   alpha, so opaque cells properly mask the image (matches Ghostty).

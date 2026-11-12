@@ -234,17 +234,15 @@ pub const BackgroundImage = struct {
 // halves are split so the WIC decode (which can take 100ms+ for a multi-MB
 // image) can run on a worker thread while only texture upload stays on the UI
 // thread with the D3D device.
-pub const DecodedBackground = struct {
-    pixels: []u8,
-    w: u32,
-    h: u32,
-};
+const background_decode = @import("../../renderer/background_decode.zig");
+pub const DecodedBackground = background_decode.Decoded;
 
 // Pure-CPU WIC decode. Does not touch D3D and does not initialize COM —
 // callers handle COM init for their own apartment (the decode worker thread
 // calls CoInitializeEx itself). Returns null on any failure; a bad path or
 // corrupt file must never crash the terminal.
-pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8) ?DecodedBackground {
+pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8, guard: background_decode.Guard) ?DecodedBackground {
+    if (!guard.valid()) return null;
     const wpath = std.unicode.utf8ToUtf16LeAllocZ(gpa, path) catch {
         log.warn("background-image: failed to encode path '{s}'", .{path});
         return null;
@@ -276,6 +274,7 @@ pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8) ?DecodedBackgr
         return null;
     }
     defer _ = decoder.?.IUnknown.Release();
+    if (!guard.valid()) return null;
 
     var frame: ?*win32.IWICBitmapFrameDecode = null;
     if (decoder.?.GetFrame(0, &frame) < 0) {
@@ -310,6 +309,9 @@ pub fn decodeBackground(gpa: std.mem.Allocator, path: []const u8) ?DecodedBackgr
         return null;
     }
 
+    // WIC's individual codec calls are not cancellable. Avoid the large pixel
+    // allocation/copy when a newer generation arrived during metadata decode.
+    if (!guard.valid()) return null;
     return copyBackgroundPixels(gpa, w, h, &converter.?.IWICBitmapSource);
 }
 
