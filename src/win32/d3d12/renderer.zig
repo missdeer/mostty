@@ -144,7 +144,7 @@ tearing_down: bool = false,
 retired_after_failure: std.ArrayListUnmanaged(*win32.ID3D12Resource) = .empty,
 font_service: *FontService,
 shadow_cells: []shader.Cell = &.{},
-glyph_cache_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
+glyph_cache_allocator: std.mem.Allocator = std.heap.page_allocator,
 glyph_cache: ?GlyphIndexCache = null,
 glyph_cache_cell_size: ?CellXY = null,
 cache_gen: u32 = 0,
@@ -426,10 +426,9 @@ pub fn deinit(self: *D3d12Renderer) void {
     for (self.retired_after_failure.items) |resource| _ = resource.IUnknown.Release();
     self.retired_after_failure.deinit(std.heap.page_allocator);
     if (self.glyph_cache) |*c| {
-        c.deinit(self.glyph_cache_arena.allocator());
+        c.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     std.heap.page_allocator.free(self.shadow_cells);
     self.shadow_cells = &.{};
 
@@ -462,10 +461,9 @@ pub fn deinit(self: *D3d12Renderer) void {
 pub fn onFontStateChanged(self: *D3d12Renderer) void {
     self.cache_gen +%= 1;
     if (self.glyph_cache) |*cache| {
-        cache.deinit(self.glyph_cache_arena.allocator());
+        cache.deinit(self.glyph_cache_allocator);
         self.glyph_cache = null;
     }
-    _ = self.glyph_cache_arena.reset(.free_all);
     self.glyph_cache_cell_size = null;
     self.grid_force_full = true;
 }

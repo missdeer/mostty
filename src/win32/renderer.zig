@@ -803,11 +803,11 @@ test "pane facade retains shared infrastructure but isolates caches and update g
     try std.testing.expect(a.glyph_texture.obj != b.glyph_texture.obj);
 
     const Cache = @import("glyph_index_cache.zig");
-    a.glyph_cache = try Cache.init(a.glyph_cache_arena.allocator(), 2);
-    b.glyph_cache = try Cache.init(b.glyph_cache_arena.allocator(), 2);
+    a.glyph_cache = try Cache.init(a.glyph_cache_allocator, 2);
+    b.glyph_cache = try Cache.init(b.glyph_cache_allocator, 2);
     const key: Cache.Key = .init('x', &.{}, .single, .regular);
-    const reserved = (try a.glyph_cache.?.reserve(a.glyph_cache_arena.allocator(), key)).newly_reserved_pending;
-    _ = try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key);
+    const reserved = (try a.glyph_cache.?.reserve(a.glyph_cache_allocator, key)).newly_reserved_pending;
+    _ = try b.glyph_cache.?.reserve(b.glyph_cache_allocator, key);
     var result: RasterResult = .{
         .surface_id = first_common.surface_id,
         .slot = reserved.index,
@@ -821,7 +821,7 @@ test "pane facade retains shared infrastructure but isolates caches and update g
         .failed = true,
     };
     try std.testing.expect(!second.applyGlyphResult(&result));
-    try std.testing.expect((try b.glyph_cache.?.reserve(b.glyph_cache_arena.allocator(), key)) == .already_pending);
+    try std.testing.expect((try b.glyph_cache.?.reserve(b.glyph_cache_allocator, key)) == .already_pending);
     try std.testing.expect(first.applyGlyphResult(&result));
 
     renderer.updateDpi(144);

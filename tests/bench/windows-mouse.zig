@@ -20,7 +20,8 @@ test "runtime benchmark native negative hover" {
     defer pane.session.deinit();
     pane.term = pane.session.term;
     try window.panes.append(B.allocator(), &pane);
-    pane.session.feed("a" ** 4096);
+    const output: [4096]u8 = @splat('a');
+    pane.session.feed(&output);
     for (0..B.warmup + B.samples) |sample| {
         clearUrlHover(window);
         runtime_bench_hover_probes = 0;
