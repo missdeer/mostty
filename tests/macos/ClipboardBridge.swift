@@ -123,6 +123,13 @@ func stubMetalDevice(_ tab: OpaquePointer?) -> UnsafeMutableRawPointer? {
     if device == nil { device = MTLCreateSystemDefaultDevice() }
     return device.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
 }
+@_cdecl("mostty_tab_metal_queue")
+func stubMetalQueue(_ tab: OpaquePointer?) -> UnsafeMutableRawPointer? {
+    if device == nil { device = MTLCreateSystemDefaultDevice() }
+    if sharedRenderQueue == nil { sharedRenderQueue = device?.makeCommandQueue() }
+    return sharedRenderQueue.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+}
+private var sharedRenderQueue: MTLCommandQueue?
 @_cdecl("mostty_tab_read")
 func stubRead(_ tab: OpaquePointer?, _ buffer: UnsafeMutablePointer<UInt8>?, _ capacity: Int) -> Int {
     // A live idle session times out; EOF would asynchronously close its pane.

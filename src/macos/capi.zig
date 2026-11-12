@@ -582,6 +582,13 @@ export fn mostty_tab_metal_device(tab_opt: ?*Tab) ?*anyopaque {
     return tab.renderer.metal.device.value;
 }
 
+/// Borrowed queue; the host retains it and submits presentation on the same
+/// ordered stream as Core rendering. No cross-queue target read/write race.
+export fn mostty_tab_metal_queue(tab_opt: ?*Tab) ?*anyopaque {
+    const tab = tab_opt orelse return null;
+    return tab.renderer.metal.queue.value;
+}
+
 /// Bare read from the PTY master, waiting up to ~50ms for data. Safe to call
 /// off the main thread; never touches VT state. Returns the byte count (>0), 0
 /// on EOF/hangup, -1 on error, or -2 on timeout (the caller should re-check its
@@ -986,6 +993,7 @@ test "bridge feeds content, renders a texture, and reports mode/selection" {
     defer mostty_tab_destroy(tab);
 
     try std.testing.expect(mostty_tab_metal_device(tab) != null);
+    try std.testing.expectEqual(tab.renderer.metal.queue.value, mostty_tab_metal_queue(tab).?);
     try std.testing.expect(mostty_tab_at_bottom(tab));
     try std.testing.expect(!mostty_tab_app_cursor_keys(tab));
     try std.testing.expect(!mostty_tab_app_keypad(tab));

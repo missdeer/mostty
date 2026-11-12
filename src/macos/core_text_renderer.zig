@@ -315,6 +315,7 @@ background_image: BackgroundImage = .{},
 trim_count: u64 = 0,
 trim_logical_bytes: u64 = 0,
 restore_ns: u64 = 0,
+last_rasterized_pixels: u64 = 0,
 
 pub fn init(options: Options) !CoreTextRenderer {
     if (options.font.size <= 0 or options.scale <= 0) return error.InvalidFontSize;
@@ -483,6 +484,9 @@ pub fn gridSize(self: *const CoreTextRenderer) GridModel.Size {
 }
 
 pub fn render(self: *CoreTextRenderer, session: *TerminalSession, cursor: ?Cursor) !RenderResult {
+    self.last_rasterized_pixels = 0;
+    self.metal.last_upload_bytes = 0;
+    self.metal.last_wait_ns = 0;
     if (self.pixels.len == 0) {
         const io = std.Io.Threaded.global_single_threaded.io();
         const start = std.Io.Timestamp.now(io, .awake).nanoseconds;
@@ -529,17 +533,30 @@ pub fn render(self: *CoreTextRenderer, session: *TerminalSession, cursor: ?Curso
     // their existing full-frame path until their own damage is tracked.
     const cacheable = self.background_image.image == null and self.kitty_images.placements.items.len == 0;
     if (!cacheable or !self.snapshot.matches(state, frame.cells)) {
-        self.snapshot.state = null;
-        // Graphemes borrow VT pages, and rasterize recolors cursor cells in
-        // place. Capture the unmodified content with owned grapheme storage.
-        const captured = if (cacheable) captured: {
-            self.snapshot.capture(self.allocator, frame.cells) catch break :captured false;
-            break :captured true;
-        } else false;
-        try self.rasterize(&frame, cursor, cursor_color);
-        try self.metal.render(self.pixels);
-        // Failed raster/upload work must never become a reusable frame.
-        if (captured) self.snapshot.state = state;
+        const damage = if (cacheable) self.snapshot.damage(state, frame.cells) else RowDamage{ .full = true };
+        if (damage) |rows| {
+            self.snapshot.state = null;
+            // Graphemes borrow VT pages, and rasterize recolors cursor cells in
+            // place. Capture the unmodified content with owned grapheme storage.
+            const captured = if (cacheable) captured: {
+                self.snapshot.capture(self.allocator, frame.cells) catch break :captured false;
+                break :captured true;
+            } else false;
+            const raster_rows = if (captured) rows else RowDamage{ .full = true };
+            try self.rasterize(&frame, cursor, cursor_color, raster_rows);
+            if (raster_rows.full) {
+                try self.metal.render(self.pixels);
+            } else {
+                const first_pixel_row = self.pixel_height - (raster_rows.last + 1) * self.metrics.cell_height;
+                try self.metal.renderRows(self.pixels, first_pixel_row, (raster_rows.last - raster_rows.first + 1) * self.metrics.cell_height);
+            }
+            // Failed raster/upload work must never become a reusable frame.
+            if (captured) self.snapshot.state = state;
+        } else {
+            // A blink phase change with no visible blinking text/cursor has
+            // no pixel damage, but its state can still be acknowledged.
+            self.snapshot.state = state;
+        }
     }
     return .{
         .cols = frame.cols,
@@ -553,6 +570,7 @@ fn rasterize(
     frame: *const GridModel.Frame,
     cursor: ?Cursor,
     cursor_color: ?GridModel.Rgba,
+    damage: RowDamage,
 ) !void {
     if (builtin.is_test) self.rasterized_frames += 1;
     const color_space = try graphics.ColorSpace.createDeviceRGB();
@@ -576,6 +594,10 @@ fn rasterize(
     ctx.setShouldSmoothFonts(context, true);
     ctx.setTextDrawingMode(context, .fill);
     ctx.setTextMatrix(context, graphics.AffineTransform.identity());
+    const first_pixel_row = if (damage.full) 0 else self.pixel_height - (damage.last + 1) * self.metrics.cell_height;
+    const pixel_rows = if (damage.full) self.pixel_height else (damage.last - damage.first + 1) * self.metrics.cell_height;
+    self.last_rasterized_pixels = @as(u64, self.pixel_width) * pixel_rows;
+    ctx.clipToRect(context, graphics.Rect.init(0, first_pixel_row, self.pixel_width, pixel_rows));
     const drawable = graphics.Rect.init(0, 0, self.pixel_width, self.pixel_height);
     if (self.background_image.image == null) {
         // Replace stale pixels including alpha, avoiding source-over blending
@@ -597,6 +619,7 @@ fn rasterize(
     self.has_text_blink = false;
     for (frame.cells) |*draw_cell| {
         self.has_text_blink = self.has_text_blink or (draw_cell.style.blink and !draw_cell.style.invisible);
+        if (!damage.full and (draw_cell.row < damage.first or draw_cell.row > damage.last)) continue;
         // The cursor block is drawn into the cell itself, which keeps it aligned
         // with the glyph grid. `cursor-color` / `cursor-text` win when set;
         // otherwise it falls back to inverse video. Either way it is an explicit
@@ -630,6 +653,7 @@ fn rasterize(
     while (cell_index < frame.cells.len) {
         var draw_cell = frame.cells[cell_index];
         cell_index += 1;
+        if (!damage.full and (draw_cell.row < damage.first or draw_cell.row > damage.last)) continue;
         if (!cell_style.textVisible(draw_cell.style, self.text_blink_on) or
             draw_cell.codepoint == @import("vt").kitty.graphics.unicode.placeholder) continue;
         // Ordinary spaces have no ink. Decorations still need the selected
@@ -672,6 +696,19 @@ fn rasterize(
     self.kitty_images.draw(context, .above_text, viewport, self.pixel_height);
 }
 
+const RowDamage = struct {
+    first: u32 = 0,
+    last: u32 = 0,
+    full: bool = false,
+
+    fn include(damage: *?RowDamage, row: u32) void {
+        if (damage.*) |*range| {
+            range.first = @min(range.first, row);
+            range.last = @max(range.last, row);
+        } else damage.* = .{ .first = row, .last = row };
+    }
+};
+
 const FrameSnapshot = struct {
     const State = struct {
         cols: u32,
@@ -696,12 +733,42 @@ const FrameSnapshot = struct {
     fn matches(self: *const FrameSnapshot, state: State, cells: []const GridModel.Cell) bool {
         if (!std.meta.eql(self.state orelse return false, state) or self.cells.items.len != cells.len) return false;
         for (self.cells.items, cells) |previous, current| {
-            if (previous.col != current.col or previous.row != current.row or
-                previous.width != current.width or previous.codepoint != current.codepoint or
-                !std.meta.eql(previous.style, current.style) or
-                !std.mem.eql(u21, previous.grapheme, current.grapheme)) return false;
+            if (!sameCell(previous, current)) return false;
         }
         return true;
+    }
+
+    fn sameCell(a: GridModel.Cell, b: GridModel.Cell) bool {
+        return a.col == b.col and a.row == b.row and a.width == b.width and
+            a.codepoint == b.codepoint and std.meta.eql(a.style, b.style) and
+            std.mem.eql(u21, a.grapheme, b.grapheme);
+    }
+
+    fn damage(self: *const FrameSnapshot, state: State, cells: []const GridModel.Cell) ?RowDamage {
+        const previous = self.state orelse return .{ .full = true };
+        if (state.rows == 0 or previous.cols != state.cols or previous.rows != state.rows or
+            !std.meta.eql(previous.background, state.background) or
+            !std.meta.eql(previous.paint, state.paint) or self.cells.items.len != cells.len) return .{ .full = true };
+        var result: ?RowDamage = null;
+        for (self.cells.items, cells) |old, current| {
+            if (!sameCell(old, current)) {
+                RowDamage.include(&result, old.row);
+                RowDamage.include(&result, current.row);
+            }
+        }
+        if (!std.meta.eql(previous.cursor, state.cursor) or !std.meta.eql(previous.cursor_color, state.cursor_color)) {
+            if (previous.cursor) |cursor| RowDamage.include(&result, cursor.row);
+            if (state.cursor) |cursor| RowDamage.include(&result, cursor.row);
+        }
+        if (previous.text_blink_on != state.text_blink_on) {
+            for (cells) |cell| if (cell.style.blink and !cell.style.invisible) RowDamage.include(&result, cell.row);
+        }
+        // Include neighboring rows conservatively for decorations/ink bounds.
+        if (result) |*range| {
+            range.first = @min(range.first -| 1, state.rows - 1);
+            range.last = @min(range.last +| 1, state.rows - 1);
+        }
+        return result;
     }
 
     fn capture(self: *FrameSnapshot, allocator: std.mem.Allocator, cells: []const GridModel.Cell) !void {
@@ -1042,7 +1109,67 @@ test "identical TUI redraws reuse the texture without hiding visual changes" {
     _ = try renderer.render(&session, null);
     try renderer.resize(400, 160, 1);
     _ = try renderer.render(&session, null);
-    try std.testing.expectEqual(previous + 5, renderer.rasterized_frames);
+    // A phase change without blinking cells/cursor does not change pixels.
+    try std.testing.expectEqual(previous + 4, renderer.rasterized_frames);
+}
+
+test "dirty rows match full raster for Unicode, cursor, blink, selection, palette and retries" {
+    var context: u8 = 0;
+    var session: TerminalSession = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 40, .rows = 12, .hooks = .{ .context = &context } });
+    defer session.deinit();
+    var renderer = try CoreTextRenderer.init(.{ .allocator = std.testing.allocator, .pixel_width = 640, .pixel_height = 480 });
+    defer renderer.deinit();
+    session.feed("plain\r\n\x1b[31;5mblink\x1b[0m");
+    _ = try renderer.render(&session, null);
+    const Case = struct { input: []const u8 = "", cursor: ?Cursor = null, blink: bool = true };
+    const cases = [_]Case{
+        .{ .input = "\x1b[6;3HX" },
+        .{ .input = "\x1b[3;1H\x1b[1;3;4m界é😀\x1b[0m" },
+        .{ .cursor = .{ .col = 2, .row = 4 } },
+        .{ .cursor = .{ .col = 3, .row = 5 } },
+        .{ .blink = false },
+        .{ .input = "\x1b[?5h", .blink = false },
+        .{ .input = "\x1b[?5l\x1b]4;1;rgb:12/34/56\x1b\\" },
+    };
+    for (cases, 0..) |case, index| {
+        session.feed(case.input);
+        renderer.text_blink_on = case.blink;
+        _ = try renderer.render(&session, case.cursor);
+        if (index == 0) {
+            const full_pixels = @as(u64, renderer.pixel_width) * renderer.pixel_height;
+            try std.testing.expect(renderer.last_rasterized_pixels > 0 and renderer.last_rasterized_pixels < full_pixels);
+            try std.testing.expect(renderer.metal.last_upload_bytes > 0 and renderer.metal.last_upload_bytes < full_pixels * 4);
+            std.debug.print("dirty_row raster_pixels={} upload_bytes={} full_pixels={}\n", .{ renderer.last_rasterized_pixels, renderer.metal.last_upload_bytes, full_pixels });
+        }
+        const incremental = try std.testing.allocator.dupe(u8, renderer.pixels);
+        defer std.testing.allocator.free(incremental);
+        renderer.snapshot.state = null;
+        _ = try renderer.render(&session, case.cursor);
+        try std.testing.expectEqualSlices(u8, incremental, renderer.pixels);
+    }
+    renderer.selection = .{ .start_col = 0, .end_col = 5, .start_row = 0, .end_row = 1 };
+    _ = try renderer.render(&session, null);
+    const selected = try std.testing.allocator.dupe(u8, renderer.pixels);
+    defer std.testing.allocator.free(selected);
+    renderer.snapshot.state = null;
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqualSlices(u8, selected, renderer.pixels);
+    _ = try renderer.render(&session, null);
+    try std.testing.expectEqual(@as(u64, 0), renderer.metal.last_upload_bytes);
+    try std.testing.expectEqual(@as(u64, 0), renderer.last_rasterized_pixels);
+
+    // A failed snapshot capture may draw, but must force a full retry.
+    renderer.snapshot.deinit(std.testing.allocator);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    renderer.allocator = failing.allocator();
+    defer renderer.allocator = std.testing.allocator;
+    _ = try renderer.render(&session, null);
+    try std.testing.expect(renderer.snapshot.state == null);
+    renderer.allocator = std.testing.allocator;
+    _ = try renderer.render(&session, null);
+    try std.testing.expect(renderer.snapshot.state != null);
+    try std.testing.expectEqualSlices(u8, selected, renderer.pixels);
 }
 
 test "CoreText and Metal render a resized styled terminal frame" {
