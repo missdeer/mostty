@@ -686,6 +686,9 @@ fn recordAndPresent(self: *VulkanRenderer, hwnd: win32.HWND, prepared: PreparedF
         self.test_fail_present = false;
         return error.DiagnosticPresentationFailure;
     }
+    // Glyph/image builders have copied CPU bytes into owned staging. Publish
+    // their batch before either native or bridge frame submission reads them.
+    try self.core.?.flushUploads();
     return switch (self.presentation) {
         .dcomp_bridge => self.recordAndPresentBridge(prepared),
         .native_wsi => self.recordAndPresentNative(hwnd, prepared),

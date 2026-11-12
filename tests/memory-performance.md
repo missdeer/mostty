@@ -63,3 +63,29 @@ The CPU bitmap and two Metal textures remain allocated while active. Apple
 Silicon CI is native evidence; Intel/AMD managed/private storage, physical
 footprint, bandwidth and p95/p99 input-to-present measurements require separate
 hardware runs and are not inferred from logical upload area.
+
+## Vulkan uploads (#20)
+
+Uploads copy caller bytes immediately into owned staging. At most 64 closed
+commands or 4 MiB trigger a batch; the remaining batch flushes before either
+native or bridge frame submission. Completed size classes reuse staging and
+command pools. A 64-request mock batch asserts one submit, partial timeline
+completion asserts no early reuse, and device-loss submission preserves pending
+ownership. Existing completion-prefix tests cover compaction and exact release.
+
+Admission counts actual Vulkan memory requirements before allocation: ordinary
+active/pending work is bounded by 16 MiB and 128 tasks. A larger single upload
+(maximum 1 GiB allocation) drains preceding work and remains exclusive until
+complete. It is never pooled. Idle reuse is separately capped at 8 MiB, 64 tasks,
+and 256 KiB per allocation. Driver metadata is outside these byte counts.
+Backpressure uses the existing bounded 10-second timeline wait; timeout enters
+the renderer failure path instead of allocating additional staging. Lifecycle
+retirement flushes pending commands and establishes idle/device loss before
+destroying referenced images; failed submissions block further uploads/draws.
+
+`Core.upload_stats` records request/byte counts, allocations, command pools,
+submits, reuse, backpressure, peak active/allocated bytes and maximum reclamation
+latency. Native cold CJK/emoji, image bursts, intentional GPU stalls, bridge and
+native pixel equivalence and small-upload p95/p99 latency are **blocked** here:
+the Linux workspace and hosted Windows tests do not provide an interactive
+Vulkan GPU. Mock counts prove the mechanism, not hardware performance gains.

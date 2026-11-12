@@ -96,6 +96,7 @@ pub const Buffer = struct {
     memory: vk.VkDeviceMemory = null,
     mapped: ?[*]u8 = null,
     size: usize = 0,
+    allocation_bytes: usize = 0,
 
     pub fn release(self: *Buffer, core: *Core) void {
         if (self.mapped != null) core.dp.unmap_memory(core.device, self.memory);
@@ -119,6 +120,9 @@ pub const Image = struct {
     }
 
     pub fn release(self: *Image, core: *Core) void {
+        // Pending command buffers may reference this handle even before they
+        // have a timeline value. Submit/drain them before destroying the image.
+        core.settlePendingUploads();
         if (self.view != null) core.dp.destroy_image_view(core.device, self.view, null);
         if (self.handle != null) core.dp.destroy_image(core.device, self.handle, null);
         if (self.memory != null) core.dp.free_memory(core.device, self.memory, null);
@@ -196,12 +200,45 @@ pub const Frame = struct {
     }
 };
 
-const Upload = struct { pool: vk.VkCommandPool, staging: Buffer, completion: u64 };
+const upload_budget = @import("../../renderer/upload_budget.zig");
+const Upload = struct {
+    pool: vk.VkCommandPool = null,
+    command: vk.VkCommandBuffer = null,
+    staging: Buffer = .{},
+    completion: u64 = 0,
+    queued_at_ns: i96 = 0,
+
+    fn release(self: *Upload, core: *Core) void {
+        self.staging.release(core);
+        if (self.pool != null) core.dp.destroy_command_pool(core.device, self.pool, null);
+        self.* = .{};
+    }
+};
+
+pub const UploadStats = struct {
+    requests: u64 = 0,
+    bytes: u64 = 0,
+    allocations: u64 = 0,
+    pools_created: u64 = 0,
+    reuses: u64 = 0,
+    submits: u64 = 0,
+    backpressure: u64 = 0,
+    peak_inflight_bytes: u64 = 0,
+    peak_allocated_bytes: u64 = 0,
+    max_reclaim_ns: u64 = 0,
+};
 
 pub const Core = struct {
     parent: ?*Core = null,
     uploads: std.ArrayListUnmanaged(Upload) = .empty,
     uploads_head: usize = 0,
+    pending_uploads: std.ArrayListUnmanaged(Upload) = .empty,
+    free_uploads: std.ArrayListUnmanaged(Upload) = .empty,
+    pending_upload_bytes: usize = 0,
+    inflight_upload_bytes: usize = 0,
+    pooled_upload_bytes: usize = 0,
+    upload_failed: bool = false,
+    upload_stats: UploadStats = .{},
     acquired_frame: ?usize = null,
     swapchain_render_finished: [max_swapchain_images]vk.VkSemaphore = @splat(null),
     presentation: Presentation,
@@ -434,6 +471,13 @@ pub const Core = struct {
         core.parent = null;
         core.uploads = .empty;
         core.uploads_head = 0;
+        core.pending_uploads = .empty;
+        core.free_uploads = .empty;
+        core.pending_upload_bytes = 0;
+        core.inflight_upload_bytes = 0;
+        core.pooled_upload_bytes = 0;
+        core.upload_failed = false;
+        core.upload_stats = .{};
         core.acquired_frame = null;
         core.swapchain_render_finished = @splat(null);
         core.presentation = presentation;
@@ -496,6 +540,8 @@ pub const Core = struct {
         const transparent = [_]u8{ 0, 0, 0, 0 };
         core.uploadImage(&core.transparent_image, 0, 0, 1, 1, &transparent, 4) catch
             return error.ResourceUnavailable;
+        // Pane cores borrow this image, so its upload must precede their work.
+        try core.flushUploads();
 
         const name = std.mem.sliceTo(&physical_properties.deviceName, 0);
         if (presentation == .native_wsi) {
@@ -529,6 +575,13 @@ pub const Core = struct {
         core.acquired_frame = null;
         core.uploads = .empty;
         core.uploads_head = 0;
+        core.pending_uploads = .empty;
+        core.free_uploads = .empty;
+        core.pending_upload_bytes = 0;
+        core.inflight_upload_bytes = 0;
+        core.pooled_upload_bytes = 0;
+        core.upload_failed = false;
+        core.upload_stats = .{};
         errdefer core.deinit();
         if (core.presentation == .native_wsi) {
             const info = vk.VkWin32SurfaceCreateInfoKHR{ .sType = vk.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, .pNext = null, .flags = 0, .hinstance = cHandleFromInt(vk.HINSTANCE, @intFromPtr(win32.GetModuleHandleW(null))), .hwnd = cHandleFromInt(vk.HWND, @intFromPtr(hwnd)) };
@@ -543,6 +596,7 @@ pub const Core = struct {
     }
 
     fn releaseCreated(self: *Core) void {
+        self.settlePendingUploads();
         self.releaseUploads();
         self.destroySwapchain();
         if (self.timeline != null) self.dp.destroy_semaphore(self.device, self.timeline, null);
@@ -579,11 +633,34 @@ pub const Core = struct {
     }
 
     fn releaseUploads(self: *Core) void {
-        for (self.uploads.items[self.uploads_head..]) |*pending| {
-            pending.staging.release(self);
-            self.dp.destroy_command_pool(self.device, pending.pool, null);
-        }
+        self.discardPendingUploads();
+        self.pending_uploads.deinit(std.heap.page_allocator);
+        self.pending_uploads = .empty;
+        for (self.uploads.items[self.uploads_head..]) |*pending| pending.release(self);
         self.uploads.deinit(std.heap.page_allocator);
+        self.uploads = .empty;
+        self.uploads_head = 0;
+        for (self.free_uploads.items) |*available| available.release(self);
+        self.free_uploads.deinit(std.heap.page_allocator);
+        self.free_uploads = .empty;
+        self.inflight_upload_bytes = 0;
+        self.pooled_upload_bytes = 0;
+    }
+
+    fn discardPendingUploads(self: *Core) void {
+        for (self.pending_uploads.items) |*pending| pending.release(self);
+        self.pending_uploads.clearRetainingCapacity();
+        self.pending_upload_bytes = 0;
+    }
+
+    fn settlePendingUploads(self: *Core) void {
+        if (self.pending_uploads.items.len == 0) return;
+        self.flushUploads() catch { self.upload_failed = true; };
+        const idle = self.dp.device_wait_idle(self.device);
+        if (idle != vk.VK_SUCCESS and idle != vk.VK_ERROR_DEVICE_LOST) @panic("Vulkan pending image retirement could not establish completion");
+        // A failed submit remains owned until this safe completion point.
+        self.discardPendingUploads();
+        self.collectUploads() catch { self.upload_failed = true; };
     }
 
     fn collectUploads(self: *Core) StartupError!void {
@@ -592,10 +669,97 @@ pub const Core = struct {
         if (self.dp.get_semaphore_counter_value(self.device, self.timeline, &completed) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
         @import("../../renderer/completion_prefix.zig").collect(Upload, &self.uploads.items, &self.uploads_head, completed, self, struct {
             fn release(core: *Core, pending: *Upload) void {
-                pending.staging.release(core);
-                core.dp.destroy_command_pool(core.device, pending.pool, null);
+                core.recycleUpload(pending);
             }
         }.release);
+    }
+
+    fn recycleUpload(self: *Core, upload: *Upload) void {
+        const bytes = upload.staging.allocation_bytes;
+        self.inflight_upload_bytes -= bytes;
+        if (upload.queued_at_ns != 0) {
+            const now = std.Io.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake).nanoseconds;
+            self.upload_stats.max_reclaim_ns = @max(self.upload_stats.max_reclaim_ns, @as(u64, @intCast(@max(0, now - upload.queued_at_ns))));
+        }
+        if (bytes <= upload_budget.pool_buffer_bytes and self.free_uploads.items.len < upload_budget.pool_tasks and
+            bytes <= upload_budget.pool_bytes -| self.pooled_upload_bytes)
+        {
+            self.free_uploads.append(std.heap.page_allocator, upload.*) catch {
+                upload.release(self);
+                return;
+            };
+            self.pooled_upload_bytes += bytes;
+            upload.* = .{};
+        } else upload.release(self);
+    }
+
+    fn admitUpload(self: *Core, bytes: usize) StartupError!void {
+        if (bytes > upload_budget.single_bytes) return error.ResourceUnavailable;
+        const live = self.inflight_upload_bytes + self.pending_upload_bytes;
+        const tasks = self.uploads.items.len - self.uploads_head + self.pending_uploads.items.len;
+        if (!upload_budget.mustDrain(live, tasks, bytes)) return;
+        self.upload_stats.backpressure += 1;
+        try self.flushUploads();
+        // Existing timeline waits are bounded (10 seconds). No further staging
+        // memory is allocated while a stalled GPU prevents this drain.
+        try self.waitTimeline(self.timeline, self.timeline_value);
+        try self.collectUploads();
+    }
+
+    fn acquireUpload(self: *Core, capacity: usize) StartupError!Upload {
+        for (self.free_uploads.items, 0..) |available, index| {
+            if (available.staging.size != capacity) continue;
+            var result = self.free_uploads.swapRemove(index);
+            self.pooled_upload_bytes -= result.staging.allocation_bytes;
+            errdefer result.release(self);
+            try self.admitUpload(result.staging.allocation_bytes);
+            result.completion = 0;
+            result.queued_at_ns = 0;
+            self.upload_stats.reuses += 1;
+            return result;
+        }
+        var result: Upload = .{};
+        errdefer result.release(self);
+        result.staging = try self.createHostBufferInternal(capacity, vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+        self.upload_stats.allocations += 1;
+        self.upload_stats.peak_allocated_bytes = @max(self.upload_stats.peak_allocated_bytes,
+            self.inflight_upload_bytes + self.pending_upload_bytes + self.pooled_upload_bytes + result.staging.allocation_bytes);
+        const info = vk.VkCommandPoolCreateInfo{ .sType = vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .pNext = null, .flags = vk.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = self.queue_family };
+        if (self.dp.create_command_pool(self.device, &info, null, &result.pool) != vk.VK_SUCCESS) return error.CommandResourcesUnavailable;
+        self.upload_stats.pools_created += 1;
+        const alloc = vk.VkCommandBufferAllocateInfo{ .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .pNext = null, .commandPool = result.pool, .level = vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+        if (self.dp.allocate_command_buffers(self.device, &alloc, &result.command) != vk.VK_SUCCESS) return error.CommandResourcesUnavailable;
+        return result;
+    }
+
+    pub fn flushUploads(self: *Core) StartupError!void {
+        if (self.upload_failed) return error.SynchronizationUnavailable;
+        if (self.pending_uploads.items.len == 0) return;
+        std.debug.assert(self.pending_uploads.items.len <= upload_budget.batch_tasks);
+        self.uploads.ensureUnusedCapacity(std.heap.page_allocator, self.pending_uploads.items.len) catch {
+            self.upload_failed = true;
+            return error.ResourceUnavailable;
+        };
+        var commands: [upload_budget.batch_tasks]vk.VkCommandBufferSubmitInfo = undefined;
+        for (self.pending_uploads.items, 0..) |upload, index| commands[index] = .{ .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .pNext = null, .commandBuffer = upload.command, .deviceMask = 0 };
+        const completion = self.timeline_value + 1;
+        const signal = vk.VkSemaphoreSubmitInfo{ .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .pNext = null, .semaphore = self.timeline, .value = completion, .stageMask = vk.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .deviceIndex = 0 };
+        const submit = vk.VkSubmitInfo2{ .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .pNext = null, .flags = 0, .waitSemaphoreInfoCount = 0, .pWaitSemaphoreInfos = null, .commandBufferInfoCount = @intCast(self.pending_uploads.items.len), .pCommandBufferInfos = &commands, .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal };
+        if (self.dp.queue_submit2(self.queue, 1, &submit, null) != vk.VK_SUCCESS) {
+            self.upload_failed = true;
+            return error.SynchronizationUnavailable;
+        }
+        self.timeline_value = completion;
+        const now = std.Io.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake).nanoseconds;
+        for (self.pending_uploads.items) |*upload| {
+            upload.completion = completion;
+            upload.queued_at_ns = now;
+        }
+        self.uploads.appendSliceAssumeCapacity(self.pending_uploads.items);
+        self.inflight_upload_bytes += self.pending_upload_bytes;
+        self.pending_upload_bytes = 0;
+        self.pending_uploads.clearRetainingCapacity();
+        self.upload_stats.submits += 1;
     }
 
     pub fn frameReady(self: *Core) StartupError!bool {
@@ -1136,6 +1300,7 @@ pub const Core = struct {
     }
 
     pub fn beginFrame(self: *Core) StartupError!*Frame {
+        try self.flushUploads();
         try self.collectUploads();
         const next = (self.frame_cursor + 1) % frame_count;
         var frame = &self.frames[next];
@@ -1206,6 +1371,10 @@ pub const Core = struct {
     }
 
     pub fn createHostBuffer(self: *Core, size: usize, usage: vk.VkBufferUsageFlags) StartupError!Buffer {
+        return self.createHostBufferInternal(size, usage, false);
+    }
+
+    fn createHostBufferInternal(self: *Core, size: usize, usage: vk.VkBufferUsageFlags, upload: bool) StartupError!Buffer {
         var result: Buffer = .{};
         errdefer result.release(self);
         const info = vk.VkBufferCreateInfo{
@@ -1222,6 +1391,7 @@ pub const Core = struct {
             return error.ResourceUnavailable;
         var requirements: vk.VkMemoryRequirements = undefined;
         self.dp.get_buffer_memory_requirements(self.device, result.handle, &requirements);
+        if (upload) try self.admitUpload(@intCast(requirements.size));
         const memory_type = self.findMemoryType(
             requirements.memoryTypeBits,
             vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1240,6 +1410,7 @@ pub const Core = struct {
             return error.ResourceUnavailable;
         result.mapped = @ptrCast(mapped.?);
         result.size = size;
+        result.allocation_bytes = @intCast(requirements.size);
         if (size != 0) @memset(result.mapped.?[0..size], 0);
         return result;
     }
@@ -1309,38 +1480,25 @@ pub const Core = struct {
         source: [*]const u8,
         source_pitch: u32,
     ) StartupError!void {
+        if (self.upload_failed) return error.SynchronizationUnavailable;
         try self.collectUploads();
         const row_bytes = @as(usize, width) * 4;
-        const byte_count = row_bytes * height;
-        var staging = try self.createHostBuffer(byte_count, vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-        errdefer staging.release(self);
+        const byte_count = std.math.mul(usize, row_bytes, height) catch return error.ResourceUnavailable;
+        if (source_pitch < row_bytes) return error.ResourceUnavailable;
+        const capacity = upload_budget.capacity(byte_count) catch return error.ResourceUnavailable;
+        self.pending_uploads.ensureUnusedCapacity(std.heap.page_allocator, 1) catch return error.ResourceUnavailable;
+        var upload = try self.acquireUpload(capacity);
+        var owned = true;
+        errdefer if (owned) upload.release(self);
         for (0..height) |row| {
             @memcpy(
-                staging.mapped.?[row * row_bytes ..][0..row_bytes],
+                upload.staging.mapped.?[row * row_bytes ..][0..row_bytes],
                 source[row * source_pitch ..][0..row_bytes],
             );
         }
-
-        var pool: vk.VkCommandPool = null;
-        const pool_info = vk.VkCommandPoolCreateInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            .pNext = null,
-            .flags = vk.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-            .queueFamilyIndex = self.queue_family,
-        };
-        if (self.dp.create_command_pool(self.device, &pool_info, null, &pool) != vk.VK_SUCCESS)
+        if (self.dp.reset_command_pool(self.device, upload.pool, 0) != vk.VK_SUCCESS)
             return error.CommandResourcesUnavailable;
-        errdefer self.dp.destroy_command_pool(self.device, pool, null);
-        var command: vk.VkCommandBuffer = null;
-        const alloc_info = vk.VkCommandBufferAllocateInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = null,
-            .commandPool = pool,
-            .level = vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
-        if (self.dp.allocate_command_buffers(self.device, &alloc_info, &command) != vk.VK_SUCCESS)
-            return error.CommandResourcesUnavailable;
+        const command = upload.command;
         const begin = vk.VkCommandBufferBeginInfo{
             .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .pNext = null,
@@ -1367,7 +1525,7 @@ pub const Core = struct {
             .imageOffset = .{ .x = @intCast(x), .y = @intCast(y), .z = 0 },
             .imageExtent = .{ .width = width, .height = height, .depth = 1 },
         };
-        self.dp.cmd_copy_buffer_to_image(command, staging.handle, image.handle, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        self.dp.cmd_copy_buffer_to_image(command, upload.staging.handle, image.handle, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         self.imageBarrier(
             command,
             image.handle,
@@ -1380,30 +1538,16 @@ pub const Core = struct {
         );
         if (self.dp.end_command_buffer(command) != vk.VK_SUCCESS)
             return error.CommandResourcesUnavailable;
-        const command_info = vk.VkCommandBufferSubmitInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-            .pNext = null,
-            .commandBuffer = command,
-            .deviceMask = 0,
-        };
-        self.uploads.ensureUnusedCapacity(std.heap.page_allocator, 1) catch return error.ResourceUnavailable;
-        const completion = self.timeline_value + 1;
-        const signal = vk.VkSemaphoreSubmitInfo{ .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .pNext = null, .semaphore = self.timeline, .value = completion, .stageMask = vk.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .deviceIndex = 0 };
-        const submit = vk.VkSubmitInfo2{
-            .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-            .pNext = null,
-            .flags = 0,
-            .waitSemaphoreInfoCount = 0,
-            .pWaitSemaphoreInfos = null,
-            .commandBufferInfoCount = 1,
-            .pCommandBufferInfos = &command_info,
-            .signalSemaphoreInfoCount = 1,
-            .pSignalSemaphoreInfos = &signal,
-        };
-        if (self.dp.queue_submit2(self.queue, 1, &submit, null) != vk.VK_SUCCESS) return error.SynchronizationUnavailable;
-        self.timeline_value = completion;
-        self.uploads.appendAssumeCapacity(.{ .pool = pool, .staging = staging, .completion = completion });
+        self.pending_uploads.appendAssumeCapacity(upload);
+        owned = false;
+        self.pending_upload_bytes += upload.staging.allocation_bytes;
+        self.upload_stats.requests += 1;
+        self.upload_stats.bytes += byte_count;
+        self.upload_stats.peak_inflight_bytes = @max(self.upload_stats.peak_inflight_bytes,
+            self.inflight_upload_bytes + self.pending_upload_bytes);
         image.layout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (self.pending_uploads.items.len >= upload_budget.batch_tasks or self.pending_upload_bytes >= upload_budget.batch_bytes)
+            try self.flushUploads();
     }
 
     pub fn imageBarrier(
@@ -1902,4 +2046,73 @@ test "native image layout transitions depend on the acquisition wait stage" {
         try std.testing.expectEqual(vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, Capture.barrier.newLayout);
         try std.testing.expectEqual(if (initialized) vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR else vk.VK_IMAGE_LAYOUT_UNDEFINED, Capture.barrier.oldLayout);
     }
+}
+
+test "upload batches retain incomplete resources and recycle only completed timelines" {
+    const Driver = struct {
+        var completed: u64 = 0;
+        var submissions: u32 = 0;
+        var commands: u32 = 0;
+        var fail: bool = false;
+        fn submit(_: vk.VkQueue, _: u32, info: [*c]const vk.VkSubmitInfo2, _: vk.VkFence) callconv(.winapi) vk.VkResult {
+            submissions += 1;
+            commands = info[0].commandBufferInfoCount;
+            return if (fail) vk.VK_ERROR_DEVICE_LOST else vk.VK_SUCCESS;
+        }
+        fn counter(_: vk.VkDevice, _: vk.VkSemaphore, value: [*c]u64) callconv(.winapi) vk.VkResult {
+            value[0] = completed;
+            return vk.VK_SUCCESS;
+        }
+    };
+    Driver.completed = 0;
+    Driver.submissions = 0;
+    Driver.fail = false;
+    var core: Core = undefined;
+    core.uploads = .empty;
+    core.uploads_head = 0;
+    core.pending_uploads = .empty;
+    core.free_uploads = .empty;
+    core.pending_upload_bytes = 0;
+    core.inflight_upload_bytes = 0;
+    core.pooled_upload_bytes = 0;
+    core.upload_failed = false;
+    core.upload_stats = .{};
+    core.device = null;
+    core.queue = null;
+    core.timeline = null;
+    core.timeline_value = 0;
+    core.dp.queue_submit2 = Driver.submit;
+    core.dp.get_semaphore_counter_value = Driver.counter;
+    defer core.releaseUploads();
+    for (0..upload_budget.batch_tasks) |_| {
+        try core.pending_uploads.append(std.heap.page_allocator, .{ .staging = .{ .size = 4096, .allocation_bytes = 4096 } });
+        core.pending_upload_bytes += 4096;
+    }
+    try core.flushUploads();
+    try std.testing.expectEqual(@as(u32, 1), Driver.submissions);
+    try std.testing.expectEqual(@as(u32, upload_budget.batch_tasks), Driver.commands);
+    try core.pending_uploads.append(std.heap.page_allocator, .{ .staging = .{ .size = 4096, .allocation_bytes = 4096 } });
+    core.pending_upload_bytes = 4096;
+    try core.flushUploads();
+    try core.collectUploads();
+    try std.testing.expectEqual(@as(usize, 0), core.free_uploads.items.len);
+    Driver.completed = 1;
+    try core.collectUploads();
+    try std.testing.expectEqual(@as(usize, upload_budget.batch_tasks), core.free_uploads.items.len);
+    try std.testing.expectEqual(@as(usize, 4096), core.inflight_upload_bytes);
+    var reused = try core.acquireUpload(4096);
+    defer reused.release(&core);
+    try std.testing.expectEqual(@as(u64, 1), core.upload_stats.reuses);
+    try std.testing.expectEqual(@as(u64, 2), core.uploads.items[core.uploads_head].completion);
+    Driver.completed = 2;
+    try core.collectUploads();
+    try std.testing.expectEqual(@as(usize, 0), core.inflight_upload_bytes);
+    // Failed submission preserves ownership until the caller establishes idle
+    // or device loss. It must not advertise a completion or permit more work.
+    try core.pending_uploads.append(std.heap.page_allocator, .{});
+    Driver.fail = true;
+    try std.testing.expectError(error.SynchronizationUnavailable, core.flushUploads());
+    try std.testing.expectEqual(@as(usize, 1), core.pending_uploads.items.len);
+    try std.testing.expectEqual(@as(u64, 2), core.timeline_value);
+    try std.testing.expectError(error.SynchronizationUnavailable, core.flushUploads());
 }
