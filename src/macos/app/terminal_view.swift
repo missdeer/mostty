@@ -185,6 +185,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
     func testBlinkTick() { blinkTick(now: blinkOn ? 0.54 : 0.01) }
     func testRenderTick() { renderTick() }
     var testTimersRunning: Bool { renderTimer != nil && blinkTimer != nil }
+    var testTimerState: String {
+        "alive=\(alive) closed=\(closed) visible=\(renderVisible) attached=\(window != nil) hidden=\(isHiddenOrHasHiddenAncestor) windowVisible=\(window?.isVisible ?? false) minimized=\(window?.isMiniaturized ?? false) appHidden=\(NSApp.isHidden) timers=\(testTimersRunning)"
+    }
     var testTimerCounts: (render: UInt64, blink: UInt64, registrations: UInt64) {
         (renderTimerCallbacks, blinkTimerCallbacks, renderTimerRegistrations)
     }
@@ -541,6 +544,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         setupIfNeeded()
         syncSurfaceIfNeeded()
         updateScroller()
+        // AppKit can attach a pane during layout before delivering its final
+        // visibility notifications. Reconcile after the container's reflow.
+        updateRenderVisibility()
     }
 
     private func startBlink() {

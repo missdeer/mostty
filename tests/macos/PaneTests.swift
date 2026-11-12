@@ -233,7 +233,7 @@ struct PaneTests {
         expect(panes.filter { $0 !== tab.activePane }.allSatisfy { !$0.view.testTimersRunning },
                "maximize pauses every detached pane's timers")
         expect(tab.activePane!.view.testTimersRunning,
-               "the visible maximized pane keeps its timers after the window's initial show")
+               "the visible maximized pane keeps its timers after the window's initial show: \(tab.activePane!.view.testTimerState)")
         model.focusDirection(0)
         expect(window.firstResponder === tab.activePane?.view, "directional focus while maximized updates firstResponder")
         model.togglePaneMaximize()
