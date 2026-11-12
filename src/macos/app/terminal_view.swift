@@ -238,8 +238,9 @@ final class MosttyTerminalView: NSView, NSTextInputClient {
         updateScroller()
         registerForDraggedTypes([.fileURL])
         for name in [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didBecomeKeyNotification, NSWindow.didBecomeMainNotification,
                      NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,
-                     NSApplication.didUnhideNotification] {
+                     NSApplication.didUnhideNotification, NSApplication.didBecomeActiveNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(renderVisibilityChanged(_:)),
                                                    name: name, object: nil)
         }
