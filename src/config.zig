@@ -259,6 +259,9 @@ background_image_repeat: bool = false,
 images_enabled: bool = true,
 // Windows per-pane atlas cache budget; visible-frame capacity is a floor.
 glyph_atlas_budget_bytes: u32 = 64 * 1024 * 1024,
+// Per-pane terminal storage limits, in bytes. Zero retains no history/images.
+scrollback_limit_bytes: u32 = 10_000_000,
+image_storage_limit_bytes: u32 = 320_000_000,
 // Scope of the input method remembered and restored across switches (Windows).
 smart_ime: SmartIme = .tab,
 
@@ -410,6 +413,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
     var background_image_repeat = defaults.background_image_repeat;
     var images_enabled = defaults.images_enabled;
     var glyph_atlas_budget_bytes = defaults.glyph_atlas_budget_bytes;
+    var scrollback_limit_bytes = defaults.scrollback_limit_bytes;
+    var image_storage_limit_bytes = defaults.image_storage_limit_bytes;
     var smart_ime = defaults.smart_ime;
     var maximize = defaults.maximize;
     var fullscreen = defaults.fullscreen;
@@ -591,6 +596,12 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
                 reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid background-blur '{s}' (expect true/false or 0..N)", .{ source_name, line_no, value });
                 continue;
             };
+        } else if (std.mem.eql(u8, key, "scrollback-limit-bytes") or std.mem.eql(u8, key, "image-storage-limit-bytes")) {
+            const n = std.fmt.parseInt(u32, value, 10) catch {
+                reportDiagnostic(&diagnostic_count, "config: {s}:{}: invalid {s} '{s}' (expect 0..4294967295 bytes)", .{ source_name, line_no, key, value });
+                continue;
+            };
+            if (std.mem.eql(u8, key, "scrollback-limit-bytes")) scrollback_limit_bytes = n else image_storage_limit_bytes = n;
         } else if (std.mem.eql(u8, key, "glyph-atlas-budget-bytes")) {
             const n = std.fmt.parseInt(u32, value, 10) catch 0;
             if (n < 1024 * 1024 or n > 64 * 1024 * 1024) {
@@ -719,6 +730,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, source_name: []const u8
         .background_image_repeat = background_image_repeat,
         .images_enabled = images_enabled,
         .glyph_atlas_budget_bytes = glyph_atlas_budget_bytes,
+        .scrollback_limit_bytes = scrollback_limit_bytes,
+        .image_storage_limit_bytes = image_storage_limit_bytes,
         .smart_ime = smart_ime,
         .maximize = maximize,
         .fullscreen = fullscreen,
@@ -1557,6 +1570,33 @@ test "parse reads color keys into theme" {
     try std.testing.expectEqual(@as(?u24, 0x445566), cfg.theme.selection_background);
     // Index not set by the theme keeps the standard xterm cube (non-zero).
     try std.testing.expectEqual(vt.color.default[16], cfg.theme.palette[16]);
+}
+
+test "terminal storage budgets preserve defaults and validate zero, bounds and invalid units" {
+    inline for (.{
+        .{ "scrollback-limit-bytes", "scrollback_limit_bytes", @as(u32, 10_000_000) },
+        .{ "image-storage-limit-bytes", "image_storage_limit_bytes", @as(u32, 320_000_000) },
+    }) |setting| {
+        var defaults = parse(std.testing.allocator, "", "test");
+        defer defaults.deinit();
+        try std.testing.expectEqual(setting[2], @field(defaults, setting[1]));
+        for ([_]u32{ 0, 1, std.math.maxInt(u32) }) |n| {
+            const text = try std.fmt.allocPrint(std.testing.allocator, "{s} = {d}", .{ setting[0], n });
+            defer std.testing.allocator.free(text);
+            var cfg = parse(std.testing.allocator, text, "test");
+            defer cfg.deinit();
+            try std.testing.expectEqual(n, @field(cfg, setting[1]));
+            try std.testing.expectEqual(@as(usize, 0), cfg.diagnostic_count);
+        }
+        for ([_][]const u8{ "-1", "4294967296", "8MiB", "invalid" }) |value| {
+            const text = try std.fmt.allocPrint(std.testing.allocator, "{s} = 8\n{s} = {s}", .{ setting[0], setting[0], value });
+            defer std.testing.allocator.free(text);
+            var cfg = parse(std.testing.allocator, text, "test");
+            defer cfg.deinit();
+            try std.testing.expectEqual(@as(u32, 8), @field(cfg, setting[1]));
+            try std.testing.expectEqual(@as(usize, 1), cfg.diagnostic_count);
+        }
+    }
 }
 
 test "glyph atlas budget validates bytes" {

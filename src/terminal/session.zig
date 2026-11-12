@@ -5,6 +5,7 @@ const vt = @import("vt");
 const InlineImages = @import("inline_images.zig");
 
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+pub const DEFAULT_IMAGE_STORAGE_BYTES: usize = 320_000_000;
 
 const SessionStream = vt.Stream(StreamHandler);
 const Terminal = vt.Terminal;
@@ -48,6 +49,8 @@ pub const Options = struct {
     rows: u16,
     hooks: Hooks,
     images_enabled: bool = true,
+    scrollback_limit_bytes: usize = DEFAULT_SCROLLBACK_BYTES,
+    image_storage_limit_bytes: usize = DEFAULT_IMAGE_STORAGE_BYTES,
 };
 
 terminal_allocator: std.mem.Allocator,
@@ -55,19 +58,23 @@ term: *vt.Terminal,
 stream: SessionStream,
 hooks: Hooks,
 images: InlineImages,
+image_storage_limit_bytes: usize,
 
 pub fn init(self: *Session, options: Options) !void {
     self.terminal_allocator = options.terminal_allocator;
 
     self.term = try options.terminal_allocator.create(vt.Terminal);
     errdefer options.terminal_allocator.destroy(self.term);
+    var terminal_options = terminalInitOptions(options.cols, options.rows);
+    terminal_options.max_scrollback_bytes = options.scrollback_limit_bytes;
     self.term.* = try vt.Terminal.init(
         options.io,
         options.terminal_allocator,
-        terminalInitOptions(options.cols, options.rows),
+        terminal_options,
     );
     self.hooks = options.hooks;
     self.images = .{ .allocator = options.stream_allocator, .enabled = options.images_enabled };
+    self.image_storage_limit_bytes = options.image_storage_limit_bytes;
     self.setImagesEnabled(options.images_enabled);
 
     var handler = self.term.vtHandler();
@@ -106,7 +113,13 @@ pub fn setImagesEnabled(self: *Session, enabled: bool) void {
         self.images.discard = true;
         self.images.discardTransfer();
     }
-    self.term.setKittyGraphicsSizeLimit(self.term.gpa(), if (enabled) 320 * 1000 * 1000 else 0);
+    self.term.setKittyGraphicsSizeLimit(self.term.gpa(), if (enabled) self.image_storage_limit_bytes else 0);
+}
+
+/// Lower limits evict through VT storage, which owns image placements/pins.
+pub fn configureImages(self: *Session, enabled: bool, storage_limit_bytes: usize) void {
+    self.image_storage_limit_bytes = storage_limit_bytes;
+    self.setImagesEnabled(enabled);
 }
 
 pub fn resize(self: *Session, cols: u16, rows: u16) !void {
@@ -444,6 +457,52 @@ test "fragmented ED3 retires history images and preserves active image anchors" 
     // Windows also needs a mutation signal to repaint the disappearing image.
     try std.testing.expect(screen.kitty_images.dirty != dirty);
     try std.testing.expect(screen.kitty_images.generation != generation);
+}
+
+test "zero scrollback retains the final ordered stream without accumulating history" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 3, .hooks = .{ .context = &context }, .scrollback_limit_bytes = 0 });
+    defer session.deinit();
+    for (0..1000) |_| session.feed("old-output\r\n");
+    session.feed("\r\nfinal-ordered-output");
+    const text = try session.term.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.trim(u8, text, "\n"), "final-ordered-output"));
+    try std.testing.expectEqual(@as(usize, 3), session.term.screens.active.pages.scrollbar().total);
+}
+
+test "image budgets bound each screen, lower immediately, and survive disable and new alternate screens" {
+    var context: u8 = 0;
+    var session: Session = undefined;
+    try session.init(.{ .io = std.testing.io, .terminal_allocator = std.testing.allocator, .stream_allocator = std.testing.allocator, .cols = 20, .rows = 3, .hooks = .{ .context = &context }, .image_storage_limit_bytes = 8 });
+    defer session.deinit();
+    const first = "\x1b_Ga=T,f=32,s=1,v=1,i=1;/wAA/w==\x1b\\";
+    const second = "\x1b_Ga=T,f=32,s=1,v=1,i=2;/wAA/w==\x1b\\";
+    const third = "\x1b_Ga=T,f=32,s=1,v=1,i=3;/wAA/w==\x1b\\";
+    session.feed(first);
+    session.feed(second);
+    session.feed(third);
+    try std.testing.expect(session.term.screens.active.kitty_images.total_bytes <= 8);
+    try std.testing.expect(session.term.screens.active.kitty_images.images.count() > 0);
+    session.feed("\x1b[?1049h");
+    try std.testing.expectEqual(@as(usize, 8), session.term.screens.active.kitty_images.total_limit);
+    session.feed(first);
+    session.configureImages(true, 0);
+    var screens = session.term.screens.all.iterator();
+    while (screens.next()) |entry| {
+        const storage = &entry.value.*.kitty_images;
+        try std.testing.expectEqual(@as(usize, 0), storage.total_bytes);
+        try std.testing.expectEqual(@as(u32, 0), storage.images.count());
+        try std.testing.expectEqual(@as(u32, 0), storage.placements.count());
+    }
+    session.configureImages(false, 4);
+    session.feed(first);
+    try std.testing.expectEqual(@as(u32, 0), session.term.screens.active.kitty_images.images.count());
+    session.configureImages(true, 4);
+    session.feed(second);
+    try std.testing.expectEqual(@as(u32, 1), session.term.screens.active.kitty_images.images.count());
+    try std.testing.expect(session.term.screens.active.kitty_images.total_bytes <= 4);
 }
 
 test "image disable suppresses all protocols and Sixel capability, including alternate screens" {

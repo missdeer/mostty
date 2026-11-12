@@ -618,6 +618,13 @@ use the same backend resource retirement as tab closure; macOS releases retained
 CoreGraphics images directly. This does not clear wallpaper. Re-enabling accepts
 new images and cannot resurrect deleted terminal images.
 
+`scrollback-limit-bytes` is passed to terminal creation only; reload does not
+mutate live history/pins. `image-storage-limit-bytes` is per screen and inherited
+by newly created alternate screens. Reload lowers limits through VT eviction
+and drops renderer copies in all panes, independently of visibility. Neither
+budget limits PTY transport or includes atlas/renderer/decoder memory; there is
+no process-wide cap.
+
 ---
 
 ## 6. Rendering Pipeline

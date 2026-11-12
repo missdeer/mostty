@@ -20,6 +20,36 @@ For 10×20-pixel cells and a 100×30 grid, the initial atlas is 4090×160,
 2,617,600 logical GPU bytes and 3,272 CPU cache nodes, versus 66,748,800 bytes
 and 83,436 nodes previously. These capacities are not process RSS measurements.
 
+## Terminal storage budgets
+
+Both platforms accept decimal byte counts from 0 through 4,294,967,295:
+
+```ini
+scrollback-limit-bytes = 10000000
+image-storage-limit-bytes = 320000000
+```
+
+These defaults preserve previous behavior. Zero scrollback retains no history;
+zero image storage retains no terminal images. Negative values, overflow and
+unit suffixes such as `8MiB` emit diagnostics and retain the previous/default
+value. These are storage limits, not allocations made when an empty pane opens.
+
+Scrollback limits apply when a pane is created. Reloading this value leaves
+existing history, viewport, selection and tracked pins intact. The alternate
+screen has no scrollback. PTY bytes are always processed in order; history is
+evicted by terminal storage rather than by dropping transport bytes.
+
+Image limits support hot reload: decreasing the limit immediately evicts through
+VT storage and clears renderer copies even in hidden panes. Increasing it permits
+new images and does not restore evicted ones. `images-enabled = false` overrides
+the budget; re-enabling restores the configured limit, accepting only new images.
+
+Limits are independent per pane. Image storage has one limit on each primary/
+alternate screen, so a pane can retain up to twice the configured image limit.
+There is no process-wide cap: size budgets for the number of panes you use.
+These values exclude decoder peaks, renderer image copies, glyph atlases and
+allocator overhead. Wallpaper is a separate setting.
+
 ## File location
 
 ```
