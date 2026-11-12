@@ -39,9 +39,8 @@ pub const WM_APP_CHILD_PROCESS_DATA = win32.WM_APP + 0;
 pub const WM_APP_CLOSE_TAB = win32.WM_APP + 1;
 pub const WM_APP_CONFIG_CHANGED = win32.WM_APP + 2;
 // Posted by the background-image decode worker to the UI thread once a new
-// image has been WIC-decoded to CPU pixels. lParam carries an owning pointer
-// to a `BgImageDecoded` heap struct; the handler uploads it to a GPU texture
-// and frees the struct + pixels.
+// image has been WIC-decoded to CPU pixels. lParam is zero; the worker owns
+// the ready result until the UI takes it. Notifications are coalesced.
 pub const WM_APP_BG_IMAGE_DECODED = win32.WM_APP + 3;
 // Posted by the glyph raster worker thread once a single-cell glyph has been
 // rendered to a CPU BGRA buffer. lParam carries an owning pointer to a

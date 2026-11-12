@@ -109,3 +109,28 @@ reload, attach/unhide/order-out/close and the existing failure-retry checks.
 These callback measurements are not OS wakeup, idle CPU or energy measurements.
 Real PTY output/EOF fairness has separate native tests; physical Mac energy and
 minimize/application-hide interaction measurements remain pending.
+
+## Wallpaper decode ownership (#22)
+
+All Windows backends share one lazily started, joined worker per process
+renderer. There is at most one active decode, one latest pending path and one
+ready result. Superseded pending/ready envelopes are freed immediately; active
+WIC work checks generation between codec stages, before pixel allocation and
+before publishing. Individual WIC calls are not interruptible, so close waits
+for one active decode. A coalesced zero-payload notification cannot leak an
+owning result after HWND destruction. Notification failure frees its result and
+allows same-path retry. Clearing configuration cancels late work. Scalar-only
+fit/position/opacity changes do not restart decoding; failed preparation keeps
+the displayed wallpaper until a successful replacement or explicit clear.
+
+Threaded tests exercise 100-request storms, partial progress, newest-result
+selection, clear/close with active work, decode failure, notification failure,
+and coalesced notifications with leak checks. Shared adapter tests cover stale
+results, failed GPU preparation, setup OOM/same-path retry eligibility, scalar
+changes and explicit clear. `Worker.stats()` exposes active/queued/ready counts,
+coalesced requests, completed decodes, ready pixel bytes and the largest decoded
+buffer. The latter excludes WIC-private scratch and pixels already taken by the
+UI; it is not a process RAM peak. WIC's existing 16384-square dimension cap
+still limits a returned BGRA buffer to 1 GiB. Native large-wallpaper storms,
+first/final image latency, CPU and sampled OS/GPU peaks remain pending hardware
+measurements; single-image loads are the control workload.

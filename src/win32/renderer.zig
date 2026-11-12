@@ -234,6 +234,7 @@ test "backend-dependent facade calls are ignored while no backend exists" {
     renderer.onFontStateChanged();
     renderer.reloadBackgroundImage(std.testing.allocator, undefined, undefined);
     renderer.applyDecodedBackgroundImage(undefined);
+    try std.testing.expect(renderer.takeDecodedBackgroundImage() == null);
     renderer.releaseKittyImagesForTab(0);
     try std.testing.expect(!renderer.applyGlyphResult(undefined));
 }
@@ -663,6 +664,13 @@ pub fn applyDecodedBackgroundImage(self: *Renderer, result: *const BgImageDecode
     }
 }
 
+pub fn takeDecodedBackgroundImage(self: *Renderer) ?*BgImageDecoded {
+    const active = if (self.backend) |*backend| backend else return null;
+    return switch (active.*) {
+        inline else => |*backend| if (backend.bg_decoder) |worker| worker.take() else null,
+    };
+}
+
 pub fn releaseKittyImagesForTab(self: *Renderer, tab_id: types.TabId) void {
     if (self.backend == null) return;
     switch (self.activeBackend().*) {
@@ -857,6 +865,8 @@ test "pane facade retains shared infrastructure but isolates caches and update g
     try std.testing.expectEqual(@as(f32, 0.5), a.bg_image_opacity);
     decoded.pixels = null;
     renderer.applyDecodedBackgroundImage(&decoded);
+    try std.testing.expect(parent.background_image.loaded()); // Failed decode keeps the displayed image.
+    parent.backgroundImageRelease(); // Explicit clear still releases each pane's retained reference on sync.
     try std.testing.expect(!parent.background_image.loaded());
     try std.testing.expect(a.background_image.texture == retained); // Pane retains its own COM reference.
     first.sync(&renderer, true);

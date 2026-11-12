@@ -325,6 +325,7 @@ diag_rows_skipped: u64 = 0,
 
 background_image: BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
+bg_decoder: ?*bg_image.DecodeWorker = null,
 bg_image_allocator: ?std.mem.Allocator = null,
 bg_image_generation: u32 = 0,
 bg_image_opacity: f32 = 1.0,
@@ -393,6 +394,7 @@ pub fn initSurface(parent: *Gl46Renderer, common: *RendererCommon) Gl46Renderer 
 }
 
 pub fn deinit(self: *Gl46Renderer) void {
+    bg_image.shutdown(self);
     if (self.initialized) {
         if (win32.wglMakeCurrent(self.dc.?, self.context.?) == 0) {
             fatal("wglMakeCurrent during teardown failed");
@@ -431,7 +433,6 @@ pub fn deinit(self: *Gl46Renderer) void {
         self.kitty_images.deinit(std.heap.page_allocator);
         self.releaseGlyphState();
     }
-    if (self.bg_image_allocator) |allocator| allocator.free(self.bg_image_path);
     self.* = undefined;
 }
 
@@ -1061,9 +1062,8 @@ pub fn backgroundImageRelease(self: *Gl46Renderer) void {
     if (self.parent == null) self.background_image.release();
 }
 
-pub fn backgroundImageUpload(self: *Gl46Renderer, decoded: gpu.DecodedBackground) void {
-    self.backgroundImageRelease();
-    const texture = createTexture(decoded.w, decoded.h, gl.RGBA8);
+pub fn backgroundImageUpload(self: *Gl46Renderer, decoded: gpu.DecodedBackground) bool {
+    const texture = tryCreateTexture(decoded.w, decoded.h, gl.RGBA8) orelse return false;
     gl.TextureSubImage2D(
         texture,
         0,
@@ -1075,7 +1075,14 @@ pub fn backgroundImageUpload(self: *Gl46Renderer, decoded: gpu.DecodedBackground
         gl.UNSIGNED_BYTE,
         decoded.pixels.ptr,
     );
+    if (gl.GetError() != gl.NO_ERROR) {
+        gl.DeleteTextures(1, @ptrCast(&texture));
+        log.warn("background-image: OpenGL upload failed; keeping previous image", .{});
+        return false;
+    }
+    self.backgroundImageRelease();
     self.background_image = .{ .texture = texture, .src_w = decoded.w, .src_h = decoded.h };
+    return true;
 }
 
 pub fn kittyImageUpload(
@@ -1101,14 +1108,22 @@ pub fn kittyImageUpload(
 }
 
 fn createTexture(width: u32, height: u32, internal_format: gl.@"enum") gl.uint {
+    return tryCreateTexture(width, height, internal_format) orelse fatal("OpenGL texture creation failed");
+}
+
+fn tryCreateTexture(width: u32, height: u32, internal_format: gl.@"enum") ?gl.uint {
     var texture: gl.uint = 0;
     gl.CreateTextures(gl.TEXTURE_2D, 1, @ptrCast(&texture));
-    if (texture == 0) fatal("glCreateTextures returned zero");
+    if (texture == 0) return null;
     gl.TextureStorage2D(texture, 1, internal_format, @intCast(width), @intCast(height));
     gl.TextureParameteri(texture, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.TextureParameteri(texture, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.TextureParameteri(texture, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.TextureParameteri(texture, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    if (gl.GetError() != gl.NO_ERROR) {
+        gl.DeleteTextures(1, @ptrCast(&texture));
+        return null;
+    }
     return texture;
 }
 
@@ -1587,7 +1602,6 @@ pub fn reloadBackgroundImage(
         self.recordFailure("initialize surface", err);
         return;
     };
-    self.bg_image_allocator = gpa;
     bg_image.reload(self, gpa, cfg, hwnd);
 }
 
@@ -1707,7 +1721,7 @@ test "OpenGL panes share context and programs but own DCs buffers and glyph cach
         try std.testing.expect(win32.wglGetCurrentDC() == a.dc);
         try std.testing.expect(parent.activate());
         var pixels = [_]u8{ 0, 64, 128, 255 };
-        parent.backgroundImageUpload(.{ .pixels = &pixels, .w = 1, .h = 1 });
+        try std.testing.expect(parent.backgroundImageUpload(.{ .pixels = &pixels, .w = 1, .h = 1 }));
         a.syncSurface(&parent);
         b.syncSurface(&parent);
         try std.testing.expect(a.background_image.texture == parent.background_image.texture and b.background_image.texture != 0);

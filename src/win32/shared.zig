@@ -17,7 +17,7 @@
 //!     service surface; only required when `glyph_handoff == .shared_surface`
 //!   * `cellsResize(count) bool` — (re)allocate the cell buffer, true if recreated
 //!   * `cellsUpload(first_cell, cells)` — write a contiguous cell range
-//!   * `backgroundImageUpload(decoded)`
+//!   * `backgroundImageUpload(decoded) bool` — retain the old image on failure
 //!
 //! plus the fields the shared layer reads directly: `common`, `font_service`,
 //! `shadow_cells`, `glyph_cache`, `glyph_cache_allocator`, `glyph_cache_cell_size`,

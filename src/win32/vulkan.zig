@@ -145,6 +145,7 @@ diag_rows_skipped: u64 = 0,
 
 background_image: BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
+bg_decoder: ?*bg_image.DecodeWorker = null,
 bg_image_allocator: ?std.mem.Allocator = null,
 bg_image_generation: u32 = 0,
 bg_image_opacity: f32 = 1.0,
@@ -273,6 +274,7 @@ fn initializeCandidates(context: anytype, comptime attempt_fn: anytype) StartupE
 }
 
 pub fn deinit(self: *VulkanRenderer) void {
+    bg_image.shutdown(self);
     if (self.core) |*core| {
         const idle = core.dp.device_wait_idle(core.device);
         if (idle != vk.VK_SUCCESS and idle != vk.VK_ERROR_DEVICE_LOST) fatal("surface teardown", error.SynchronizationUnavailable);
@@ -287,7 +289,6 @@ pub fn deinit(self: *VulkanRenderer) void {
         self.kitty_images.deinit(std.heap.page_allocator);
         self.releaseGlyphState();
     }
-    if (self.bg_image_allocator) |allocator| allocator.free(self.bg_image_path);
     self.* = undefined;
 }
 
@@ -398,20 +399,25 @@ pub fn backgroundImageRelease(self: *VulkanRenderer) void {
     }
 }
 
-pub fn backgroundImageUpload(self: *VulkanRenderer, decoded: gpu.DecodedBackground) void {
-    self.backgroundImageRelease();
-    if (self.pending_failure != null) return;
+pub fn backgroundImageUpload(self: *VulkanRenderer, decoded: gpu.DecodedBackground) bool {
+    if (self.pending_failure != null) return false;
     var core = &self.core.?;
     var image = core.createImage(decoded.w, decoded.h, vk.VK_FORMAT_B8G8R8A8_UNORM) catch |err| {
         self.recordFailure(.surface_resources, err);
-        return;
+        return false;
     };
     core.uploadImage(&image, 0, 0, decoded.w, decoded.h, decoded.pixels.ptr, decoded.w * 4) catch |err| {
         image.release(core);
         self.recordFailure(.surface_resources, err);
-        return;
+        return false;
     };
+    self.backgroundImageRelease();
+    if (self.pending_failure != null) {
+        image.release(core);
+        return false;
+    }
     self.background_image = .{ .owner = self, .image = image, .src_w = decoded.w, .src_h = decoded.h };
+    return true;
 }
 
 pub fn kittyImageUpload(self: *VulkanRenderer, width: u32, height: u32, rgba: []const u8) ?KittyImage {
@@ -1142,7 +1148,6 @@ pub fn reloadBackgroundImage(
 ) void {
     if (self.core == null) initializeWindow(self, hwnd) catch |err|
         fatal("background image startup", err);
-    self.bg_image_allocator = allocator;
     bg_image.reload(self, allocator, config, hwnd);
 }
 

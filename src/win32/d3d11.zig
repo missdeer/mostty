@@ -178,6 +178,8 @@ back_buffer_tex: ?*win32.ID3D11Texture2D = null,
 // no-op. bg_sampler (linear/clamp) is lazily created on first use.
 background_image: gpu.BackgroundImage = .{},
 bg_image_path: []const u8 = &.{},
+bg_decoder: ?*bg_image.DecodeWorker = null,
+bg_image_allocator: ?std.mem.Allocator = null,
 bg_image_opacity: f32 = 1.0,
 bg_image_position: Config.BackgroundImagePosition = .center,
 bg_image_fit: Config.BackgroundImageFit = .contain,
@@ -537,9 +539,12 @@ pub fn backgroundImageRelease(self: *D3d11Renderer) void {
     self.background_image.release();
 }
 
-pub fn backgroundImageUpload(self: *D3d11Renderer, decoded: gpu.DecodedBackground) void {
+pub fn backgroundImageUpload(self: *D3d11Renderer, decoded: gpu.DecodedBackground) bool {
+    const replacement = gpu.uploadBackground(self.device, decoded);
+    if (!replacement.loaded()) return false;
     self.background_image.release();
-    self.background_image = gpu.uploadBackground(self.device, decoded);
+    self.background_image = replacement;
+    return true;
 }
 
 pub fn kittyImageUpload(
@@ -562,6 +567,7 @@ pub fn onFontStateChanged(self: *D3d11Renderer) void {
 }
 
 pub fn deinit(self: *D3d11Renderer) void {
+    bg_image.shutdown(self);
     if (comptime debug_stats_enabled) {
         const total = self.stats.rows_uploaded + self.stats.rows_skipped;
         const skip_pct: f64 = if (total == 0) 0.0 else @as(f64, @floatFromInt(self.stats.rows_skipped)) / @as(f64, @floatFromInt(total)) * 100.0;
