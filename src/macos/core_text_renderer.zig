@@ -364,6 +364,12 @@ pub fn deinit(self: *CoreTextRenderer) void {
     self.* = undefined;
 }
 
+/// Does not touch the independently configured wallpaper or terminal state.
+pub fn releaseTerminalImages(self: *CoreTextRenderer) void {
+    self.kitty_images.deinit(self.allocator);
+    self.snapshot.state = null;
+}
+
 /// Adopt font settings from a reloaded config. Returns true when the cell
 /// metrics changed, so the caller knows the grid must be re-derived. Rebuilds
 /// everything before publishing so a failure leaves the current fonts intact.

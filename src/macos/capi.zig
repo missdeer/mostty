@@ -295,6 +295,7 @@ export fn mostty_tab_apply_config(tab_opt: ?*Tab) bool {
     const cfg = config();
     tab.renderer.paint = paintOptions(cfg);
     tab.pty.terminal.setImagesEnabled(cfg.images_enabled);
+    if (!cfg.images_enabled) tab.renderer.releaseTerminalImages();
     cfg.theme.rebaseTerminal(tab.pty.terminal.term);
     tab.renderer.background_image.reconfigure(allocator, runtimeIo(), backgroundOptions(cfg)) catch |err| {
         std.log.warn("background-image reload: {t}", .{err});
@@ -869,6 +870,37 @@ export fn mostty_tab_selection_text(tab_opt: ?*Tab, buf: [*]u8, cap: usize) usiz
 
 comptime {
     _ = @import("../input_capi.zig");
+}
+
+test "config disable releases a hidden tab's terminal image cache without another render" {
+    var cfg = Config.parse(allocator, "", "image-disable-test");
+    defer cfg.deinit();
+    const previous = loaded_config;
+    loaded_config = cfg;
+    defer loaded_config = previous;
+    const tab = mostty_tab_create(320, 160, 1) orelse return error.TabCreateFailed;
+    defer mostty_tab_destroy(tab);
+    const image = "\x1b_Ga=T,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\";
+    mostty_tab_feed(tab, image.ptr, image.len);
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
+    try std.testing.expectEqual(@as(u32, 1), tab.renderer.kitty_images.images.count());
+    loaded_config.?.images_enabled = false;
+    _ = mostty_tab_apply_config(tab);
+    // The host has detached this tab: there is deliberately no render call
+    // between configuration publication and these resource assertions.
+    try std.testing.expectEqual(@as(u32, 0), tab.renderer.kitty_images.images.count());
+    try std.testing.expectEqual(@as(usize, 0), tab.renderer.kitty_images.placements.items.len);
+    try std.testing.expectEqual(@as(u32, 0), tab.pty.terminal.term.screens.active.kitty_images.images.count());
+    try std.testing.expect(tab.renderer.snapshot.state == null);
+    loaded_config.?.images_enabled = true;
+    _ = mostty_tab_apply_config(tab);
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
+    try std.testing.expectEqual(@as(u32, 0), tab.renderer.kitty_images.images.count());
+    mostty_tab_feed(tab, image.ptr, image.len);
+    try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
+    try std.testing.expectEqual(@as(u32, 1), tab.renderer.kitty_images.images.count());
 }
 
 test "bridge feeds content, renders a texture, and reports mode/selection" {
