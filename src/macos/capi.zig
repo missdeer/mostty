@@ -875,7 +875,7 @@ comptime {
     _ = @import("../input_capi.zig");
 }
 
-test "config disable releases a hidden tab's terminal image cache without another render" {
+test "config disable and budget lowering release hidden terminal images without another render" {
     var cfg = Config.parse(allocator, "", "image-disable-test");
     defer cfg.deinit();
     const previous = loaded_config;
@@ -904,6 +904,10 @@ test "config disable releases a hidden tab's terminal image cache without anothe
     mostty_tab_feed(tab, image.ptr, image.len);
     try std.testing.expect(mostty_tab_render(tab, false, true, &cols, &rows) != null);
     try std.testing.expectEqual(@as(u32, 1), tab.renderer.kitty_images.images.count());
+    loaded_config.?.image_storage_limit_bytes = 0;
+    _ = mostty_tab_apply_config(tab);
+    try std.testing.expectEqual(@as(u32, 0), tab.renderer.kitty_images.images.count());
+    try std.testing.expectEqual(@as(usize, 0), tab.pty.terminal.term.screens.active.kitty_images.total_bytes);
 }
 
 test "bridge feeds content, renders a texture, and reports mode/selection" {
