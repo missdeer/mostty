@@ -259,6 +259,8 @@ fn createPane(window: *Window, owner: *state.Tab, id: types.TabId, launcher: ?*c
         .cols = cell_count.col,
         .rows = cell_count.row,
         .images_enabled = global.config.images_enabled,
+        .scrollback_limit_bytes = global.config.scrollback_limit_bytes,
+        .image_storage_limit_bytes = global.config.image_storage_limit_bytes,
         .hooks = .{
             .context = tab,
             .title_changed = onTitleChanged,

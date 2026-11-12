@@ -179,8 +179,9 @@ fn reloadConfig(hwnd: win32.HWND) void {
     if (global.window) |*window| {
         window.smart_ime = global.config.smart_ime;
         for (window.panes.items) |pane| {
-            pane.session.setImagesEnabled(global.config.images_enabled);
-            if (!global.config.images_enabled) {
+            const previous_image_limit = pane.session.image_storage_limit_bytes;
+            pane.session.configureImages(global.config.images_enabled, global.config.image_storage_limit_bytes);
+            if (!global.config.images_enabled or global.config.image_storage_limit_bytes < previous_image_limit) {
                 if (pane.renderer) |*renderer| renderer.releaseTerminalImages(pane.id);
                 global.renderer.releaseKittyImagesForTab(pane.id);
             }

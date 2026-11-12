@@ -56,6 +56,8 @@ pub const Options = struct {
     integration_resources: ?[]const u8 = null,
     hooks: ?Hooks = null,
     images_enabled: bool = true,
+    scrollback_limit_bytes: usize = TerminalSession.DEFAULT_SCROLLBACK_BYTES,
+    image_storage_limit_bytes: usize = TerminalSession.DEFAULT_IMAGE_STORAGE_BYTES,
     cell_width: u32 = 0,
     cell_height: u32 = 0,
 };
@@ -84,6 +86,8 @@ pub fn init(self: *PtySession, options: Options) !void {
         .cols = options.cols,
         .rows = options.rows,
         .images_enabled = options.images_enabled,
+        .scrollback_limit_bytes = options.scrollback_limit_bytes,
+        .image_storage_limit_bytes = options.image_storage_limit_bytes,
         .hooks = .{
             .context = self,
             .title_changed = onTitleChanged,

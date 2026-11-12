@@ -200,6 +200,8 @@ fn createTab(pixel_width: u32, pixel_height: u32, scale: f32, launcher: ?*const 
         .env = cfg.env,
         .shell_integration = cfg.shell_integration,
         .images_enabled = cfg.images_enabled,
+        .scrollback_limit_bytes = cfg.scrollback_limit_bytes,
+        .image_storage_limit_bytes = cfg.image_storage_limit_bytes,
         .cell_width = tab.renderer.metrics.cell_width,
         .cell_height = tab.renderer.metrics.cell_height,
         .hooks = .{ .context = tab, .clipboard_write = onClipboardWrite },
@@ -294,8 +296,9 @@ export fn mostty_tab_apply_config(tab_opt: ?*Tab) bool {
     tab.hover_cell = null;
     const cfg = config();
     tab.renderer.paint = paintOptions(cfg);
-    tab.pty.terminal.setImagesEnabled(cfg.images_enabled);
-    if (!cfg.images_enabled) tab.renderer.releaseTerminalImages();
+    const previous_image_limit = tab.pty.terminal.image_storage_limit_bytes;
+    tab.pty.terminal.configureImages(cfg.images_enabled, cfg.image_storage_limit_bytes);
+    if (!cfg.images_enabled or cfg.image_storage_limit_bytes < previous_image_limit) tab.renderer.releaseTerminalImages();
     cfg.theme.rebaseTerminal(tab.pty.terminal.term);
     tab.renderer.background_image.reconfigure(allocator, runtimeIo(), backgroundOptions(cfg)) catch |err| {
         std.log.warn("background-image reload: {t}", .{err});
