@@ -1525,7 +1525,18 @@ test "opaque footer scroll and clear pixels match full redraw under atlas evicti
             if (full[offset] > 128 or full[offset + 1] > 128 or full[offset + 2] > 128) light_pixels += 1;
         }
         try std.testing.expect(light_pixels > 100);
+        if (iteration == 47) {
+            try std.testing.expect(renderer.glyph_cache.?.evictions > 0);
+            // A full redraw using the same atlas could conceal stale glyph
+            // pixels. Rebuilding the atlas must also preserve the final image.
+            renderer.onFontStateChanged();
+            const fresh_atlas = glyph_mod.setupGlyphAtlas(&renderer, inputs.cell_count);
+            _ = cell_buffer.buildAndUpload(&renderer, session.term, prepared.shader_col, prepared.term_shader_row, fresh_atlas.tex_cell_count, fresh_atlas, false, null, null, null, 1, null);
+            grid.drawAndCopy(&renderer, inputs);
+            const fresh = try Readback.pixels(&renderer);
+            defer allocator.free(fresh);
+            try std.testing.expectEqualSlices(u8, full, fresh);
+        }
     }
     try std.testing.expect(partial_frames > 0);
-    try std.testing.expect(renderer.glyph_cache.?.evictions > 0);
 }
