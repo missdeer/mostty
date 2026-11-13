@@ -1409,3 +1409,123 @@ test "surviving pane restores draw topology after sibling teardown clears shared
     survivor.context.IAGetPrimitiveTopology(&topology);
     try std.testing.expectEqual(win32.D3D_PRIMITIVE_TOPOLOGY._PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, topology);
 }
+
+test "opaque footer scroll and clear pixels match full redraw under atlas eviction" {
+    const allocator = std.testing.allocator;
+    var common: RendererCommon = undefined;
+    var fonts = FontService.init(&common, 96, .{}, true, null);
+    defer fonts.deinit();
+    common.surface_id = 1;
+    common.tab_bar_height = 0;
+    // Keep the viewport correctness floor, but force reuse across history.
+    common.glyph_atlas_budget_bytes = 1;
+    var renderer = try D3d11Renderer.init(&common, &fonts, null);
+    defer renderer.deinit();
+    const cs = fonts.cell_size_xy;
+    const width: i32 = @as(i32, cs.x) * 40 + @as(i32, @intCast(scrollbarWidth(96)));
+    const height: i32 = @as(i32, cs.y) * 16;
+    const hwnd = win32.CreateWindowExW(.{ .NOREDIRECTIONBITMAP = 1 }, win32.L("STATIC"), win32.L("footer replay"), .{}, 0, 0, width, height, null, null, win32.GetModuleHandleW(null), null) orelse return error.TestWindowUnavailable;
+    defer _ = win32.DestroyWindow(hwnd);
+    var context: u8 = 0;
+    var session: @import("../terminal/session.zig") = undefined;
+    try session.init(.{ .io = std.Io.Threaded.global_single_threaded.io(), .terminal_allocator = allocator, .stream_allocator = allocator, .cols = 40, .rows = 16, .hooks = .{ .context = &context } });
+    defer session.deinit();
+
+    const Readback = struct {
+        fn pixels(self: *D3d11Renderer) ![]u8 {
+            var desc: win32.D3D11_TEXTURE2D_DESC = undefined;
+            self.grid_texture.?.GetDesc(&desc);
+            desc.Usage = .STAGING;
+            desc.BindFlags = .{};
+            desc.CPUAccessFlags = .{ .READ = 1 };
+            desc.MiscFlags = .{};
+            var staging: *win32.ID3D11Texture2D = undefined;
+            try std.testing.expect(self.device.CreateTexture2D(&desc, null, &staging) >= 0);
+            defer _ = staging.IUnknown.Release();
+            self.context.CopyResource(&staging.ID3D11Resource, &self.grid_texture.?.ID3D11Resource);
+            var mapped: win32.D3D11_MAPPED_SUBRESOURCE = undefined;
+            try std.testing.expect(self.context.Map(&staging.ID3D11Resource, 0, .READ, 0, &mapped) >= 0);
+            defer self.context.Unmap(&staging.ID3D11Resource, 0);
+            const row_bytes: usize = @as(usize, desc.Width) * 4;
+            const result = try std.testing.allocator.alloc(u8, row_bytes * desc.Height);
+            const source: [*]const u8 = @ptrCast(mapped.pData);
+            for (0..desc.Height) |row| @memcpy(result[row * row_bytes ..][0..row_bytes], source[row * mapped.RowPitch ..][0..row_bytes]);
+            return result;
+        }
+
+        fn footer(term: *vt.Terminal, expected: [3][]const u8) !void {
+            const screen = term.screens.active;
+            var rows = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
+            var row: usize = 0;
+            while (rows.next()) |pin| : (row += 1) {
+                if (row < 13 or row >= 16) continue;
+                const page = pin.node.page();
+                const cells = page.getCells(pin.rowAndCell().row);
+                const text = expected[row - 13];
+                for (cells, 0..) |cell, col| {
+                    const actual: u21 = switch (cell.content_tag) {
+                        .codepoint, .codepoint_grapheme => cell.content.codepoint.data,
+                        else => 0,
+                    };
+                    if (col < text.len) try std.testing.expectEqual(@as(u21, text[col]), actual) else try std.testing.expect(actual == 0 or actual == ' ');
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 16), row);
+        }
+    };
+
+    var partial_frames: usize = 0;
+    for (0..48) |iteration| {
+        // Representative inline-TUI operations: scroll transcript above a
+        // three-row composer, then erase/repaint a shrinking footer in sync.
+        session.feed("\x1b[?2026h\x1b[?25l\x1b[1;13r\x1b[13;1H\r\n");
+        for (0..20) |col| {
+            var encoded: [4]u8 = undefined;
+            const length = try std.unicode.utf8Encode(@intCast(0x4e00 + iteration * 20 + col), &encoded);
+            session.feed(encoded[0..length]);
+        }
+        session.feed("\x1b[r\x1b[14;1H\x1b[J");
+        const long = iteration % 2 == 0;
+        session.feed(if (long) "Working (12s)\r\n> longer input\r\nstatus: streaming" else "Idle\r\n> x\r\nready");
+        session.feed("\x1b[?2026l");
+        try Readback.footer(session.term, if (long) .{ "Working (12s)", "> longer input", "status: streaming" } else .{ "Idle", "> x", "ready" });
+
+        const prepared = prepareFrame(&renderer, hwnd, session.term, false) orelse return error.TestFrameUnavailable;
+        try std.testing.expectEqual(@as(u32, 40), prepared.shader_col);
+        try std.testing.expectEqual(@as(u32, 16), prepared.term_shader_row);
+        const build = cell_buffer.buildAndUpload(&renderer, session.term, prepared.shader_col, prepared.term_shader_row, prepared.tex_cell_count, prepared.atlas.?, false, null, null, null, 1, null);
+        if (!renderer.grid_force_full and build.dirty_min_row != null and
+            (build.dirty_min_row.? > 0 or build.dirty_max_row.? < prepared.term_shader_row - 1)) partial_frames += 1;
+        const inputs: grid.DrawInputs = .{
+            .client_w = prepared.client_w,
+            .client_h = prepared.client_h,
+            .tab_bar_h = 0,
+            .term_pixel_h = prepared.term_pixel_h,
+            .cell_w = cs.x,
+            .cell_h = cs.y,
+            .term_shader_row = prepared.term_shader_row,
+            .cell_count = prepared.shader_col * prepared.term_shader_row,
+            .dirty_min_row = build.dirty_min_row,
+            .dirty_max_row = build.dirty_max_row,
+            .resizing = false,
+            .kitty_images_present = false,
+        };
+        grid.drawAndCopy(&renderer, inputs);
+        const incremental = try Readback.pixels(&renderer);
+        defer allocator.free(incremental);
+        renderer.grid_force_full = true;
+        grid.drawAndCopy(&renderer, inputs);
+        const full = try Readback.pixels(&renderer);
+        defer allocator.free(full);
+        try std.testing.expectEqualSlices(u8, full, incremental);
+        // Comparing two blank targets would not verify any rendering.
+        var light_pixels: usize = 0;
+        var offset: usize = 0;
+        while (offset < full.len) : (offset += 4) {
+            if (full[offset] > 128 or full[offset + 1] > 128 or full[offset + 2] > 128) light_pixels += 1;
+        }
+        try std.testing.expect(light_pixels > 100);
+    }
+    try std.testing.expect(partial_frames > 0);
+    try std.testing.expect(renderer.glyph_cache.?.evictions > 0);
+}
