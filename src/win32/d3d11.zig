@@ -1424,7 +1424,7 @@ test "opaque footer scroll and clear pixels match full redraw under atlas evicti
     const cs = fonts.cell_size_xy;
     const width: i32 = @as(i32, cs.x) * 40 + @as(i32, @intCast(scrollbarWidth(96)));
     const height: i32 = @as(i32, cs.y) * 16;
-    const hwnd = win32.CreateWindowExW(.{ .NOREDIRECTIONBITMAP = 1 }, win32.L("STATIC"), win32.L("footer replay"), .{}, 0, 0, width, height, null, null, win32.GetModuleHandleW(null), null) orelse return error.TestWindowUnavailable;
+    const hwnd = win32.CreateWindowExW(.{ .NOREDIRECTIONBITMAP = 1 }, win32.L("STATIC"), win32.L("footer replay"), .{ .POPUP = 1 }, 0, 0, width, height, null, null, win32.GetModuleHandleW(null), null) orelse return error.TestWindowUnavailable;
     defer _ = win32.DestroyWindow(hwnd);
     var context: u8 = 0;
     var session: @import("../terminal/session.zig") = undefined;
