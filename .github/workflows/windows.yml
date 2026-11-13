@@ -27,33 +27,24 @@ jobs:
   conpty:
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Fetch pinned Microsoft ConPTY
-        shell: pwsh
+        shell: powershell
         run: |
-          $retry = @{ MaximumRetryCount = 3; RetryIntervalSec = 5; TimeoutSec = 120 }
-          $service = Invoke-RestMethod -Uri 'https://api.nuget.org/v3/index.json' @retry
-          $base = ($service.resources | Where-Object { $_.'@type' -eq 'PackageBaseAddress/3.0.0' } | Select-Object -First 1).'@id'
-          if (-not $base) { throw 'NuGet package content endpoint not found' }
-          $id = 'microsoft.windows.console.conpty'
-          $version = $env:MOSTTY_CONPTY_VERSION
-          if (-not $version) { throw 'Pinned Microsoft ConPTY version missing' }
-          $url = "$base$id/$version/$id.$version.nupkg"
-          Write-Host "Downloading Microsoft ConPTY $version from $url"
-          Invoke-WebRequest -Uri $url -OutFile conpty.nupkg @retry
-          Expand-Archive -Path conpty.nupkg -DestinationPath conpty-package
-          New-Item -ItemType Directory -Path conpty | Out-Null
-          Copy-Item conpty-package/runtimes/win-x64/native/conpty.dll conpty/
-          Copy-Item conpty-package/build/native/runtimes/x64/OpenConsole.exe conpty/
-          $hashes = @{}
-          foreach ($file in Get-ChildItem conpty -File) {
-            $signature = Get-AuthenticodeSignature $file.FullName
-            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
-              throw "Invalid Microsoft signature on $($file.Name): $($signature.Status)"
-            }
-            $hashes[$file.Name] = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
+          if (-not $env:MOSTTY_CONPTY_VERSION) { throw 'Pinned Microsoft ConPTY version missing' }
+          & ./tools/download-conpty.ps1 -Version $env:MOSTTY_CONPTY_VERSION -Destination ./conpty
+
+      - name: Check latest stable downloader and existing-directory update
+        shell: powershell
+        run: |
+          & ./tools/download-conpty.ps1 -Destination ./tmp/conpty-latest
+          $version = (Get-Content ./tmp/conpty-latest/manifest.json -Raw | ConvertFrom-Json).version
+          Set-Content ./tmp/conpty-latest/keep.txt 'preserve-existing-files'
+          & ./tools/download-conpty.ps1 -Version $version -Destination './tmp/conpty-latest/'
+          if ((Get-Content ./tmp/conpty-latest/keep.txt -Raw).Trim() -ne 'preserve-existing-files') {
+            throw 'Updating ConPTY lost an existing file'
           }
-          $manifest = @{ version = $version; source = $url; package_sha256 = (Get-FileHash conpty.nupkg -Algorithm SHA256).Hash; files = $hashes }
-          $manifest | ConvertTo-Json -Depth 3 | Tee-Object -FilePath conpty/manifest.json
 
       - uses: actions/upload-artifact@v4
         with:
