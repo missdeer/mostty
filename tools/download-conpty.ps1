@@ -117,7 +117,7 @@ try {
         catch { Write-Warning "Installed successfully; close programs using the old files and remove backup: $backup" }
     }
     Write-Host "Installed Microsoft ConPTY $Version in $Destination"
-    Write-Host 'Open a new Mostty terminal to use the new ConPTY. Existing terminals retain their current version.'
+    Write-Host 'Restart Mostty to use the downloaded ConPTY. Existing terminals are not switched automatically.'
 } finally {
     [Net.ServicePointManager]::SecurityProtocol = $oldTls
     # Never discard a backup if replacement or rollback could not finish.
