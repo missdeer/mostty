@@ -579,7 +579,9 @@ pub fn render(self: *CoreTextRenderer, session: *TerminalSession, cursor: ?Curso
             if (raster_rows.full) {
                 try self.metal.render(self.pixels);
             } else {
-                const first_pixel_row = self.pixel_height - (raster_rows.last + 1) * self.metrics.cell_height;
+                // CoreGraphics uses bottom-left drawing coordinates, but its
+                // bitmap memory (and the Metal source) starts at the top row.
+                const first_pixel_row = raster_rows.first * self.metrics.cell_height;
                 try self.metal.renderRows(self.pixels, first_pixel_row, (raster_rows.last - raster_rows.first + 1) * self.metrics.cell_height);
             }
             // Failed raster/upload work must never become a reusable frame.
@@ -1176,6 +1178,21 @@ test "dirty rows match full raster for Unicode, cursor, blink, selection, palett
         }
         const incremental = try std.testing.allocator.dupe(u8, renderer.pixels);
         defer std.testing.allocator.free(incremental);
+        // Partial uploads must leave the GPU source identical to the CPU
+        // bitmap, including rows outside the CoreGraphics clip.
+        const uploaded = try std.testing.allocator.alloc(u8, renderer.pixels.len);
+        defer std.testing.allocator.free(uploaded);
+        const Region = extern struct {
+            origin: extern struct { x: c_ulong = 0, y: c_ulong = 0, z: c_ulong = 0 } = .{},
+            size: extern struct { width: c_ulong, height: c_ulong, depth: c_ulong = 1 },
+        };
+        renderer.metal.source.?.msgSend(void, @import("objc.zig").sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), .{
+            uploaded.ptr,
+            @as(c_ulong, renderer.pixel_width * 4),
+            Region{ .size = .{ .width = renderer.pixel_width, .height = renderer.pixel_height } },
+            @as(c_ulong, 0),
+        });
+        try std.testing.expectEqualSlices(u8, renderer.pixels, uploaded);
         renderer.snapshot.state = null;
         _ = try renderer.render(&session, case.cursor);
         try std.testing.expectEqualSlices(u8, incremental, renderer.pixels);
